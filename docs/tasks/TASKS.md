@@ -11,6 +11,6 @@
 - [x] Implement artifacts list/get
 - [x] Implement cancel/rerun (no confirmation) + `--dry-run`
 - [x] Implement `smoke-test` command (non-destructive)
-- [ ] Write `README.md` (security notes + examples)
+- [x] Write `README.md` (security notes + examples)
 - [ ] Run `cargo fmt` + `cargo test` and fix issues
 - [x] Implement login command (prompt/--password-stdin, store creds+cookies)
