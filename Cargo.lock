@@ -417,7 +417,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "fj-ex"
+name = "flate2"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide",
+]
+
+[[package]]
+name = "forgejo-cli-ex"
 version = "0.1.0"
 dependencies = [
  "clap",
@@ -437,16 +447,6 @@ dependencies = [
  "tokio",
  "url",
  "urlencoding",
-]
-
-[[package]]
-name = "flate2"
-version = "1.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
-dependencies = [
- "crc32fast",
- "miniz_oxide",
 ]
 
 [[package]]

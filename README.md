@@ -26,6 +26,15 @@ If `--host` is omitted, `fj-ex` attempts to infer it from the current repo’s g
 
 - `FJ_FALLBACK_HOST`
 
+## Install (cargo)
+
+Once published to crates.io:
+
+```powershell
+cargo install forgejo-cli-ex
+fj-ex --help
+```
+
 ## Login
 
 Login validates the UI session and persists creds + cookies.

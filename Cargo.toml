@@ -1,7 +1,11 @@
 [package]
-name = "fj-ex"
+name = "forgejo-cli-ex"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "fj-ex"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.34", features = ["derive"] }
