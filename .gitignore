@@ -13,3 +13,8 @@ target/
 # OS
 Thumbs.db
 Desktop.ini
+
+
+# Added by cargo
+
+/target
