@@ -20,3 +20,11 @@
 - [x] Build `fj-ex` and run `fj-ex smoke-test` against `C:\Users\Jonas\repos\work\dccx\src\pandocs`
 - [x] Run non-destructive `actions` commands against pandocs Forgejo remote (workflows/runs/jobs/logs/artifacts)
 - [x] Verify destructive endpoints are only hit with `--dry-run` (cancel/rerun)
+
+## Auth + credential management
+
+- [ ] Add `auth` command group (`fj-ex auth login|status|...`) and keep `fj-ex login` as a legacy alias
+- [ ] Implement `fj-ex auth status` that checks against the host (session probe + optional relogin)
+- [ ] Implement credential CRUD commands (list/show/logout) for multiple hosts (from `ui-creds.json`)
+- [ ] Update error messages + README examples to reference `fj-ex auth login`
+- [ ] Run `cargo fmt` + `cargo test`
