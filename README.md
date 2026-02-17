@@ -2,7 +2,7 @@
 
 `fj-ex` is a small Rust CLI that polyfills missing Forgejo CLI (`fj`) functionality by calling Forgejo **web UI endpoints** (a “UI API”), mainly for Forgejo Actions (full logs, artifacts, cancel/rerun, …).
 
-This is a port of the PowerShell PoC in `C:\Users\Jonas\repos\work\dccx\src\pandocs\Scripts\Forgejo`.
+This is a port of a PowerShell PoC (not included in this repo; originally in a `Scripts/Forgejo` folder).
 
 ## Security notes
 
