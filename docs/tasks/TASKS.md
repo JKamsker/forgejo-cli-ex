@@ -28,3 +28,10 @@
 - [x] Implement credential CRUD commands (list/show/logout) for multiple hosts (from `ui-creds.json`)
 - [x] Update error messages + README examples to reference `fj-ex auth login`
 - [x] Run `cargo fmt` + `cargo test`
+
+## GitHub + CI/CD
+
+- [ ] Create GitHub repo `forgejo-cli-ex` via `gh` and push current `master`
+- [ ] Add GitHub Actions CI workflow (fmt + test)
+- [ ] Add GitHub Actions release workflow (build + upload Windows/Linux/macOS artifacts on tag)
+- [ ] Push workflows to GitHub and verify they appear in `gh workflow list`
