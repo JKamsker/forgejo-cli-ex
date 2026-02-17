@@ -9,10 +9,32 @@ pub struct App {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    Login(LoginCommand),
+    /// Authentication and credential management (UI session cookies + plaintext creds).
+    #[command(subcommand)]
+    Auth(AuthCommand),
     Actions(ActionsCommand),
     #[command(name = "smoke-test")]
     SmokeTest(SmokeTestCommand),
+    /// Legacy alias for `fj-ex auth login`.
+    #[command(hide = true)]
+    Login(LoginCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AuthCommand {
+    /// Log in to an instance (stores plaintext creds + UI session cookies).
+    Login(LoginCommand),
+    /// Check login status against the host.
+    Status(AuthStatusCommand),
+    /// List all stored logins.
+    List(AuthListCommand),
+    /// Show stored login info for a host.
+    Show(AuthShowCommand),
+    /// Delete stored login info for a host.
+    Logout(AuthLogoutCommand),
+    /// Clear stored UI cookies for a host (keeps creds).
+    #[command(name = "clear-cookies")]
+    ClearCookies(AuthClearCookiesCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -50,6 +72,53 @@ pub struct LoginCommand {
     /// Read password from stdin (first line; falls back to prompt if empty)
     #[arg(long, conflicts_with = "password")]
     pub password_stdin: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AuthStatusCommand {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    /// Don't re-login if the cookie session is invalid.
+    #[arg(long)]
+    pub no_relogin: bool,
+
+    /// Print JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AuthListCommand {
+    /// Print JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AuthShowCommand {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    /// Print JSON output.
+    #[arg(long)]
+    pub json: bool,
+
+    /// UNSAFE: include the plaintext password in output.
+    #[arg(long)]
+    pub unsafe_show_password: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AuthLogoutCommand {
+    #[command(flatten)]
+    pub target: TargetArgs,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AuthClearCookiesCommand {
+    #[command(flatten)]
+    pub target: TargetArgs,
 }
 
 #[derive(Args, Debug, Clone)]

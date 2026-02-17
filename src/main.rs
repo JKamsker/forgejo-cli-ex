@@ -1,4 +1,5 @@
 mod actions;
+mod auth;
 mod cli;
 mod html;
 mod login;
@@ -15,7 +16,8 @@ use cli::{App, Command};
 async fn main() -> eyre::Result<()> {
     let app = App::parse();
     match app.command {
-        Command::Login(args) => login::run(args).await,
+        Command::Auth(args) => auth::run(args).await,
+        Command::Login(args) => auth::run_legacy_login(args).await,
         Command::Actions(args) => actions::run(args).await,
         Command::SmokeTest(args) => smoke_test::run(args).await,
     }
