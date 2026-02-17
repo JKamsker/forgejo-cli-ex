@@ -3,6 +3,7 @@ mod cli;
 mod login;
 mod smoke_test;
 mod target;
+mod store;
 
 use clap::Parser;
 use cli::{App, Command};
