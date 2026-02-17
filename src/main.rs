@@ -6,6 +6,7 @@ mod target;
 mod store;
 mod html;
 mod session;
+mod ui_actions;
 
 use clap::Parser;
 use cli::{App, Command};

@@ -172,7 +172,7 @@ impl UiSession {
     }
 
     pub async fn get_text(&self, url: &str, retry_on_logout: bool) -> eyre::Result<String> {
-        self.send_with_retry(retry_on_logout, || self.client.get(url))
+        self.get_response(url, retry_on_logout)
             .await?
             .text()
             .await
@@ -180,7 +180,7 @@ impl UiSession {
     }
 
     pub async fn get_bytes(&self, url: &str, retry_on_logout: bool) -> eyre::Result<Vec<u8>> {
-        self.send_with_retry(retry_on_logout, || self.client.get(url))
+        self.get_response(url, retry_on_logout)
             .await?
             .bytes()
             .await
@@ -194,11 +194,30 @@ impl UiSession {
         body: &serde_json::Value,
         retry_on_logout: bool,
     ) -> eyre::Result<String> {
-        self.send_with_retry(retry_on_logout, || self.client.post(url).json(body))
+        self.post_json_response(url, body, retry_on_logout)
             .await?
             .text()
             .await
             .wrap_err("failed to read response text")
+    }
+
+    pub async fn get_response(
+        &self,
+        url: &str,
+        retry_on_logout: bool,
+    ) -> eyre::Result<reqwest::Response> {
+        self.send_with_retry(retry_on_logout, || self.client.get(url))
+            .await
+    }
+
+    pub async fn post_json_response(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        retry_on_logout: bool,
+    ) -> eyre::Result<reqwest::Response> {
+        self.send_with_retry(retry_on_logout, || self.client.post(url).json(body))
+            .await
     }
 
     pub async fn persist_cookie_jar(&self) -> eyre::Result<()> {
