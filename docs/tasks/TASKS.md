@@ -34,4 +34,4 @@
 - [x] Create GitHub repo `forgejo-cli-ex` via `gh` and push current `master`
 - [x] Add GitHub Actions CI workflow (fmt + test)
 - [x] Add GitHub Actions release workflow (build + upload Windows/Linux/macOS artifacts on tag)
-- [ ] Push workflows to GitHub and verify they appear in `gh workflow list`
+- [x] Push workflows to GitHub and verify they appear in `gh workflow list`
