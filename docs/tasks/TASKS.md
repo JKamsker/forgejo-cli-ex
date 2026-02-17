@@ -9,7 +9,7 @@
 - [x] Implement Actions UI endpoints (workflows, runs, run-view parsing, jobs, job meta)
 - [x] Implement logs download (job/run) with stdout default + `--out-file/--out-dir`
 - [x] Implement artifacts list/get
-- [ ] Implement cancel/rerun (no confirmation) + `--dry-run`
+- [x] Implement cancel/rerun (no confirmation) + `--dry-run`
 - [ ] Implement `smoke-test` command (non-destructive)
 - [ ] Write `README.md` (security notes + examples)
 - [ ] Run `cargo fmt` + `cargo test` and fix issues

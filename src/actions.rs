@@ -352,11 +352,73 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 println!("{}", out_file.display());
             }
         },
-        ActionsSubcommand::Cancel { .. } => {
-            return Err(eyre!("not implemented yet"));
+        ActionsSubcommand::Cancel { run_index, dry_run } => {
+            let repo_path = repo.trim_matches('/');
+            let url = format!(
+                "{}/{repo_path}/actions/runs/{run_index}/cancel",
+                session.base_url()
+            );
+
+            if dry_run {
+                println!("DRY RUN: POST {url}");
+                return Ok(());
+            }
+
+            let body = serde_json::json!({});
+            let resp = session.post_json_response(&url, &body, true).await?;
+            if resp.status() != reqwest::StatusCode::OK {
+                return Err(eyre!(
+                    "Failed to cancel run '{}' via '{}'. HTTP {}.",
+                    run_index,
+                    url,
+                    resp.status()
+                ));
+            }
+            println!("Canceled run #{run_index}");
         }
-        ActionsSubcommand::Rerun { .. } => {
-            return Err(eyre!("not implemented yet"));
+        ActionsSubcommand::Rerun {
+            run_index,
+            job_index,
+            dry_run,
+        } => {
+            let repo_path = repo.trim_matches('/');
+            let url = match job_index {
+                Some(job_index) if job_index >= 0 => format!(
+                    "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
+                    session.base_url()
+                ),
+                _ => format!(
+                    "{}/{repo_path}/actions/runs/{run_index}/rerun",
+                    session.base_url()
+                ),
+            };
+
+            if dry_run {
+                println!("DRY RUN: POST {url}");
+                return Ok(());
+            }
+
+            let body = serde_json::json!({});
+            let resp = session.post_json_response(&url, &body, true).await?;
+            if resp.status() != reqwest::StatusCode::OK {
+                return Err(eyre!(
+                    "Failed to rerun via '{}'. HTTP {}.",
+                    url,
+                    resp.status()
+                ));
+            }
+
+            let text = resp.text().await.unwrap_or_default();
+            if !text.trim().is_empty() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(redirect) = v.get("redirect").and_then(|v| v.as_str()) {
+                        println!("{redirect}");
+                        return Ok(());
+                    }
+                }
+            }
+
+            println!("Rerun requested.");
         }
     }
 
