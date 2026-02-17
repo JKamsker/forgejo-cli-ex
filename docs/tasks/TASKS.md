@@ -26,5 +26,5 @@
 - [x] Add `auth` command group (`fj-ex auth login|status|...`) and keep `fj-ex login` as a legacy alias
 - [x] Implement `fj-ex auth status` that checks against the host (session probe + optional relogin)
 - [x] Implement credential CRUD commands (list/show/logout) for multiple hosts (from `ui-creds.json`)
-- [ ] Update error messages + README examples to reference `fj-ex auth login`
-- [ ] Run `cargo fmt` + `cargo test`
+- [x] Update error messages + README examples to reference `fj-ex auth login`
+- [x] Run `cargo fmt` + `cargo test`

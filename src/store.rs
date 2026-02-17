@@ -134,7 +134,7 @@ pub async fn read_creds_store() -> eyre::Result<CredsStore> {
 
             Err(err).wrap_err_with(|| {
                 format!(
-                    "invalid creds store JSON at '{}'. Backed up to '{}'. Re-run `fj-ex login` to recreate.",
+                    "invalid creds store JSON at '{}'. Backed up to '{}'. Re-run `fj-ex auth login` (or legacy `fj-ex login`) to recreate.",
                     store_path.display(),
                     backup.display()
                 )

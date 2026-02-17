@@ -33,19 +33,35 @@ Login validates the UI session and persists creds + cookies.
 Interactive:
 
 ```powershell
-fj-ex login --host forge.example.com
+fj-ex auth login --host forge.example.com
 ```
 
 Via stdin (recommended vs `--password`):
 
 ```powershell
-("my-password`n") | fj-ex login --host forge.example.com --username my-user --password-stdin
+("my-password`n") | fj-ex auth login --host forge.example.com --username my-user --password-stdin
 ```
 
 Environment fallbacks (no `.env` support):
 
 - `FJ_USER`
 - `FJ_PASS`
+
+Legacy alias:
+
+```powershell
+fj-ex login --host forge.example.com
+```
+
+## Auth (credential management)
+
+```powershell
+fj-ex auth status --host forge.example.com
+fj-ex auth list
+fj-ex auth show --host forge.example.com
+fj-ex auth logout --host forge.example.com
+fj-ex auth clear-cookies --host forge.example.com
+```
 
 ## Actions (UI endpoints)
 

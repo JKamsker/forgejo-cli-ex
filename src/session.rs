@@ -42,7 +42,7 @@ impl UiSession {
 
         let creds = store::get_ui_creds(&normalized).await?.ok_or_else(|| {
             eyre!(
-                "No stored UI creds for '{}'. Run `fj-ex login` first.",
+                "No stored UI creds for '{}'. Run `fj-ex auth login` (or legacy `fj-ex login`) first.",
                 normalized
             )
         })?;
@@ -105,7 +105,7 @@ impl UiSession {
 
         let creds = store::get_ui_creds(&self.base_url).await?.ok_or_else(|| {
             eyre!(
-                "No stored UI creds for '{}'. Run `fj-ex login` first.",
+                "No stored UI creds for '{}'. Run `fj-ex auth login` (or legacy `fj-ex login`) first.",
                 self.base_url
             )
         })?;
