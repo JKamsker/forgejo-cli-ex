@@ -5,6 +5,7 @@ mod smoke_test;
 mod target;
 mod store;
 mod html;
+mod session;
 
 use clap::Parser;
 use cli::{App, Command};
