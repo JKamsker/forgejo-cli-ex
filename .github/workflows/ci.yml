@@ -37,3 +37,54 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo test --locked
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish to crates.io (if new)
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "CARGO_REGISTRY_TOKEN is not set; skipping crates.io publish."
+            exit 0
+          fi
+
+          meta="$(cargo metadata --no-deps --format-version=1)"
+          crate="$(jq -r '.packages[0].name' <<<"$meta")"
+          version="$(jq -r '.packages[0].version' <<<"$meta")"
+
+          echo "crate=$crate version=$version"
+
+          http_code="$(
+            curl -sS -o crates.json -w "%{http_code}" "https://crates.io/api/v1/crates/${crate}" || true
+          )"
+
+          published="false"
+          if [[ "$http_code" == "200" ]]; then
+            published="$(jq -r --arg v "$version" '[.versions[].num] | index($v) != null' crates.json)"
+          elif [[ "$http_code" == "404" ]]; then
+            published="false"
+          else
+            echo "Unexpected response from crates.io: HTTP $http_code"
+            cat crates.json || true
+            exit 1
+          fi
+
+          if [[ "$published" == "true" ]]; then
+            echo "Already published on crates.io; skipping."
+            exit 0
+          fi
+
+          cargo publish --locked
