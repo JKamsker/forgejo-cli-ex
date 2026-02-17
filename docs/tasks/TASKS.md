@@ -2,7 +2,7 @@
 
 - [x] Initialize repo scaffolding (git, .gitignore, docs/tasks)
 - [x] Create Rust crate scaffold (`fj-ex`) + CLI skeleton
-- [ ] Implement target resolution (`--host/--repo/--remote`, git inference, `FJ_FALLBACK_HOST`) + unit tests
+- [x] Implement target resolution (`--host/--repo/--remote`, git inference, `FJ_FALLBACK_HOST`) + unit tests
 - [ ] Implement shared UI creds/cookie store (`ui-creds.json`) + migration/repair + unit tests
 - [ ] Implement HTML helpers (csrf + data-* extraction + HTML decode) + unit tests
 - [ ] Implement UI session manager (reqwest + cookie jar, login, auto-relogin on `/user/login`)

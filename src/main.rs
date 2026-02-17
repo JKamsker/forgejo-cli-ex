@@ -2,6 +2,7 @@ mod actions;
 mod cli;
 mod login;
 mod smoke_test;
+mod target;
 
 use clap::Parser;
 use cli::{App, Command};
@@ -15,4 +16,3 @@ async fn main() -> eyre::Result<()> {
         Command::SmokeTest(args) => smoke_test::run(args).await,
     }
 }
-

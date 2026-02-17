@@ -23,11 +23,11 @@ pub struct TargetArgs {
 
     /// Repo to operate on (owner/name or host/owner/name)
     #[arg(long, short = 'r')]
-    pub repo: Option<String>,
+    pub repo: Option<crate::target::RepoArg>,
 
     /// Local git remote used to infer host/repo (default: origin)
-    #[arg(long, short = 'R', default_value = "origin")]
-    pub remote: String,
+    #[arg(long, short = 'R')]
+    pub remote: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -161,4 +161,3 @@ pub struct SmokeTestCommand {
     #[arg(long, default_value_t = 1_048_576)]
     pub log_download_max_bytes: u64,
 }
-
