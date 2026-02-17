@@ -35,3 +35,5 @@
 - [x] Add GitHub Actions CI workflow (fmt + test)
 - [x] Add GitHub Actions release workflow (build + upload Windows/Linux/macOS artifacts on tag)
 - [x] Push workflows to GitHub and verify they appear in `gh workflow list`
+- [x] Verify CI is green
+- [x] Create `v0.1.0` tag and verify release assets contain `fj-ex`/`fj-ex.exe`
