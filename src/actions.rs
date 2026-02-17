@@ -1,6 +1,9 @@
 use eyre::{eyre, Context};
+use tokio::io::AsyncWriteExt;
 
-use crate::cli::{ActionsCommand, ActionsSubcommand};
+use crate::cli::{
+    ActionsCommand, ActionsLogsSubcommand, ActionsSubcommand,
+};
 
 pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
     let target = crate::target::resolve_target(
@@ -108,10 +111,201 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 println!("{}\t{}\t{}", j.job_index, status, name);
             }
         }
-        _ => {
+        ActionsSubcommand::Logs { command } => match command {
+            ActionsLogsSubcommand::Job {
+                run_index,
+                job_index,
+                attempt,
+                out_file,
+            } => {
+                let attempt = match attempt {
+                    Some(a) if a > 0 => a,
+                    _ => crate::ui_actions::get_job_view_meta(&session, &repo, run_index, job_index)
+                        .await?
+                        .attempt_number,
+                };
+
+                let repo_path = repo.trim_matches('/');
+                let logs_url = format!(
+                    "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/attempt/{attempt}/logs",
+                    session.base_url()
+                );
+
+                let resp = session.get_response(&logs_url, true).await?;
+                if resp.status() != reqwest::StatusCode::OK {
+                    return Err(eyre!(
+                        "Failed to download logs from '{}'. HTTP {}.",
+                        logs_url,
+                        resp.status()
+                    ));
+                }
+                let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
+
+                if let Some(out_file) = out_file {
+                    if let Some(parent) = out_file.parent() {
+                        tokio::fs::create_dir_all(parent).await?;
+                    }
+                    tokio::fs::write(&out_file, &bytes).await?;
+                    println!("{}", out_file.display());
+                } else {
+                    let mut stdout = tokio::io::stdout();
+                    stdout.write_all(&bytes).await?;
+                    stdout.flush().await?;
+                }
+            }
+            ActionsLogsSubcommand::Run {
+                run_index,
+                latest,
+                out_dir,
+                max_jobs,
+            } => {
+                let run_index = match (run_index, latest) {
+                    (Some(n), false) if n > 0 => n,
+                    _ => crate::ui_actions::latest_run_index(&session, &repo).await?,
+                };
+
+                let view = crate::ui_actions::get_run_view_data(&session, &repo, run_index)
+                    .await
+                    .wrap_err("failed to load run view")?;
+                let mut jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+
+                if max_jobs > 0 && (jobs.len() as u32) > max_jobs {
+                    jobs.truncate(max_jobs as usize);
+                }
+
+                if let Some(out_dir) = out_dir {
+                    tokio::fs::create_dir_all(&out_dir).await?;
+                    let mut failures: Vec<String> = Vec::new();
+
+                    for job in &jobs {
+                        let job_index = job.job_index;
+                        let job_name = job.name.as_deref().unwrap_or("");
+                        let safe_name = safe_filename_component(job_name, job_index);
+                        let out_file = out_dir.join(format!("job-{job_index}-{safe_name}.log"));
+
+                        let attempt = match crate::ui_actions::get_job_view_meta(
+                            &session,
+                            &repo,
+                            run_index,
+                            job_index,
+                        )
+                        .await
+                        {
+                            Ok(m) => m.attempt_number,
+                            Err(e) => {
+                                let msg = format!("Job {job_index} ({job_name}): {e}");
+                                eprintln!("warn: {msg}");
+                                failures.push(msg);
+                                continue;
+                            }
+                        };
+
+                        let repo_path = repo.trim_matches('/');
+                        let logs_url = format!(
+                            "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/attempt/{attempt}/logs",
+                            session.base_url()
+                        );
+                        match session.get_response(&logs_url, true).await {
+                            Ok(resp) if resp.status() == reqwest::StatusCode::OK => {
+                                let bytes =
+                                    resp.bytes().await.wrap_err("failed to read log bytes")?;
+                                tokio::fs::write(&out_file, &bytes).await?;
+                                println!(
+                                    "Saved: job {} (attempt {}) -> {}",
+                                    job_index,
+                                    attempt,
+                                    out_file.display()
+                                );
+                            }
+                            Ok(resp) => {
+                                let msg = format!(
+                                    "Job {job_index} ({job_name}): HTTP {}",
+                                    resp.status()
+                                );
+                                eprintln!("warn: {msg}");
+                                failures.push(msg);
+                            }
+                            Err(e) => {
+                                let msg = format!("Job {job_index} ({job_name}): {e}");
+                                eprintln!("warn: {msg}");
+                                failures.push(msg);
+                            }
+                        }
+                    }
+
+                    if !failures.is_empty() {
+                        return Err(eyre!(
+                            "Some jobs failed:\n - {}",
+                            failures.join("\n - ")
+                        ));
+                    }
+
+                    return Ok(());
+                }
+
+                // stdout mode
+                for job in &jobs {
+                    let job_index = job.job_index;
+                    let job_name = job.name.as_deref().unwrap_or("");
+
+                    let attempt = crate::ui_actions::get_job_view_meta(
+                        &session,
+                        &repo,
+                        run_index,
+                        job_index,
+                    )
+                    .await?
+                    .attempt_number;
+
+                    eprintln!(
+                        "== job {} (attempt {}) :: {} ==",
+                        job_index, attempt, job_name
+                    );
+
+                    let repo_path = repo.trim_matches('/');
+                    let logs_url = format!(
+                        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/attempt/{attempt}/logs",
+                        session.base_url()
+                    );
+
+                    let resp = session.get_response(&logs_url, true).await?;
+                    if resp.status() != reqwest::StatusCode::OK {
+                        return Err(eyre!(
+                            "Failed to download logs from '{}'. HTTP {}.",
+                            logs_url,
+                            resp.status()
+                        ));
+                    }
+                    let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
+
+                    let mut stdout = tokio::io::stdout();
+                    stdout.write_all(&bytes).await?;
+                    stdout.flush().await?;
+
+                    eprintln!("== end job {} ==", job_index);
+                }
+            }
+        },
+        ActionsSubcommand::Artifacts { command: _ } => {
+            return Err(eyre!("not implemented yet"));
+        }
+        ActionsSubcommand::Cancel { .. } => {
+            return Err(eyre!("not implemented yet"));
+        }
+        ActionsSubcommand::Rerun { .. } => {
             return Err(eyre!("not implemented yet"));
         }
     }
 
     Ok(())
+}
+
+fn safe_filename_component(job_name: &str, job_index: i64) -> String {
+    let re = regex::Regex::new(r#"[^a-zA-Z0-9._-]+"#).expect("valid regex");
+    let mut safe = re.replace_all(job_name, "_").to_string();
+    safe = safe.trim_matches('_').to_string();
+    if safe.is_empty() {
+        safe = format!("job-{job_index}");
+    }
+    safe
 }
