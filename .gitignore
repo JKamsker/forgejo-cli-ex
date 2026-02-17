@@ -1,0 +1,15 @@
+target/
+.tmp/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+*.bak
+*.rs.bk
+
+# OS
+Thumbs.db
+Desktop.ini
