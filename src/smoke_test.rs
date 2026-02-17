@@ -63,9 +63,10 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
             .await?;
     println!("attempt={}", meta.attempt_number);
 
-    let out_dir = std::path::PathBuf::from(".tmp")
-        .join("forgejo-logs")
-        .join(format!("smoketest-run-{latest_run_index}"));
+    let base_out_dir = args
+        .out_dir
+        .unwrap_or_else(|| std::path::PathBuf::from(".tmp").join("forgejo-logs"));
+    let out_dir = base_out_dir.join(format!("smoketest-run-{latest_run_index}"));
     tokio::fs::create_dir_all(&out_dir).await?;
     let out_file = out_dir.join(format!(
         "job-{}-attempt-{}.log",

@@ -160,4 +160,8 @@ pub struct SmokeTestCommand {
 
     #[arg(long, default_value_t = 1_048_576)]
     pub log_download_max_bytes: u64,
+
+    /// Base directory for smoke test log downloads (a run-specific folder is created inside)
+    #[arg(long)]
+    pub out_dir: Option<std::path::PathBuf>,
 }

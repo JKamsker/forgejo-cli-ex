@@ -91,3 +91,8 @@ Non-destructive validation similar to the PoC:
 fj-ex smoke-test --host forge.example.com --repo owner/name
 ```
 
+Write logs somewhere else (avoids creating `.tmp` in the current directory):
+
+```powershell
+fj-ex smoke-test --host forge.example.com --repo owner/name --out-dir $env:TEMP\\fj-ex-smoke
+```
