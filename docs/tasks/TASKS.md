@@ -14,3 +14,9 @@
 - [x] Write `README.md` (security notes + examples)
 - [x] Run `cargo fmt` + `cargo test` and fix issues
 - [x] Implement login command (prompt/--password-stdin, store creds+cookies)
+
+## Remote validation (pandocs)
+
+- [ ] Build `fj-ex` and run `fj-ex smoke-test` against `C:\Users\Jonas\repos\work\dccx\src\pandocs`
+- [ ] Run non-destructive `actions` commands against pandocs Forgejo remote (workflows/runs/jobs/logs/artifacts)
+- [ ] Verify destructive endpoints are only hit with `--dry-run` (cancel/rerun)
