@@ -34,11 +34,13 @@ pub async fn run(args: LoginCommand) -> eyre::Result<()> {
 
 async fn resolve_creds(args: LoginCommand) -> eyre::Result<(String, String)> {
     if let Some(userpass) = args.userpass {
-        let idx = userpass.find(':').ok_or_else(|| {
-            eyre::eyre!("Invalid --userpass format. Expected 'user:pass'.")
-        })?;
+        let idx = userpass
+            .find(':')
+            .ok_or_else(|| eyre::eyre!("Invalid --userpass format. Expected 'user:pass'."))?;
         if idx == 0 || idx >= userpass.len() - 1 {
-            return Err(eyre::eyre!("Invalid --userpass format. Expected 'user:pass'."));
+            return Err(eyre::eyre!(
+                "Invalid --userpass format. Expected 'user:pass'."
+            ));
         }
         let username = userpass[..idx].to_string();
         let password = userpass[idx + 1..].to_string();

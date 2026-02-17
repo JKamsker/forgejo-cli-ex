@@ -68,7 +68,9 @@ impl std::error::Error for RepoArgError {}
 impl std::fmt::Display for RepoArgError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RepoArgError::NoOwner => write!(f, "repo name should be in the format [HOST/]OWNER/NAME"),
+            RepoArgError::NoOwner => {
+                write!(f, "repo name should be in the format [HOST/]OWNER/NAME")
+            }
         }
     }
 }
@@ -97,7 +99,11 @@ pub fn normalize_base_url(host_or_url: &str) -> eyre::Result<String> {
 
     let no_frag = trimmed.split('#').next().unwrap_or(trimmed);
     let no_query = no_frag.split('?').next().unwrap_or(no_frag);
-    let host_part = no_query.split('/').next().unwrap_or(no_query).trim_end_matches('/');
+    let host_part = no_query
+        .split('/')
+        .next()
+        .unwrap_or(no_query)
+        .trim_end_matches('/');
     if host_part.is_empty() {
         return Err(eyre!("host is required"));
     }
@@ -155,7 +161,9 @@ fn ssh_url_parse(s: &str) -> Result<Url, url::ParseError> {
 
 fn remote_url_to_host_and_repo(url_s: &str) -> eyre::Result<Option<(String, RepoName)>> {
     let url = ssh_url_parse(url_s).wrap_err("unable to parse remote url")?;
-    let host = url.host_str().ok_or_else(|| eyre!("remote url missing host"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| eyre!("remote url missing host"))?;
 
     let mut segments = url
         .path_segments()
@@ -232,7 +240,10 @@ fn select_remote_name(
     Ok(remote_names.first().map(|s| (*s).to_string()))
 }
 
-fn infer_from_git(remote: Option<&str>, host_hint: Option<&str>) -> eyre::Result<Option<(String, String)>> {
+fn infer_from_git(
+    remote: Option<&str>,
+    host_hint: Option<&str>,
+) -> eyre::Result<Option<(String, String)>> {
     let repo = match git2::Repository::discover(".") {
         Ok(r) => r,
         Err(_) => return Ok(None),
@@ -389,4 +400,3 @@ mod tests {
         assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
     }
 }
-

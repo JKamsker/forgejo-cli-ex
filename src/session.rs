@@ -40,16 +40,16 @@ impl UiSession {
             }
         }
 
-        let creds = store::get_ui_creds(&normalized)
-            .await?
-            .ok_or_else(|| {
-                eyre!(
-                    "No stored UI creds for '{}'. Run `fj-ex login` first.",
-                    normalized
-                )
-            })?;
+        let creds = store::get_ui_creds(&normalized).await?.ok_or_else(|| {
+            eyre!(
+                "No stored UI creds for '{}'. Run `fj-ex login` first.",
+                normalized
+            )
+        })?;
 
-        session.login_with_creds(&creds.username, &creds.password).await?;
+        session
+            .login_with_creds(&creds.username, &creds.password)
+            .await?;
         session.persist_cookie_jar().await?;
         Ok(session)
     }
@@ -103,15 +103,14 @@ impl UiSession {
             guard.clear();
         }
 
-        let creds = store::get_ui_creds(&self.base_url)
-            .await?
-            .ok_or_else(|| {
-                eyre!(
-                    "No stored UI creds for '{}'. Run `fj-ex login` first.",
-                    self.base_url
-                )
-            })?;
-        self.login_with_creds(&creds.username, &creds.password).await?;
+        let creds = store::get_ui_creds(&self.base_url).await?.ok_or_else(|| {
+            eyre!(
+                "No stored UI creds for '{}'. Run `fj-ex login` first.",
+                self.base_url
+            )
+        })?;
+        self.login_with_creds(&creds.username, &creds.password)
+            .await?;
         self.persist_cookie_jar().await?;
         Ok(())
     }
@@ -312,11 +311,7 @@ fn cookie_jar_from_store(cookie_store: &CookieStoreMutex) -> eyre::Result<store:
             continue;
         }
 
-        let domain = c
-            .domain
-            .as_cow()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
+        let domain = c.domain.as_cow().map(|s| s.to_string()).unwrap_or_default();
         if domain.is_empty() {
             continue;
         }

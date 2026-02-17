@@ -93,11 +93,14 @@ fn now_rfc3339() -> String {
 
 fn backup_path(original: &Path) -> eyre::Result<PathBuf> {
     let stamp = OffsetDateTime::now_utc()
-        .format(
-            &time::format_description::parse("[year][month][day]T[hour][minute][second]Z")?,
-        )
+        .format(&time::format_description::parse(
+            "[year][month][day]T[hour][minute][second]Z",
+        )?)
         .wrap_err("failed to format timestamp")?;
-    Ok(PathBuf::from(format!("{}.bad.{stamp}.json", original.display())))
+    Ok(PathBuf::from(format!(
+        "{}.bad.{stamp}.json",
+        original.display()
+    )))
 }
 
 pub async fn read_creds_store() -> eyre::Result<CredsStore> {
@@ -312,12 +315,18 @@ pub async fn get_ui_creds(base_url: &str) -> eyre::Result<Option<UiCreds>> {
         return Ok(None);
     };
 
-    let username = entry
-        .username
-        .ok_or_else(|| eyre!("invalid creds store entry for '{}' (missing username)", info.base_url))?;
-    let password = entry
-        .password
-        .ok_or_else(|| eyre!("invalid creds store entry for '{}' (missing password)", info.base_url))?;
+    let username = entry.username.ok_or_else(|| {
+        eyre!(
+            "invalid creds store entry for '{}' (missing username)",
+            info.base_url
+        )
+    })?;
+    let password = entry.password.ok_or_else(|| {
+        eyre!(
+            "invalid creds store entry for '{}' (missing password)",
+            info.base_url
+        )
+    })?;
 
     Ok(Some(UiCreds {
         base_url: info.base_url,
@@ -386,10 +395,6 @@ mod tests {
             repaired["forge.example.com"].base_url.as_deref(),
             Some("https://forge.example.com")
         );
-        assert_eq!(
-            repaired["other"].base_url.as_deref(),
-            Some("https://other")
-        );
+        assert_eq!(repaired["other"].base_url.as_deref(), Some("https://other"));
     }
 }
-

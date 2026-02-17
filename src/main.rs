@@ -1,11 +1,11 @@
 mod actions;
 mod cli;
-mod login;
-mod smoke_test;
-mod target;
-mod store;
 mod html;
+mod login;
 mod session;
+mod smoke_test;
+mod store;
+mod target;
 mod ui_actions;
 
 use clap::Parser;

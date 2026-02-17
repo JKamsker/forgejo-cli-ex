@@ -12,5 +12,5 @@
 - [x] Implement cancel/rerun (no confirmation) + `--dry-run`
 - [x] Implement `smoke-test` command (non-destructive)
 - [x] Write `README.md` (security notes + examples)
-- [ ] Run `cargo fmt` + `cargo test` and fix issues
+- [x] Run `cargo fmt` + `cargo test` and fix issues
 - [x] Implement login command (prompt/--password-stdin, store creds+cookies)

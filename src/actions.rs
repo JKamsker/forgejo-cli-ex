@@ -43,14 +43,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             limit,
             json,
         } => {
-            let runs = crate::ui_actions::list_runs(
-                &session,
-                &repo,
-                workflow.as_deref(),
-                page,
-                limit,
-            )
-            .await?;
+            let runs =
+                crate::ui_actions::list_runs(&session, &repo, workflow.as_deref(), page, limit)
+                    .await?;
 
             if json {
                 let payload = serde_json::json!({
@@ -120,9 +115,11 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             } => {
                 let attempt = match attempt {
                     Some(a) if a > 0 => a,
-                    _ => crate::ui_actions::get_job_view_meta(&session, &repo, run_index, job_index)
-                        .await?
-                        .attempt_number,
+                    _ => {
+                        crate::ui_actions::get_job_view_meta(&session, &repo, run_index, job_index)
+                            .await?
+                            .attempt_number
+                    }
                 };
 
                 let repo_path = repo.trim_matches('/');
@@ -184,10 +181,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         let out_file = out_dir.join(format!("job-{job_index}-{safe_name}.log"));
 
                         let attempt = match crate::ui_actions::get_job_view_meta(
-                            &session,
-                            &repo,
-                            run_index,
-                            job_index,
+                            &session, &repo, run_index, job_index,
                         )
                         .await
                         {
@@ -218,10 +212,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 );
                             }
                             Ok(resp) => {
-                                let msg = format!(
-                                    "Job {job_index} ({job_name}): HTTP {}",
-                                    resp.status()
-                                );
+                                let msg =
+                                    format!("Job {job_index} ({job_name}): HTTP {}", resp.status());
                                 eprintln!("warn: {msg}");
                                 failures.push(msg);
                             }
@@ -234,10 +226,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     }
 
                     if !failures.is_empty() {
-                        return Err(eyre!(
-                            "Some jobs failed:\n - {}",
-                            failures.join("\n - ")
-                        ));
+                        return Err(eyre!("Some jobs failed:\n - {}", failures.join("\n - ")));
                     }
 
                     return Ok(());
@@ -248,14 +237,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     let job_index = job.job_index;
                     let job_name = job.name.as_deref().unwrap_or("");
 
-                    let attempt = crate::ui_actions::get_job_view_meta(
-                        &session,
-                        &repo,
-                        run_index,
-                        job_index,
-                    )
-                    .await?
-                    .attempt_number;
+                    let attempt =
+                        crate::ui_actions::get_job_view_meta(&session, &repo, run_index, job_index)
+                            .await?
+                            .attempt_number;
 
                     eprintln!(
                         "== job {} (attempt {}) :: {} ==",
@@ -297,7 +282,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     _ => crate::ui_actions::latest_run_index(&session, &repo).await?,
                 };
 
-                let artifacts = crate::ui_actions::get_run_artifacts(&session, &repo, run_index).await?;
+                let artifacts =
+                    crate::ui_actions::get_run_artifacts(&session, &repo, run_index).await?;
 
                 if json {
                     let payload = serde_json::json!({

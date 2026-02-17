@@ -132,7 +132,10 @@ pub async fn list_runs(
         if run_index <= 0 {
             continue;
         }
-        let run_url = format!("{}/{repo_path}/actions/runs/{run_index}", session.base_url());
+        let run_url = format!(
+            "{}/{repo_path}/actions/runs/{run_index}",
+            session.base_url()
+        );
         runs.push(RunRef {
             run_index,
             url: run_url,
@@ -165,7 +168,9 @@ pub async fn get_run_view_data(
     let html_s = resp.text().await.wrap_err("failed to read response html")?;
 
     let initial_job_json = html::get_html_attribute_value(&html_s, "data-initial-post-response")
-        .ok_or_else(|| eyre!("Unable to find data-initial-post-response in run view HTML ({url})."))?;
+        .ok_or_else(|| {
+            eyre!("Unable to find data-initial-post-response in run view HTML ({url}).")
+        })?;
     let initial_artifacts_json =
         html::get_html_attribute_value(&html_s, "data-initial-artifacts-response");
 
@@ -200,7 +205,10 @@ pub async fn get_run_view_data(
 }
 
 pub fn get_run_jobs(run_index: i64, run_view: &Value) -> eyre::Result<Vec<JobInfo>> {
-    let Some(jobs) = run_view.pointer("/state/run/jobs").and_then(|v| v.as_array()) else {
+    let Some(jobs) = run_view
+        .pointer("/state/run/jobs")
+        .and_then(|v| v.as_array())
+    else {
         return Err(eyre!("Unable to find jobs at view.state.run.jobs."));
     };
 
@@ -210,7 +218,10 @@ pub fn get_run_jobs(run_index: i64, run_view: &Value) -> eyre::Result<Vec<JobInf
             run_index,
             job_index: idx as i64,
             id: j.get("id").and_then(|v| v.as_i64()),
-            name: j.get("name").and_then(|v| v.as_str()).map(ToOwned::to_owned),
+            name: j
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned),
             status: j
                 .get("status")
                 .and_then(|v| v.as_str())
@@ -247,9 +258,7 @@ pub async fn get_job_view_meta(
 
     let attempt_attr = html::get_html_attribute_value(&html_s, "data-attempt-number")
         .ok_or_else(|| eyre!("Unable to determine attempt number for run '{run_index}' job '{job_index}' from '{url}'."))?;
-    let attempt_number: i64 = attempt_attr
-        .parse()
-        .wrap_err("invalid attempt number")?;
+    let attempt_number: i64 = attempt_attr.parse().wrap_err("invalid attempt number")?;
 
     Ok(JobViewMeta {
         url,
@@ -273,7 +282,11 @@ pub async fn latest_run_index(session: &UiSession, repo: &str) -> eyre::Result<i
     Ok(latest.run_index)
 }
 
-pub async fn get_run_artifacts(session: &UiSession, repo: &str, run_index: i64) -> eyre::Result<Value> {
+pub async fn get_run_artifacts(
+    session: &UiSession,
+    repo: &str,
+    run_index: i64,
+) -> eyre::Result<Value> {
     let repo_path = repo.trim_matches('/');
     let url = format!(
         "{}/{repo_path}/actions/runs/{run_index}/artifacts",
@@ -288,7 +301,10 @@ pub async fn get_run_artifacts(session: &UiSession, repo: &str, run_index: i64) 
             resp.status()
         ));
     }
-    let text = resp.text().await.wrap_err("failed to read artifacts json")?;
+    let text = resp
+        .text()
+        .await
+        .wrap_err("failed to read artifacts json")?;
     let json: Value = serde_json::from_str(&text).wrap_err("failed to parse artifacts json")?;
     Ok(json)
 }
@@ -314,6 +330,9 @@ pub async fn download_artifact(
             resp.status()
         ));
     }
-    let bytes = resp.bytes().await.wrap_err("failed to read artifact bytes")?;
+    let bytes = resp
+        .bytes()
+        .await
+        .wrap_err("failed to read artifact bytes")?;
     Ok(bytes.to_vec())
 }
