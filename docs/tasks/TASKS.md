@@ -13,4 +13,4 @@
 - [x] Implement `smoke-test` command (non-destructive)
 - [ ] Write `README.md` (security notes + examples)
 - [ ] Run `cargo fmt` + `cargo test` and fix issues
-- [ ] Implement login command (prompt/--password-stdin, store creds+cookies)
+- [x] Implement login command (prompt/--password-stdin, store creds+cookies)
