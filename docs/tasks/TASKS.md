@@ -10,6 +10,7 @@
 - [x] Implement logs download (job/run) with stdout default + `--out-file/--out-dir`
 - [x] Implement artifacts list/get
 - [x] Implement cancel/rerun (no confirmation) + `--dry-run`
-- [ ] Implement `smoke-test` command (non-destructive)
+- [x] Implement `smoke-test` command (non-destructive)
 - [ ] Write `README.md` (security notes + examples)
 - [ ] Run `cargo fmt` + `cargo test` and fix issues
+- [ ] Implement login command (prompt/--password-stdin, store creds+cookies)
