@@ -18,5 +18,5 @@
 ## Remote validation (pandocs)
 
 - [x] Build `fj-ex` and run `fj-ex smoke-test` against `C:\Users\Jonas\repos\work\dccx\src\pandocs`
-- [ ] Run non-destructive `actions` commands against pandocs Forgejo remote (workflows/runs/jobs/logs/artifacts)
+- [x] Run non-destructive `actions` commands against pandocs Forgejo remote (workflows/runs/jobs/logs/artifacts)
 - [ ] Verify destructive endpoints are only hit with `--dry-run` (cancel/rerun)
