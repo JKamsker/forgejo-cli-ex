@@ -35,6 +35,8 @@ cargo install forgejo-cli-ex
 fj-ex --help
 ```
 
+Releasing / crates.io publishing: see `docs/releasing.md`.
+
 ## Login
 
 Login validates the UI session and persists creds + cookies.

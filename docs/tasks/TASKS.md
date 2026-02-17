@@ -45,4 +45,4 @@
 - [x] Validate packaging with `cargo publish --dry-run`
 - [ ] Publish to crates.io and verify `cargo install forgejo-cli-ex` installs `fj-ex`
 - [ ] Add GitHub secret `CARGO_REGISTRY_TOKEN` and verify CI publishes on next version bump
-- [ ] Document release workflow (version bump + tag + crates.io publish)
+- [x] Document release workflow (version bump + tag + crates.io publish)
