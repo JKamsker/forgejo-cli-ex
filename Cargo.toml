@@ -2,6 +2,12 @@
 name = "forgejo-cli-ex"
 version = "0.1.0"
 edition = "2021"
+license = "LGPL-3.0-or-later"
+repository = "https://github.com/JKamsker/forgejo-cli-ex"
+description = "Forgejo CLI extension using UI endpoints (Actions logs/artifacts/cancel/rerun, etc.)"
+readme = "README.md"
+keywords = ["cli", "forgejo", "actions"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "fj-ex"
