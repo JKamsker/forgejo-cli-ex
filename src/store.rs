@@ -366,6 +366,29 @@ pub async fn save_cookie_jar(base_url: &str, cookie_jar: CookieJar) -> eyre::Res
     Ok(())
 }
 
+pub async fn delete_store_entry(base_url: &str) -> eyre::Result<Option<StoreEntry>> {
+    let normalized = crate::target::normalize_base_url(base_url)?;
+    let host_key = crate::target::normalize_host_key(&normalized)?;
+
+    let mut store = read_creds_store().await?;
+
+    let mut removed: Option<StoreEntry> = None;
+    if let Some(entry) = store.remove(&host_key) {
+        removed = Some(entry);
+    }
+    if let Some(entry) = store.remove(&normalized) {
+        if removed.is_none() {
+            removed = Some(entry);
+        }
+    }
+
+    if removed.is_some() {
+        write_creds_store(&store).await?;
+    }
+
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
