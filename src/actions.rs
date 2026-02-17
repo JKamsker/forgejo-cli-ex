@@ -2,7 +2,7 @@ use eyre::{eyre, Context};
 use tokio::io::AsyncWriteExt;
 
 use crate::cli::{
-    ActionsCommand, ActionsLogsSubcommand, ActionsSubcommand,
+    ActionsArtifactsSubcommand, ActionsCommand, ActionsLogsSubcommand, ActionsSubcommand,
 };
 
 pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
@@ -286,9 +286,72 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 }
             }
         },
-        ActionsSubcommand::Artifacts { command: _ } => {
-            return Err(eyre!("not implemented yet"));
-        }
+        ActionsSubcommand::Artifacts { command } => match command {
+            ActionsArtifactsSubcommand::List {
+                run_index,
+                latest,
+                json,
+            } => {
+                let run_index = match (run_index, latest) {
+                    (Some(n), false) if n > 0 => n,
+                    _ => crate::ui_actions::latest_run_index(&session, &repo).await?,
+                };
+
+                let artifacts = crate::ui_actions::get_run_artifacts(&session, &repo, run_index).await?;
+
+                if json {
+                    let payload = serde_json::json!({
+                        "baseUrl": target.base_url,
+                        "repo": repo,
+                        "runIndex": run_index,
+                        "artifacts": artifacts,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                    return Ok(());
+                }
+
+                let items = artifacts
+                    .get("artifacts")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+
+                println!("Id\tName\tSize");
+                for a in items {
+                    let id = a
+                        .get("id")
+                        .and_then(|v| v.as_i64())
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    let name = a
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let size = a
+                        .get("size_in_bytes")
+                        .and_then(|v| v.as_i64())
+                        .or_else(|| a.get("sizeInBytes").and_then(|v| v.as_i64()))
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    println!("{id}\t{name}\t{size}");
+                }
+            }
+            ActionsArtifactsSubcommand::Get {
+                run_index,
+                artifact,
+                out_file,
+            } => {
+                let bytes =
+                    crate::ui_actions::download_artifact(&session, &repo, run_index, &artifact)
+                        .await?;
+                if let Some(parent) = out_file.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                tokio::fs::write(&out_file, bytes).await?;
+                println!("{}", out_file.display());
+            }
+        },
         ActionsSubcommand::Cancel { .. } => {
             return Err(eyre!("not implemented yet"));
         }

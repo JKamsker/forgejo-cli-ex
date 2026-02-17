@@ -273,3 +273,47 @@ pub async fn latest_run_index(session: &UiSession, repo: &str) -> eyre::Result<i
     Ok(latest.run_index)
 }
 
+pub async fn get_run_artifacts(session: &UiSession, repo: &str, run_index: i64) -> eyre::Result<Value> {
+    let repo_path = repo.trim_matches('/');
+    let url = format!(
+        "{}/{repo_path}/actions/runs/{run_index}/artifacts",
+        session.base_url()
+    );
+
+    let resp = session.get_response(&url, true).await?;
+    if resp.status() != reqwest::StatusCode::OK {
+        return Err(eyre!(
+            "Failed to fetch artifacts from '{}'. HTTP {}.",
+            url,
+            resp.status()
+        ));
+    }
+    let text = resp.text().await.wrap_err("failed to read artifacts json")?;
+    let json: Value = serde_json::from_str(&text).wrap_err("failed to parse artifacts json")?;
+    Ok(json)
+}
+
+pub async fn download_artifact(
+    session: &UiSession,
+    repo: &str,
+    run_index: i64,
+    artifact_name_or_id: &str,
+) -> eyre::Result<Vec<u8>> {
+    let repo_path = repo.trim_matches('/');
+    let name_or_id = urlencoding::encode(artifact_name_or_id);
+    let url = format!(
+        "{}/{repo_path}/actions/runs/{run_index}/artifacts/{name_or_id}",
+        session.base_url()
+    );
+
+    let resp = session.get_response(&url, true).await?;
+    if resp.status() != reqwest::StatusCode::OK {
+        return Err(eyre!(
+            "Failed to download artifact from '{}'. HTTP {}.",
+            url,
+            resp.status()
+        ));
+    }
+    let bytes = resp.bytes().await.wrap_err("failed to read artifact bytes")?;
+    Ok(bytes.to_vec())
+}

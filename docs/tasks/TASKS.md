@@ -8,7 +8,7 @@
 - [x] Implement UI session manager (reqwest + cookie jar, login, auto-relogin on `/user/login`)
 - [x] Implement Actions UI endpoints (workflows, runs, run-view parsing, jobs, job meta)
 - [x] Implement logs download (job/run) with stdout default + `--out-file/--out-dir`
-- [ ] Implement artifacts list/get
+- [x] Implement artifacts list/get
 - [ ] Implement cancel/rerun (no confirmation) + `--dry-run`
 - [ ] Implement `smoke-test` command (non-destructive)
 - [ ] Write `README.md` (security notes + examples)
