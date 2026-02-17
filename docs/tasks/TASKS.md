@@ -37,3 +37,11 @@
 - [x] Push workflows to GitHub and verify they appear in `gh workflow list`
 - [x] Verify CI is green
 - [x] Create `v0.1.0` tag and verify release assets contain `fj-ex`/`fj-ex.exe`
+
+## crates.io
+
+- [ ] Add LGPL license + crates.io package metadata (`Cargo.toml`, `LICENSE`)
+- [ ] Add CI publish to crates.io on push to `master` (requires `CARGO_REGISTRY_TOKEN` secret)
+- [ ] Validate packaging with `cargo publish --dry-run`
+- [ ] Publish to crates.io and verify `cargo install forgejo-cli-ex` installs `fj-ex`
+- [ ] Document release workflow (version bump + tag + crates.io publish)
