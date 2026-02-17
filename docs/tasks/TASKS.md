@@ -15,10 +15,10 @@
 - [x] Run `cargo fmt` + `cargo test` and fix issues
 - [x] Implement login command (prompt/--password-stdin, store creds+cookies)
 
-## Remote validation (pandocs)
+## Remote validation (local repo)
 
-- [x] Build `fj-ex` and run `fj-ex smoke-test` against `C:\Users\Jonas\repos\work\dccx\src\pandocs`
-- [x] Run non-destructive `actions` commands against pandocs Forgejo remote (workflows/runs/jobs/logs/artifacts)
+- [x] Build `fj-ex` and run `fj-ex smoke-test` inside a git repo with a Forgejo remote (host+repo inferred)
+- [x] Run non-destructive `actions` commands against that Forgejo remote (workflows/runs/jobs/logs/artifacts)
 - [x] Verify destructive endpoints are only hit with `--dry-run` (cancel/rerun)
 
 ## Auth + credential management
