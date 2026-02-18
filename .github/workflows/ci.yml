@@ -85,7 +85,7 @@ jobs:
               cargo_toml = subprocess.check_output(["git", "show", f"{before}:Cargo.toml"], text=True)
           except subprocess.CalledProcessError:
               sys.exit(0)
-          m = re.search(r'(?m)^version\\s*=\\s*\"([^\"]+)\"\\s*$', cargo_toml)
+          m = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', cargo_toml)
           if m:
               print(m.group(1))
           PY
@@ -108,7 +108,7 @@ jobs:
             CURRENT_VERSION="$version" python - <<'PY'
           import os, re
           def parse(v: str):
-              m = re.fullmatch(r"(\\d+)\\.(\\d+)\\.(\\d+)", v)
+              m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", v)
               if not m:
                   raise SystemExit(f"Unsupported version (expected X.Y.Z): {v}")
               return tuple(map(int, m.groups()))
@@ -129,14 +129,14 @@ jobs:
           in_pkg = False
           done = False
           for line in lines:
-              if re.match(r"^\\[package\\]\\s*$", line):
+              if re.match(r"^\[package\]\s*$", line):
                   in_pkg = True
                   out.append(line)
                   continue
-              if in_pkg and re.match(r"^\\[", line):
+              if in_pkg and re.match(r"^\[", line):
                   in_pkg = False
-              if in_pkg and not done and re.match(r"^\\s*version\\s*=\\s*\"[^\"]+\"\\s*(#.*)?$", line):
-                  indent = re.match(r"^(\\s*)version\\s*=.*$", line).group(1)
+              if in_pkg and not done and re.match(r'^\s*version\s*=\s*"[^"]+"\s*(#.*)?$', line):
+                  indent = re.match(r"^(\s*)version\s*=.*$", line).group(1)
                   out.append(f'{indent}version = \"{os.environ[\"NEW_VERSION\"]}\"\\n')
                   done = True
                   continue
