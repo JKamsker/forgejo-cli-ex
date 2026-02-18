@@ -2,10 +2,11 @@
 
 ## crates.io (automatic via CI)
 
-This repo is configured to publish to crates.io on **push to `master`**, but only when:
+This repo is configured to publish to crates.io on **push to `master`**:
 
-- the version in `Cargo.toml` is **not** published yet, and
-- the GitHub Actions secret `CARGO_REGISTRY_TOKEN` is set.
+- If the current `Cargo.toml` version is **already published**, CI will **bump the patch version**, commit it back to `master`, and publish.
+- If the current `Cargo.toml` version is **not published yet** (e.g. you bumped it manually), CI will publish that version.
+- Publishing requires the GitHub Actions secret `CARGO_REGISTRY_TOKEN` to be set.
 
 ### 1) Create a crates.io token
 
@@ -21,9 +22,9 @@ gh secret set CARGO_REGISTRY_TOKEN --repo OWNER/forgejo-cli-ex
 
 ### 3) Release a new version
 
-1. Bump the version in `Cargo.toml`.
-2. Commit and push to `master`.
-   - The `ci` workflow runs `cargo publish --locked` (skips if already published).
+1. Commit and push to `master`.
+   - The `ci` workflow bumps (if needed) and runs `cargo publish --locked`.
+   - CI creates commits like `chore(release): bump version to X.Y.Z` when auto-bumping.
 3. (Optional) Tag a GitHub release for binaries:
    - Create a tag `vX.Y.Z` and push it to trigger the `release` workflow.
 
