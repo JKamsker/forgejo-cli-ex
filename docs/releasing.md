@@ -4,9 +4,8 @@
 
 This repo is configured to publish to crates.io on **push to `master`**:
 
-- If `Cargo.toml`’s `version` **changed in that push**, CI will attempt to publish that version.
-- If `Cargo.toml`’s `version` **did not change**, CI will **bump the patch version**, commit it back to `master`, and publish.
-- If publishing fails because the version already exists, CI bumps the patch version and retries.
+- CI first tries to publish the current `Cargo.toml` version.
+- If publishing fails because the version already exists, CI **bumps the patch version**, commits (`Cargo.toml` + `Cargo.lock`) back to `master`, and publishes.
 - Publishing requires the GitHub Actions secret `CARGO_REGISTRY_TOKEN` to be set.
 
 ### 1) Create a crates.io token

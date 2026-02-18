@@ -60,7 +60,6 @@ jobs:
         shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
@@ -75,33 +74,13 @@ jobs:
 
           echo "crate=$crate current_version=$version"
 
-          prev_version=""
-          if [[ -n "${BEFORE_SHA:-}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
-            prev_version="$(
-              BEFORE_SHA="$BEFORE_SHA" python - <<'PY'
-          import os, re, subprocess, sys
-          before = os.environ["BEFORE_SHA"]
-          try:
-              cargo_toml = subprocess.check_output(["git", "show", f"{before}:Cargo.toml"], text=True)
-          except subprocess.CalledProcessError:
-              sys.exit(0)
-          m = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', cargo_toml)
-          if m:
-              print(m.group(1))
-          PY
-            )"
-          fi
+          publish_out="$(cargo publish --locked 2>&1)" && { echo "$publish_out"; exit 0; }
 
-          if [[ -n "${prev_version:-}" && "${prev_version}" != "${version}" ]]; then
-            echo "Cargo.toml version changed in this push: ${prev_version} -> ${version}"
-            publish_out="$(cargo publish --locked 2>&1)" && { echo "$publish_out"; exit 0; }
-
-            if echo "$publish_out" | grep -qiE "already (uploaded|exists)|is already uploaded|version.*already"; then
-              echo "Version already exists on crates.io; will bump patch and retry."
-            else
-              echo "$publish_out"
-              exit 1
-            fi
+          if echo "$publish_out" | grep -qiE "already (uploaded|exists)|is already uploaded|version.*already"; then
+            echo "Current version already exists on crates.io; will bump patch and publish."
+          else
+            echo "$publish_out"
+            exit 1
           fi
 
           next_version="$(
@@ -146,12 +125,55 @@ jobs:
           path.write_text("".join(out), encoding="utf-8")
           PY
 
-          git diff -- Cargo.toml
+          CRATE_NAME="$crate" NEW_VERSION="$next_version" python - <<'PY'
+          import os, re, pathlib
+          crate = os.environ["CRATE_NAME"]
+          new_version = os.environ["NEW_VERSION"]
+
+          path = pathlib.Path("Cargo.lock")
+          text = path.read_text(encoding="utf-8")
+          lines = text.splitlines(True)
+
+          out = []
+          in_pkg = False
+          is_target = False
+          done = False
+
+          for line in lines:
+              if line.strip() == "[[package]]":
+                  in_pkg = True
+                  is_target = False
+                  out.append(line)
+                  continue
+
+              if in_pkg and not is_target:
+                  m = re.match(r'^name\s*=\s*"([^"]+)"\s*$', line)
+                  if m and m.group(1) == crate:
+                      is_target = True
+                      out.append(line)
+                      continue
+
+              if in_pkg and is_target and not done:
+                  if re.match(r'^version\s*=\s*"[^"]+"\s*$', line):
+                      indent = re.match(r"^(\s*)version\s*=.*$", line).group(1)
+                      out.append(f'{indent}version = "{new_version}"\n')
+                      done = True
+                      continue
+
+              out.append(line)
+
+          if not done:
+              raise SystemExit(f"Failed to update Cargo.lock version for {crate}")
+
+          path.write_text("".join(out), encoding="utf-8")
+          PY
+
+          git diff -- Cargo.toml Cargo.lock
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add Cargo.toml
+          git add Cargo.toml Cargo.lock
           git commit -m "chore(release): bump version to ${next_version}"
           git push origin HEAD:master
 
