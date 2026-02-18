@@ -49,6 +49,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -58,6 +60,7 @@ jobs:
         shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
@@ -72,31 +75,37 @@ jobs:
 
           echo "crate=$crate current_version=$version"
 
-          http_code="$(
-            curl -sS -o crates.json -w "%{http_code}" "https://crates.io/api/v1/crates/${crate}" || true
-          )"
-
-          if [[ "$http_code" != "200" && "$http_code" != "404" ]]; then
-            echo "Unexpected response from crates.io: HTTP $http_code"
-            cat crates.json || true
-            exit 1
+          prev_version=""
+          if [[ -n "${BEFORE_SHA:-}" && "${BEFORE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
+            prev_version="$(
+              BEFORE_SHA="$BEFORE_SHA" python - <<'PY'
+          import os, re, subprocess, sys
+          before = os.environ["BEFORE_SHA"]
+          try:
+              cargo_toml = subprocess.check_output(["git", "show", f"{before}:Cargo.toml"], text=True)
+          except subprocess.CalledProcessError:
+              sys.exit(0)
+          m = re.search(r'(?m)^version\\s*=\\s*\"([^\"]+)\"\\s*$', cargo_toml)
+          if m:
+              print(m.group(1))
+          PY
+            )"
           fi
 
-          published="false"
-          max_version=""
-          if [[ "$http_code" == "200" ]]; then
-            published="$(jq -r --arg v "$version" '[.versions[].num] | index($v) != null' crates.json)"
-            max_version="$(jq -r '.crate.max_version' crates.json)"
-          fi
+          if [[ -n "${prev_version:-}" && "${prev_version}" != "${version}" ]]; then
+            echo "Cargo.toml version changed in this push: ${prev_version} -> ${version}"
+            publish_out="$(cargo publish --locked 2>&1)" && { echo "$publish_out"; exit 0; }
 
-          if [[ "$published" != "true" ]]; then
-            echo "Publishing $crate v$version"
-            cargo publish --locked
-            exit 0
+            if echo "$publish_out" | grep -qiE "already (uploaded|exists)|is already uploaded|version.*already"; then
+              echo "Version already exists on crates.io; will bump patch and retry."
+            else
+              echo "$publish_out"
+              exit 1
+            fi
           fi
 
           next_version="$(
-            CURRENT_VERSION="$version" PUBLISHED_MAX_VERSION="$max_version" python - <<'PY'
+            CURRENT_VERSION="$version" python - <<'PY'
           import os, re
           def parse(v: str):
               m = re.fullmatch(r"(\\d+)\\.(\\d+)\\.(\\d+)", v)
@@ -104,9 +113,7 @@ jobs:
                   raise SystemExit(f"Unsupported version (expected X.Y.Z): {v}")
               return tuple(map(int, m.groups()))
           cur = os.environ["CURRENT_VERSION"]
-          pub = os.environ.get("PUBLISHED_MAX_VERSION") or cur
-          base = max(parse(cur), parse(pub))
-          maj, min_, patch = base
+          maj, min_, patch = parse(cur)
           print(f"{maj}.{min_}.{patch+1}")
           PY
           )"
