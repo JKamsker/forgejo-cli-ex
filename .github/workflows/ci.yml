@@ -137,7 +137,7 @@ jobs:
                   in_pkg = False
               if in_pkg and not done and re.match(r'^\s*version\s*=\s*"[^"]+"\s*(#.*)?$', line):
                   indent = re.match(r"^(\s*)version\s*=.*$", line).group(1)
-                  out.append(f'{indent}version = \"{os.environ[\"NEW_VERSION\"]}\"\\n')
+                  out.append(f'{indent}version = "{os.environ["NEW_VERSION"]}"\n')
                   done = True
                   continue
               out.append(line)
