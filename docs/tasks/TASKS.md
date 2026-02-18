@@ -43,7 +43,7 @@
 - [x] Add LGPL license + crates.io package metadata (`Cargo.toml`, `LICENSE`)
 - [x] Add CI publish to crates.io on push to `master` (requires `CARGO_REGISTRY_TOKEN` secret)
 - [x] Validate packaging with `cargo publish --dry-run`
-- [ ] Publish to crates.io and verify `cargo install forgejo-cli-ex` installs `fj-ex`
+- [x] Publish to crates.io and verify `cargo install forgejo-cli-ex` installs `fj-ex`
 - [ ] Add GitHub secret `CARGO_REGISTRY_TOKEN` and verify CI publishes on next version bump
 - [ ] Auto-bump patch version on each push/merge to `master` and publish to crates.io
 - [x] Document release workflow (version bump + tag + crates.io publish)
