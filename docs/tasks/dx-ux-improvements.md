@@ -80,7 +80,7 @@ Two options:
 `cli.rs:191` — default is `0` and the check is `if max_jobs > 0`. Passing `--max-jobs 0` expecting to download nothing silently downloads everything.
 
 - [x] Add `#[arg(help = "Max jobs to download (0 = unlimited)")]` to `max_jobs` in `ActionsLogsSubcommand::Run` (`cli.rs`)
-- [ ] Consider renaming to `--max-jobs-limit` or changing sentinel value — at minimum document the `0 = unlimited` convention clearly
+- [x] Consider renaming to `--max-jobs-limit` or changing sentinel value — at minimum document the `0 = unlimited` convention clearly
 
 ---
 
