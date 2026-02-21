@@ -88,9 +88,9 @@ Two options:
 
 `actions.rs:73-76` — the pattern `(Some(n), false) if n > 0 => n` silently treats `--run-index 0` and `--run-index -1` as "use latest" instead of erroring. This can mask scripting bugs where the index fails to parse.
 
-- [ ] Add an explicit error branch for `run_index == Some(0)` or negative values: `return Err(eyre!("--run-index must be a positive integer"))` (`actions.rs`)
-- [ ] Apply the same fix to `ActionsLogsSubcommand::Run` handler (`actions.rs`)
-- [ ] Apply the same fix to `ActionsArtifactsSubcommand::List` handler (`actions.rs`)
+- [x] Add an explicit error branch for `run_index == Some(0)` or negative values: `return Err(eyre!("--run-index must be a positive integer"))` (`actions.rs`)
+- [x] Apply the same fix to `ActionsLogsSubcommand::Run` handler (`actions.rs`)
+- [x] Apply the same fix to `ActionsArtifactsSubcommand::List` handler (`actions.rs`)
 
 ---
 

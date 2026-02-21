@@ -72,6 +72,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
         } => {
             let run_index = match (run_index, latest) {
                 (Some(n), false) if n > 0 => n,
+                (Some(_), false) => return Err(eyre!("--run-index must be a positive integer")),
                 _ => crate::ui_actions::latest_run_index(&session, &repo).await?,
             };
 
@@ -146,6 +147,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             } => {
                 let run_index = match (run_index, latest) {
                     (Some(n), false) if n > 0 => n,
+                    (Some(_), false) => return Err(eyre!("--run-index must be a positive integer")),
                     _ => crate::ui_actions::latest_run_index(&session, &repo).await?,
                 };
 
@@ -245,6 +247,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             } => {
                 let run_index = match (run_index, latest) {
                     (Some(n), false) if n > 0 => n,
+                    (Some(_), false) => return Err(eyre!("--run-index must be a positive integer")),
                     _ => crate::ui_actions::latest_run_index(&session, &repo).await?,
                 };
 
