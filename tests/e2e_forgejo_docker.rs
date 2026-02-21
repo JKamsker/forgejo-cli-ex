@@ -1,0 +1,884 @@
+use std::{
+    fs,
+    net::TcpListener,
+    path::{Path, PathBuf},
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant},
+};
+
+use eyre::{eyre, Context, Result};
+use serde_json::Value;
+
+const FORGEJO_IMAGE: &str = "codeberg.org/forgejo/forgejo:14.0.2";
+const ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.3.0";
+
+#[tokio::test]
+#[ignore]
+async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping e2e: requires Linux (uses Docker host networking for job containers)");
+        return Ok(());
+    }
+    if std::env::var("FJ_EX_E2E").ok().as_deref() != Some("1") {
+        eprintln!("skipping e2e: set FJ_EX_E2E=1 to enable");
+        return Ok(());
+    }
+    if !docker_available() {
+        eprintln!("skipping e2e: docker is not available");
+        return Ok(());
+    }
+
+    let http_port = pick_free_port()?;
+    let base_url = format!("http://localhost:{http_port}");
+
+    let username = "e2e";
+    let password = "e2e-password-1234";
+    let email = "e2e@example.invalid";
+    let repo_name = format!("fj-ex-e2e-{http_port}");
+    let repo = format!("{username}/{repo_name}");
+
+    let temp = tempfile::tempdir().wrap_err("failed to create temp dir")?;
+    let appdata_dir = temp.path().join("appdata");
+    let runner_data_dir = temp.path().join("runner");
+    let repo_dir = temp.path().join("repo");
+    let logs_dir = temp.path().join("logs");
+    let smoke_dir = temp.path().join("smoke");
+    let artifact_zip = temp.path().join("artifact.zip");
+
+    fs::create_dir_all(&appdata_dir).wrap_err("failed to create appdata dir")?;
+    fs::create_dir_all(&runner_data_dir).wrap_err("failed to create runner data dir")?;
+    fs::create_dir_all(&repo_dir).wrap_err("failed to create git repo dir")?;
+    fs::create_dir_all(&logs_dir).wrap_err("failed to create logs dir")?;
+    fs::create_dir_all(&smoke_dir).wrap_err("failed to create smoke dir")?;
+
+    let test_id = format!("{}-{http_port}", std::process::id());
+    let forgejo_name = format!("fj-ex-e2e-forgejo-{test_id}");
+    let runner_name = format!("fj-ex-e2e-runner-{test_id}");
+
+    let _stack = DockerStack::start(
+        &forgejo_name,
+        &runner_name,
+        &runner_data_dir,
+        &base_url,
+        username,
+        password,
+        email,
+    )
+    .await?;
+
+    api_create_repo(&base_url, username, password, &repo_name).await?;
+    git_push_workflow(&repo_dir, &base_url, username, password, &repo_name).await?;
+
+    let fj_ex = cargo_bin("fj-ex")?;
+
+    // Login (non-interactive)
+    fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "auth",
+            "login",
+            "--host",
+            &base_url,
+            "--username",
+            username,
+            "--password-stdin",
+        ],
+        Some(format!("{password}\n").into_bytes()),
+    )?;
+
+    // Auth status/list/show
+    let status_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &["auth", "status", "--host", &base_url, "--json"],
+        None,
+    )?;
+    let status_json: Value = serde_json::from_str(&status_out.stdout)?;
+    assert_eq!(status_json["baseUrl"], base_url);
+    assert_eq!(status_json["username"], username);
+    assert_eq!(status_json["hasCreds"], true);
+    assert_eq!(status_json["sessionOk"], true);
+
+    let list_out = fj_ex_cmd(&fj_ex, &appdata_dir, &["auth", "list", "--json"], None)?;
+    let list_json: Value = serde_json::from_str(&list_out.stdout)?;
+    assert!(list_json["logins"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty()));
+
+    let show_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &["auth", "show", "--host", &base_url, "--json"],
+        None,
+    )?;
+    let show_json: Value = serde_json::from_str(&show_out.stdout)?;
+    assert_eq!(show_json["username"], username);
+    assert_eq!(show_json["hasPassword"], true);
+
+    // Wait for the first run to exist and finish.
+    let run_index = wait_for_first_run(&fj_ex, &appdata_dir, &base_url, &repo).await?;
+    wait_for_run_success(&fj_ex, &appdata_dir, &base_url, &repo, run_index).await?;
+
+    // Workflows/runs/jobs listing
+    let workflows_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions",
+            "workflows",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "--json",
+        ],
+        None,
+    )?;
+    let workflows_json: Value = serde_json::from_str(&workflows_out.stdout)?;
+    assert!(
+        workflows_json["workflows"]
+            .as_array()
+            .is_some_and(|w| !w.is_empty()),
+        "expected at least one workflow, got: {}",
+        workflows_out.stdout
+    );
+
+    let runs_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions", "runs", "--host", &base_url, "--repo", &repo, "--limit", "5", "--json",
+        ],
+        None,
+    )?;
+    let runs_json: Value = serde_json::from_str(&runs_out.stdout)?;
+    assert!(runs_json["runs"].as_array().is_some_and(|r| !r.is_empty()));
+
+    let jobs_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions",
+            "jobs",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "--run-index",
+            &run_index.to_string(),
+            "--json",
+        ],
+        None,
+    )?;
+    let jobs_json: Value = serde_json::from_str(&jobs_out.stdout)?;
+    assert!(jobs_json["jobs"].as_array().is_some_and(|j| !j.is_empty()));
+
+    // Logs (job to stdout + run to files)
+    let logs_job_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions",
+            "logs",
+            "job",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "--run-index",
+            &run_index.to_string(),
+            "--job-index",
+            "0",
+        ],
+        None,
+    )?;
+    assert!(
+        logs_job_out.stdout.contains("fj-ex-e2e: hello"),
+        "expected marker in job logs, got:\n{}",
+        logs_job_out.stdout
+    );
+
+    let _logs_run_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions",
+            "logs",
+            "run",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "--run-index",
+            &run_index.to_string(),
+            "--out-dir",
+            logs_dir.to_str().unwrap_or("."),
+        ],
+        None,
+    )?;
+    assert!(
+        fs::read_dir(&logs_dir).is_ok_and(|mut it| it.next().is_some()),
+        "expected at least one log file in {}",
+        logs_dir.display()
+    );
+
+    // Artifacts list + download (zip)
+    let artifacts_list_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions",
+            "artifacts",
+            "list",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "--run-index",
+            &run_index.to_string(),
+            "--json",
+        ],
+        None,
+    )?;
+    assert!(
+        artifacts_list_out.stdout.contains("\"my-artifact\"")
+            || artifacts_list_out.stdout.contains("my-artifact"),
+        "expected artifact in output, got:\n{}",
+        artifacts_list_out.stdout
+    );
+
+    fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions",
+            "artifacts",
+            "get",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "--run-index",
+            &run_index.to_string(),
+            "--artifact",
+            "my-artifact",
+            "--out-file",
+            artifact_zip.to_str().unwrap_or("artifact.zip"),
+        ],
+        None,
+    )?;
+    let artifact_bytes = fs::read(&artifact_zip).wrap_err("failed to read artifact zip")?;
+    assert!(
+        artifact_bytes.starts_with(b"PK"),
+        "expected zip file magic bytes, got: {:?}",
+        &artifact_bytes.get(..4)
+    );
+
+    // Cancel/rerun dry-run
+    let cancel_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions",
+            "cancel",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "--run-index",
+            &run_index.to_string(),
+            "--dry-run",
+        ],
+        None,
+    )?;
+    assert!(cancel_out.stdout.contains("DRY RUN: POST"));
+    assert!(cancel_out.stdout.contains("/cancel"));
+
+    let rerun_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions",
+            "rerun",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "--run-index",
+            &run_index.to_string(),
+            "--dry-run",
+        ],
+        None,
+    )?;
+    assert!(rerun_out.stdout.contains("DRY RUN: POST"));
+    assert!(rerun_out.stdout.contains("/rerun"));
+
+    // Smoke test uses the same UI endpoints and downloads logs.
+    let smoke_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "smoke-test",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "--out-dir",
+            smoke_dir.to_str().unwrap_or("."),
+        ],
+        None,
+    )?;
+    assert!(smoke_out.stdout.contains("\nOK\n"));
+
+    // Logout should remove the entry.
+    fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &["auth", "logout", "--host", &base_url],
+        None,
+    )?;
+
+    Ok(())
+}
+
+struct DockerStack {
+    forgejo_name: String,
+    runner_name: String,
+}
+
+impl DockerStack {
+    async fn start(
+        forgejo_name: &str,
+        runner_name: &str,
+        runner_data_dir: &Path,
+        base_url: &str,
+        username: &str,
+        password: &str,
+        email: &str,
+    ) -> Result<Self> {
+        docker_status(&[
+            "run",
+            "-d",
+            "--name",
+            forgejo_name,
+            "-p",
+            &format!("{}:3000", base_url.rsplit(':').next().unwrap_or("3000")),
+            "-e",
+            "USER_UID=1000",
+            "-e",
+            "USER_GID=1000",
+            "-e",
+            &format!("ROOT_URL={base_url}/"),
+            "-e",
+            "DOMAIN=localhost",
+            "-e",
+            "INSTALL_LOCK=true",
+            "-e",
+            "SECRET_KEY=fj-ex-e2e-secret",
+            "-e",
+            "GITEA__actions__ENABLED=true",
+            "-e",
+            "GITEA__actions__DEFAULT_ACTIONS_URL=https://github.com",
+            "-e",
+            "GITEA__service__ENABLE_BASIC_AUTHENTICATION=true",
+            "-e",
+            "GITEA__server__DISABLE_HTTP_GIT=false",
+            FORGEJO_IMAGE,
+        ])
+        .wrap_err("failed to start forgejo container")?;
+
+        wait_for_http(base_url, Duration::from_secs(90))
+            .await
+            .wrap_err_with(|| format!("forgejo never became ready at {base_url}"))?;
+
+        docker_status(&[
+            "exec",
+            "-u",
+            "git",
+            forgejo_name,
+            "forgejo",
+            "admin",
+            "user",
+            "create",
+            "--username",
+            username,
+            "--password",
+            password,
+            "--email",
+            email,
+            "--admin",
+            "--must-change-password=false",
+        ])
+        .wrap_err("failed to create forgejo admin user")?;
+
+        let runner_token = docker_stdout(&[
+            "exec",
+            "-u",
+            "git",
+            forgejo_name,
+            "forgejo",
+            "actions",
+            "generate-runner-token",
+        ])
+        .wrap_err("failed to generate runner token")?;
+        let runner_token = runner_token.trim();
+        if runner_token.is_empty() {
+            return Err(eyre!("runner token was empty"));
+        }
+
+        let runner_config_path = runner_data_dir.join("config.yml");
+        fs::write(
+            &runner_config_path,
+            "log:\n  level: info\ncontainer:\n  network: host\n  force_pull: false\n",
+        )
+        .wrap_err("failed to write runner config")?;
+
+        docker_status(&[
+            "run",
+            "-d",
+            "--name",
+            runner_name,
+            "--network",
+            "host",
+            "-e",
+            &format!("GITEA_INSTANCE_URL={base_url}"),
+            "-e",
+            &format!("GITEA_RUNNER_REGISTRATION_TOKEN={runner_token}"),
+            "-e",
+            &format!("GITEA_RUNNER_NAME={runner_name}"),
+            "-e",
+            "GITEA_RUNNER_LABELS=ubuntu-latest:docker://node:16-buster",
+            "-e",
+            "CONFIG_FILE=/data/config.yml",
+            "-v",
+            "/var/run/docker.sock:/var/run/docker.sock",
+            "-v",
+            &format!("{}:/data", runner_data_dir.display()),
+            ACT_RUNNER_IMAGE,
+        ])
+        .wrap_err("failed to start act_runner container")?;
+
+        wait_for_runner(runner_name, Duration::from_secs(90))
+            .await
+            .wrap_err("runner did not register")?;
+
+        Ok(Self {
+            forgejo_name: forgejo_name.to_string(),
+            runner_name: runner_name.to_string(),
+        })
+    }
+}
+
+impl Drop for DockerStack {
+    fn drop(&mut self) {
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &self.runner_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let _ = Command::new("docker")
+            .args(["rm", "-f", &self.forgejo_name])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+fn docker_available() -> bool {
+    Command::new("docker")
+        .args(["version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn pick_free_port() -> Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0").wrap_err("failed to bind to ephemeral port")?;
+    let port = listener
+        .local_addr()
+        .wrap_err("failed to read listener addr")?
+        .port();
+    Ok(port)
+}
+
+fn docker_stdout(args: &[&str]) -> Result<String> {
+    let out = Command::new("docker")
+        .args(args)
+        .output()
+        .wrap_err_with(|| format!("failed to run docker {}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(eyre!(
+            "docker {} failed (exit={}):\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn docker_status(args: &[&str]) -> Result<()> {
+    let out = Command::new("docker")
+        .args(args)
+        .output()
+        .wrap_err_with(|| format!("failed to run docker {}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(eyre!(
+            "docker {} failed (exit={}):\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(())
+}
+
+async fn wait_for_http(base_url: &str, timeout: Duration) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(0))
+        .build()
+        .wrap_err("failed to build http client")?;
+
+    let start = Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            return Err(eyre!("timeout waiting for http ready at {base_url}"));
+        }
+
+        let health_url = format!("{base_url}/api/healthz");
+        match client.get(&health_url).send().await {
+            Ok(r) if r.status() == reqwest::StatusCode::OK => return Ok(()),
+            _ => {}
+        }
+
+        let root_url = format!("{base_url}/");
+        match client.get(&root_url).send().await {
+            Ok(r) if r.status().as_u16() < 500 => return Ok(()),
+            _ => {}
+        }
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn wait_for_runner(runner_name: &str, timeout: Duration) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        if start.elapsed() > timeout {
+            let logs = Command::new("docker")
+                .args(["logs", runner_name])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default();
+            return Err(eyre!(
+                "timeout waiting for runner to register. last logs:\n{logs}"
+            ));
+        }
+
+        let logs = Command::new("docker")
+            .args(["logs", runner_name])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+
+        if logs.contains("SUCCESS") || logs.contains("Runner registered successfully") {
+            return Ok(());
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn api_create_repo(
+    base_url: &str,
+    username: &str,
+    password: &str,
+    repo_name: &str,
+) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .wrap_err("failed to build http client")?;
+
+    let url = format!("{base_url}/api/v1/user/repos");
+    let body = serde_json::json!({
+        "name": repo_name,
+        "private": false,
+        "auto_init": false,
+    });
+
+    let resp = client
+        .post(&url)
+        .basic_auth(username, Some(password))
+        .json(&body)
+        .send()
+        .await
+        .wrap_err("failed to call create repo api")?;
+
+    if resp.status() == reqwest::StatusCode::CREATED || resp.status() == reqwest::StatusCode::OK {
+        return Ok(());
+    }
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    Err(eyre!("create repo failed: HTTP {} body={}", status, text))
+}
+
+async fn git_push_workflow(
+    repo_dir: &Path,
+    base_url: &str,
+    username: &str,
+    password: &str,
+    repo_name: &str,
+) -> Result<()> {
+    let wf_dir = repo_dir.join(".forgejo").join("workflows");
+    fs::create_dir_all(&wf_dir).wrap_err("failed to create workflow dir")?;
+    fs::write(
+        wf_dir.join("e2e.yml"),
+        r#"name: fj-ex e2e
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Marker
+        run: |
+          echo "fj-ex-e2e: hello"
+          echo "fj-ex-e2e: artifact" > artifact.txt
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: my-artifact
+          path: artifact.txt
+"#,
+    )
+    .wrap_err("failed to write workflow")?;
+    fs::write(repo_dir.join("README.md"), "# fj-ex e2e\n").wrap_err("failed to write readme")?;
+
+    git(repo_dir, &["init", "-b", "main"]).wrap_err("git init failed")?;
+    git(repo_dir, &["config", "user.name", "fj-ex-e2e"]).wrap_err("git config user.name failed")?;
+    git(
+        repo_dir,
+        &["config", "user.email", "fj-ex-e2e@example.invalid"],
+    )
+    .wrap_err("git config user.email failed")?;
+    git(repo_dir, &["add", "."]).wrap_err("git add failed")?;
+    git(repo_dir, &["commit", "-m", "test: add workflow"]).wrap_err("git commit failed")?;
+
+    let port = base_url
+        .rsplit(':')
+        .next()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(3000);
+    let remote =
+        format!("http://{username}:{password}@localhost:{port}/{username}/{repo_name}.git");
+    git(repo_dir, &["remote", "add", "origin", &remote]).wrap_err("git remote add failed")?;
+    git(repo_dir, &["push", "-u", "origin", "main"]).wrap_err("git push failed")?;
+    Ok(())
+}
+
+fn git(repo_dir: &Path, args: &[&str]) -> Result<()> {
+    let out = Command::new("git")
+        .current_dir(repo_dir)
+        .args(args)
+        .output()
+        .wrap_err_with(|| format!("failed to run git {}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(eyre!(
+            "git {} failed (exit={}):\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(())
+}
+
+fn cargo_bin(name: &str) -> Result<PathBuf> {
+    // Cargo uses CARGO_BIN_EXE_<name> for integration tests. Some environments replace '-' with '_'.
+    let candidates = [
+        format!("CARGO_BIN_EXE_{name}"),
+        format!("CARGO_BIN_EXE_{}", name.replace('-', "_")),
+    ];
+
+    for key in candidates {
+        if let Ok(path) = std::env::var(&key) {
+            if !path.trim().is_empty() {
+                return Ok(PathBuf::from(path));
+            }
+        }
+    }
+
+    Err(eyre!(
+        "unable to locate built binary for '{name}'. Make sure this test is run via `cargo test`."
+    ))
+}
+
+struct FjOut {
+    stdout: String,
+    #[allow(dead_code)]
+    stderr: String,
+}
+
+fn fj_ex_cmd(
+    bin: &Path,
+    appdata_dir: &Path,
+    args: &[&str],
+    stdin: Option<Vec<u8>>,
+) -> Result<FjOut> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .env("APPDATA", appdata_dir)
+        .env("RUST_BACKTRACE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().wrap_err_with(|| {
+        format!(
+            "failed to spawn fj-ex {}",
+            args.iter().copied().collect::<Vec<_>>().join(" ")
+        )
+    })?;
+
+    if let Some(input) = stdin {
+        if let Some(mut s) = child.stdin.take() {
+            use std::io::Write;
+            s.write_all(&input).ok();
+        }
+    }
+
+    let output: Output = child
+        .wait_with_output()
+        .wrap_err("failed to wait for fj-ex")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(eyre!(
+            "fj-ex {} failed (exit={}):\nstdout:\n{}\nstderr:\n{}",
+            args.iter().copied().collect::<Vec<_>>().join(" "),
+            output.status,
+            stdout,
+            stderr
+        ));
+    }
+
+    Ok(FjOut { stdout, stderr })
+}
+
+async fn wait_for_first_run(
+    bin: &Path,
+    appdata_dir: &Path,
+    base_url: &str,
+    repo: &str,
+) -> Result<i64> {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(180);
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(eyre!("timeout waiting for first run to appear"));
+        }
+
+        let out = fj_ex_cmd(
+            bin,
+            appdata_dir,
+            &[
+                "actions", "runs", "--host", base_url, "--repo", repo, "--limit", "5", "--json",
+            ],
+            None,
+        )?;
+        let json: Value = serde_json::from_str(&out.stdout)?;
+        if let Some(first) = json["runs"].as_array().and_then(|a| a.first()) {
+            if let Some(idx) = first["runIndex"].as_i64() {
+                if idx > 0 {
+                    return Ok(idx);
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn wait_for_run_success(
+    bin: &Path,
+    appdata_dir: &Path,
+    base_url: &str,
+    repo: &str,
+    run_index: i64,
+) -> Result<()> {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(240);
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(eyre!("timeout waiting for run {run_index} to complete"));
+        }
+
+        let out = fj_ex_cmd(
+            bin,
+            appdata_dir,
+            &[
+                "actions",
+                "jobs",
+                "--host",
+                base_url,
+                "--repo",
+                repo,
+                "--run-index",
+                &run_index.to_string(),
+                "--json",
+            ],
+            None,
+        )?;
+        let json: Value = serde_json::from_str(&out.stdout)?;
+        let Some(jobs) = json["jobs"].as_array() else {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        };
+        if jobs.is_empty() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        let statuses: Vec<String> = jobs
+            .iter()
+            .filter_map(|j| {
+                j.get("status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+
+        if statuses.iter().any(|s| s.eq_ignore_ascii_case("failure")) {
+            return Err(eyre!("run {run_index} failed: statuses={statuses:?}"));
+        }
+
+        // Allow for some in-progress states while the runner picks it up.
+        let running = ["running", "queued", "pending", "waiting"];
+        if statuses
+            .iter()
+            .all(|s| !running.iter().any(|r| s.eq_ignore_ascii_case(r)))
+        {
+            // Success (or other terminal state like skipped/cancelled) — but we expect success.
+            if statuses.iter().any(|s| s.eq_ignore_ascii_case("success")) {
+                return Ok(());
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
