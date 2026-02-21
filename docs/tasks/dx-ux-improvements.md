@@ -98,8 +98,8 @@ Two options:
 
 `actions.rs:363-373` — success output is either a redirect URL (if Forgejo responds with `{"redirect": "..."}`) or the string `"Rerun requested."`, depending on server behavior. Scripts cannot reliably detect success by output.
 
-- [ ] Always print a consistent success line, e.g. `"Rerun requested for run #{run_index}."`, and print the redirect URL on a second line only if present (or suppress it) (`actions.rs`)
-- [ ] Consider adding `--json` output to `rerun` and `cancel` for scripting (`cli.rs`, `actions.rs`)
+- [x] Always print a consistent success line, e.g. `"Rerun requested for run #{run_index}."`, and print the redirect URL on a second line only if present (or suppress it) (`actions.rs`)
+- [x] Consider adding `--json` output to `rerun` and `cancel` for scripting (`cli.rs`, `actions.rs`)
 
 ---
 

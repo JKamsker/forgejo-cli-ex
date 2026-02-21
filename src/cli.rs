@@ -188,6 +188,8 @@ pub enum ActionsSubcommand {
         latest: bool,
         #[arg(long, help = "Print the request that would be made, but do not perform it.")]
         dry_run: bool,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
     },
     /// Rerun a run (or a single job within a run).
     #[command(group(
@@ -204,6 +206,8 @@ pub enum ActionsSubcommand {
         job_index: Option<i64>,
         #[arg(long, help = "Print the request that would be made, but do not perform it.")]
         dry_run: bool,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
     },
 }
 

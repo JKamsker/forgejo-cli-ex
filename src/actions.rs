@@ -317,6 +317,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             run_index,
             latest,
             dry_run,
+            json,
         } => {
             let run_index = match (run_index, latest) {
                 (Some(n), false) if n > 0 => n,
@@ -330,7 +331,18 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             );
 
             if dry_run {
-                println!("DRY RUN: POST {url}");
+                if json {
+                    let payload = serde_json::json!({
+                        "baseUrl": target.base_url,
+                        "repo": repo,
+                        "runIndex": run_index,
+                        "dryRun": true,
+                        "url": url,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!("DRY RUN: POST {url}");
+                }
                 return Ok(());
             }
 
@@ -344,13 +356,27 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     resp.status()
                 ));
             }
-            println!("Canceled run #{run_index}");
+
+            if json {
+                let payload = serde_json::json!({
+                    "baseUrl": target.base_url,
+                    "repo": repo,
+                    "runIndex": run_index,
+                    "dryRun": false,
+                    "url": url,
+                    "canceled": true,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("Canceled run #{run_index}");
+            }
         }
         ActionsSubcommand::Rerun {
             run_index,
             latest,
             job_index,
             dry_run,
+            json,
         } => {
             let run_index = match (run_index, latest) {
                 (Some(n), false) if n > 0 => n,
@@ -370,7 +396,19 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             };
 
             if dry_run {
-                println!("DRY RUN: POST {url}");
+                if json {
+                    let payload = serde_json::json!({
+                        "baseUrl": target.base_url,
+                        "repo": repo,
+                        "runIndex": run_index,
+                        "jobIndex": job_index.filter(|n| *n >= 0),
+                        "dryRun": true,
+                        "url": url,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!("DRY RUN: POST {url}");
+                }
                 return Ok(());
             }
 
@@ -385,16 +423,39 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             }
 
             let text = resp.text().await.unwrap_or_default();
+            let mut redirect: Option<String> = None;
             if !text.trim().is_empty() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(redirect) = v.get("redirect").and_then(|v| v.as_str()) {
-                        println!("{redirect}");
-                        return Ok(());
+                    if let Some(redirect_url) = v.get("redirect").and_then(|v| v.as_str()) {
+                        redirect = Some(redirect_url.to_string());
                     }
                 }
             }
 
-            println!("Rerun requested.");
+            if json {
+                let payload = serde_json::json!({
+                    "baseUrl": target.base_url,
+                    "repo": repo,
+                    "runIndex": run_index,
+                    "jobIndex": job_index.filter(|n| *n >= 0),
+                    "dryRun": false,
+                    "url": url,
+                    "redirect": redirect,
+                    "requested": true,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+
+            match job_index {
+                Some(job_index) if job_index >= 0 => {
+                    println!("Rerun requested for run #{run_index}, job #{job_index}.");
+                }
+                _ => println!("Rerun requested for run #{run_index}."),
+            }
+            if let Some(redirect) = redirect {
+                println!("{redirect}");
+            }
         }
     }
 
