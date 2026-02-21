@@ -54,15 +54,27 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     "page": page,
                     "limit": limit,
                     "workflow": workflow,
-                    "runs": runs.iter().map(|r| serde_json::json!({"runIndex": r.run_index, "url": r.url})).collect::<Vec<_>>(),
+                    "runs": runs.iter().map(|r| serde_json::json!({
+                        "runIndex": r.run_index,
+                        "url": r.url,
+                        "status": r.status.clone(),
+                        "branch": r.branch.clone(),
+                        "createdAt": r.created_at.clone(),
+                    })).collect::<Vec<_>>(),
                 });
                 println!("{}", serde_json::to_string_pretty(&payload)?);
                 return Ok(());
             }
 
-            println!("RunIndex\tUrl");
+            println!("RunIndex\tStatus\tBranch\tCreatedAt\tUrl");
             for r in runs {
-                println!("{}\t{}", r.run_index, r.url);
+                let status = r.status.as_deref().unwrap_or("?");
+                let branch = r.branch.as_deref().unwrap_or("");
+                let created_at = r.created_at.as_deref().unwrap_or("");
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    r.run_index, status, branch, created_at, r.url
+                );
             }
         }
         ActionsSubcommand::Jobs {

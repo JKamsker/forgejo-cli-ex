@@ -107,10 +107,10 @@ Two options:
 
 `actions.rs:63-66` — text output is only `RunIndex` and `Url`. No status, branch, trigger event, or timestamp — information a developer needs to choose which run to investigate.
 
-- [ ] Check whether `list_runs` in `ui_actions.rs` already returns status/branch/trigger data
-- [ ] If not, extend the scraping/API call to retrieve those fields
-- [ ] Add `Status`, `Branch`, and `CreatedAt` (or similar) columns to the text output of `fj-ex actions runs`
-- [ ] Add the same fields to the `--json` output
+- [x] Check whether `list_runs` in `ui_actions.rs` already returns status/branch/trigger data
+- [x] If not, extend the scraping/API call to retrieve those fields
+- [x] Add `Status`, `Branch`, and `CreatedAt` (or similar) columns to the text output of `fj-ex actions runs`
+- [x] Add the same fields to the `--json` output
 
 ---
 

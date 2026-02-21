@@ -10,6 +10,9 @@ use crate::{html, session::UiSession};
 pub struct RunRef {
     pub run_index: i64,
     pub url: String,
+    pub status: Option<String>,
+    pub branch: Option<String>,
+    pub created_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -112,15 +115,26 @@ pub async fn list_runs(
     }
     let html_s = resp.text().await.wrap_err("failed to read response html")?;
 
+    let run_href_prefix = format!("href=\"/{repo_path}/actions/runs/");
     let re = Regex::new(&format!(
-        r#"/{}/actions/runs/(?P<idx>\d+)"#,
+        r#"href="/{}/actions/runs/(?P<idx>\d+)""#,
         regex::escape(repo_path)
     ))
     .wrap_err("failed to build regex")?;
 
+    let status_re = Regex::new(
+        r#"data-tooltip-content="(?P<status>Success|Failure|Running|Waiting|Canceled|Cancelled|Skipped|Blocked)""#,
+    )
+    .wrap_err("failed to build status regex")?;
+    let ref_re = Regex::new(r#"class="ui label run-list-ref[^"]*"[^>]*>(?P<ref>[^<]+)</a>"#)
+        .wrap_err("failed to build ref regex")?;
+    let created_at_re = Regex::new(r#"<(?:relative-time|time)[^>]*datetime=['"](?P<dt>[^'"]+)['"]"#)
+        .wrap_err("failed to build created-at regex")?;
+
     let mut seen = HashSet::new();
     let mut runs = Vec::new();
     for caps in re.captures_iter(&html_s) {
+        let m = caps.get(0).ok_or_else(|| eyre!("run regex capture missing match"))?;
         let idx_s = caps.name("idx").map(|m| m.as_str()).unwrap_or_default();
         if idx_s.is_empty() {
             continue;
@@ -132,6 +146,28 @@ pub async fn list_runs(
         if run_index <= 0 {
             continue;
         }
+
+        let before_start = m.start().saturating_sub(800);
+        let before = &html_s[before_start..m.end()];
+        let status = status_re
+            .captures_iter(before)
+            .last()
+            .and_then(|c| c.name("status").map(|m| m.as_str().to_string()));
+
+        let max_after_end = (m.end() + 8_000).min(html_s.len());
+        let after_end = html_s[m.end()..max_after_end]
+            .find(&run_href_prefix)
+            .map(|i| m.end() + i)
+            .unwrap_or(max_after_end);
+        let after = &html_s[m.end()..after_end];
+
+        let branch = ref_re
+            .captures(after)
+            .and_then(|c| c.name("ref").map(|m| html::html_decode(m.as_str())));
+        let created_at = created_at_re
+            .captures(after)
+            .and_then(|c| c.name("dt").map(|m| m.as_str().to_string()));
+
         let run_url = format!(
             "{}/{repo_path}/actions/runs/{run_index}",
             session.base_url()
@@ -139,6 +175,9 @@ pub async fn list_runs(
         runs.push(RunRef {
             run_index,
             url: run_url,
+            status,
+            branch,
+            created_at,
         });
     }
 
