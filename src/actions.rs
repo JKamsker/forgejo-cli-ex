@@ -121,9 +121,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             .attempt_number
                     }
                 };
-                let bytes =
-                    crate::ui_actions::download_job_logs(&session, &repo, run_index, job_index, attempt)
-                        .await?;
+                let bytes = crate::ui_actions::download_job_logs(
+                    &session, &repo, run_index, job_index, attempt,
+                )
+                .await?;
 
                 if let Some(out_file) = out_file {
                     if let Some(parent) = out_file.parent() {

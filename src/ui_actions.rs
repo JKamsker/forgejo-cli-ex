@@ -173,14 +173,17 @@ pub async fn get_run_view_data(
         html::get_html_attribute_value(&html_s, "data-initial-artifacts-response");
 
     let view: Value = if let Some(job_json) = initial_job_json {
-        serde_json::from_str(&job_json).wrap_err("failed to parse data-initial-post-response json")?
+        serde_json::from_str(&job_json)
+            .wrap_err("failed to parse data-initial-post-response json")?
     } else {
         // Older Forgejo versions (e.g. 11.x) don't embed the initial JSON response and instead
         // fetch it via a CSRF-protected UI endpoint.
         let csrf_token = html::get_csrf_token_from_html(&html_s)
             .ok_or_else(|| eyre!("Unable to determine CSRF token in run view HTML ({url})."))?;
-        let actions_url = html::get_html_attribute_value(&html_s, "data-actions-url")
-            .ok_or_else(|| eyre!("Unable to determine data-actions-url in run view HTML ({url})."))?;
+        let actions_url =
+            html::get_html_attribute_value(&html_s, "data-actions-url").ok_or_else(|| {
+                eyre!("Unable to determine data-actions-url in run view HTML ({url}).")
+            })?;
 
         let effective_run_index = html::get_html_attribute_value(&html_s, "data-run-index")
             .and_then(|s| s.parse::<i64>().ok())
@@ -189,14 +192,18 @@ pub async fn get_run_view_data(
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
 
-        let actions_base = if actions_url.starts_with("http://") || actions_url.starts_with("https://")
-        {
-            actions_url
-        } else if actions_url.starts_with('/') {
-            format!("{}{}", session.base_url(), actions_url)
-        } else {
-            format!("{}/{}", session.base_url().trim_end_matches('/'), actions_url)
-        };
+        let actions_base =
+            if actions_url.starts_with("http://") || actions_url.starts_with("https://") {
+                actions_url
+            } else if actions_url.starts_with('/') {
+                format!("{}{}", session.base_url(), actions_url)
+            } else {
+                format!(
+                    "{}/{}",
+                    session.base_url().trim_end_matches('/'),
+                    actions_url
+                )
+            };
         let job_url = format!("{actions_base}/runs/{effective_run_index}/jobs/{job_index}");
         let body = serde_json::json!({ "logCursors": [] });
 
@@ -304,10 +311,8 @@ pub async fn get_job_view_meta(
             // They still make logs available, typically without an attempt segment.
             let re = Regex::new(r#"/attempt/(?P<n>\d+)/logs"#).ok();
             re.and_then(|re| {
-                re.captures(&html_s).and_then(|caps| {
-                    caps.name("n")
-                        .and_then(|m| m.as_str().parse::<i64>().ok())
-                })
+                re.captures(&html_s)
+                    .and_then(|caps| caps.name("n").and_then(|m| m.as_str().parse::<i64>().ok()))
             })
             .unwrap_or(1)
         }
