@@ -10,11 +10,22 @@ use eyre::{eyre, Context, Result};
 use serde_json::Value;
 
 const FORGEJO_IMAGE: &str = "codeberg.org/forgejo/forgejo:14.0.2";
+const FORGEJO_IMAGE_11_0_10: &str = "codeberg.org/forgejo/forgejo:11.0.10";
 const ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.3.0";
 
 #[tokio::test]
 #[ignore]
 async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
+    run_e2e(FORGEJO_IMAGE, "14-0-2").await
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_forgejo_11_0_10_docker() -> Result<()> {
+    run_e2e(FORGEJO_IMAGE_11_0_10, "11-0-10").await
+}
+
+async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping e2e: requires Linux (uses Docker host networking for job containers)");
         return Ok(());
@@ -34,7 +45,7 @@ async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
     let username = "e2e";
     let password = "e2e-password-1234";
     let email = "e2e@example.invalid";
-    let repo_name = format!("fj-ex-e2e-{http_port}");
+    let repo_name = format!("fj-ex-e2e-{version_label}-{http_port}");
     let repo = format!("{username}/{repo_name}");
 
     let temp = tempfile::tempdir().wrap_err("failed to create temp dir")?;
@@ -51,7 +62,7 @@ async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
     fs::create_dir_all(&logs_dir).wrap_err("failed to create logs dir")?;
     fs::create_dir_all(&smoke_dir).wrap_err("failed to create smoke dir")?;
 
-    let test_id = format!("{}-{http_port}", std::process::id());
+    let test_id = format!("{}-{version_label}-{http_port}", std::process::id());
     let forgejo_name = format!("fj-ex-e2e-forgejo-{test_id}");
     let runner_name = format!("fj-ex-e2e-runner-{test_id}");
 
@@ -60,6 +71,7 @@ async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
         &runner_name,
         &runner_data_dir,
         &base_url,
+        forgejo_image,
         username,
         password,
         email,
@@ -353,6 +365,7 @@ impl DockerStack {
         runner_name: &str,
         runner_data_dir: &Path,
         base_url: &str,
+        forgejo_image: &str,
         username: &str,
         password: &str,
         email: &str,
@@ -384,7 +397,7 @@ impl DockerStack {
             "GITEA__service__ENABLE_BASIC_AUTHENTICATION=true",
             "-e",
             "GITEA__server__DISABLE_HTTP_GIT=false",
-            FORGEJO_IMAGE,
+            forgejo_image,
         ])
         .wrap_err("failed to start forgejo container")?;
 
