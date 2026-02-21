@@ -8,16 +8,16 @@ Findings from a review of `fj-ex` CLI developer/user experience. Issues are grou
 
 Nearly all `actions` subcommands and their args lack doc comments, so `fj-ex actions --help` shows no descriptions.
 
-- [ ] Add `/// ...` doc comment to `Actions(ActionsCommand)` in `Command` enum (`cli.rs`)
-- [ ] Add `/// ...` doc comment to `SmokeTest(SmokeTestCommand)` in `Command` enum (`cli.rs`)
-- [ ] Add `/// ...` doc comments to each variant of `ActionsSubcommand` (`Workflows`, `Runs`, `Jobs`, `Logs`, `Artifacts`, `Cancel`, `Rerun`) (`cli.rs`)
-- [ ] Add `/// ...` `#[arg(help = "...")]` to each field inside `Cancel` (`run_index`, `dry_run`) (`cli.rs`)
-- [ ] Add `/// ...` `#[arg(help = "...")]` to each field inside `Rerun` (`run_index`, `job_index`, `dry_run`) (`cli.rs`)
-- [ ] Add `/// ...` `#[arg(help = "...")]` to fields in `ActionsLogsSubcommand::Run` (`run_index`, `latest`, `out_dir`, `max_jobs`) (`cli.rs`)
-- [ ] Add `/// ...` `#[arg(help = "...")]` to fields in `ActionsLogsSubcommand::Job` (`run_index`, `job_index`, `attempt`, `out_file`) (`cli.rs`)
-- [ ] Add `/// ...` `#[arg(help = "...")]` to fields in `ActionsArtifactsSubcommand::Get` (`run_index`, `artifact`, `out_file`) (`cli.rs`)
-- [ ] Add `#[arg(long, default_value_t = 1_048_576, help = "...")]` to `log_download_max_bytes` in `SmokeTestCommand` (`cli.rs`)
-- [ ] Verify `fj-ex --help`, `fj-ex actions --help`, and each subcommand `--help` show meaningful descriptions after changes
+- [x] Add `/// ...` doc comment to `Actions(ActionsCommand)` in `Command` enum (`cli.rs`)
+- [x] Add `/// ...` doc comment to `SmokeTest(SmokeTestCommand)` in `Command` enum (`cli.rs`)
+- [x] Add `/// ...` doc comments to each variant of `ActionsSubcommand` (`Workflows`, `Runs`, `Jobs`, `Logs`, `Artifacts`, `Cancel`, `Rerun`) (`cli.rs`)
+- [x] Add `/// ...` `#[arg(help = "...")]` to each field inside `Cancel` (`run_index`, `dry_run`) (`cli.rs`)
+- [x] Add `/// ...` `#[arg(help = "...")]` to each field inside `Rerun` (`run_index`, `job_index`, `dry_run`) (`cli.rs`)
+- [x] Add `/// ...` `#[arg(help = "...")]` to fields in `ActionsLogsSubcommand::Run` (`run_index`, `latest`, `out_dir`, `max_jobs`) (`cli.rs`)
+- [x] Add `/// ...` `#[arg(help = "...")]` to fields in `ActionsLogsSubcommand::Job` (`run_index`, `job_index`, `attempt`, `out_file`) (`cli.rs`)
+- [x] Add `/// ...` `#[arg(help = "...")]` to fields in `ActionsArtifactsSubcommand::Get` (`run_index`, `artifact`, `out_file`) (`cli.rs`)
+- [x] Add `#[arg(long, default_value_t = 1_048_576, help = "...")]` to `log_download_max_bytes` in `SmokeTestCommand` (`cli.rs`)
+- [x] Verify `fj-ex --help`, `fj-ex actions --help`, and each subcommand `--help` show meaningful descriptions after changes
 
 ---
 
@@ -79,7 +79,7 @@ Two options:
 
 `cli.rs:191` — default is `0` and the check is `if max_jobs > 0`. Passing `--max-jobs 0` expecting to download nothing silently downloads everything.
 
-- [ ] Add `#[arg(help = "Max jobs to download (0 = unlimited)")]` to `max_jobs` in `ActionsLogsSubcommand::Run` (`cli.rs`)
+- [x] Add `#[arg(help = "Max jobs to download (0 = unlimited)")]` to `max_jobs` in `ActionsLogsSubcommand::Run` (`cli.rs`)
 - [ ] Consider renaming to `--max-jobs-limit` or changing sentinel value — at minimum document the `0 = unlimited` convention clearly
 
 ---
@@ -118,7 +118,7 @@ Two options:
 
 `actions.rs:223-226, 236` — `== job N (attempt M) :: name ==` separators go to stderr while log content goes to stdout. Correct for piping, but nowhere documented.
 
-- [ ] Add a note to the `logs run` subcommand's help text: `"Job separators (== job N ==) are written to stderr; log content goes to stdout"` (`cli.rs`)
+- [x] Add a note to the `logs run` subcommand's help text: `"Job separators (== job N ==) are written to stderr; log content goes to stdout"` (`cli.rs`)
 
 ---
 

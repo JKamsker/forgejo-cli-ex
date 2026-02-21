@@ -12,7 +12,9 @@ pub enum Command {
     /// Authentication and credential management (UI session cookies + plaintext creds).
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Forgejo Actions: workflows, runs, jobs, logs, artifacts, cancel/rerun.
     Actions(ActionsCommand),
+    /// Smoke test for Actions access (useful for debugging auth/connectivity/log downloads).
     #[command(name = "smoke-test")]
     SmokeTest(SmokeTestCommand),
     /// Legacy alias for `fj-ex auth login`.
@@ -132,92 +134,110 @@ pub struct ActionsCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ActionsSubcommand {
+    /// List available workflows for the repo.
     Workflows {
-        #[arg(long)]
+        /// Print JSON output.
+        #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// List workflow runs for the repo.
     Runs {
-        #[arg(long)]
+        #[arg(long, help = "Filter runs by workflow name.")]
         workflow: Option<String>,
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 1, help = "Page number (1-based).")]
         page: u32,
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = 20, help = "Max runs per page.")]
         limit: u32,
-        #[arg(long)]
+        #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// List jobs for a run.
     Jobs {
-        #[arg(long)]
+        #[arg(long, help = "Run index to inspect.")]
         run_index: Option<i64>,
-        #[arg(long)]
+        #[arg(long, help = "Use the latest run.")]
         latest: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// Download and print logs.
     Logs {
         #[command(subcommand)]
         command: ActionsLogsSubcommand,
     },
+    /// List or download run artifacts.
     Artifacts {
         #[command(subcommand)]
         command: ActionsArtifactsSubcommand,
     },
+    /// Cancel a run.
     Cancel {
-        #[arg(long)]
+        #[arg(long, help = "Run index to cancel.")]
         run_index: i64,
-        #[arg(long)]
+        #[arg(long, help = "Print the request that would be made, but do not perform it.")]
         dry_run: bool,
     },
+    /// Rerun a run (or a single job within a run).
     Rerun {
-        #[arg(long)]
+        #[arg(long, help = "Run index to rerun.")]
         run_index: i64,
-        #[arg(long)]
+        #[arg(long, help = "Rerun a specific job index within the run.")]
         job_index: Option<i64>,
-        #[arg(long)]
+        #[arg(long, help = "Print the request that would be made, but do not perform it.")]
         dry_run: bool,
     },
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ActionsLogsSubcommand {
+    /// Download logs for all jobs in a run.
+    ///
+    /// Note: Job separators (`== job N ==`) are written to stderr; log content goes to stdout.
     Run {
-        #[arg(long)]
+        #[arg(long, help = "Run index to download logs for.")]
         run_index: Option<i64>,
-        #[arg(long)]
+        #[arg(long, help = "Use the latest run.")]
         latest: bool,
-        #[arg(long)]
+        #[arg(long, help = "Write per-job log files to this directory (otherwise stdout).")]
         out_dir: Option<std::path::PathBuf>,
-        #[arg(long, default_value_t = 0)]
+        #[arg(
+            long,
+            default_value_t = 0,
+            help = "Max jobs to download (0 = unlimited)."
+        )]
         max_jobs: u32,
     },
+    /// Download logs for a single job in a run.
     Job {
-        #[arg(long)]
+        #[arg(long, help = "Run index to download logs for.")]
         run_index: i64,
-        #[arg(long)]
+        #[arg(long, help = "Job index within the run.")]
         job_index: i64,
-        #[arg(long)]
+        #[arg(long, help = "Attempt number (defaults to latest attempt).")]
         attempt: Option<i64>,
-        #[arg(long)]
+        #[arg(long, help = "Write logs to this file (otherwise stdout).")]
         out_file: Option<std::path::PathBuf>,
     },
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ActionsArtifactsSubcommand {
+    /// List artifacts for a run.
     List {
-        #[arg(long)]
+        #[arg(long, help = "Run index to list artifacts for.")]
         run_index: Option<i64>,
-        #[arg(long)]
+        #[arg(long, help = "Use the latest run.")]
         latest: bool,
-        #[arg(long)]
+        #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// Download a single artifact from a run.
     Get {
-        #[arg(long)]
+        #[arg(long, help = "Run index to download the artifact from.")]
         run_index: i64,
-        #[arg(long)]
+        #[arg(long, help = "Artifact name or id.")]
         artifact: String,
-        #[arg(long)]
+        #[arg(long, help = "Output file path.")]
         out_file: std::path::PathBuf,
     },
 }
@@ -227,7 +247,11 @@ pub struct SmokeTestCommand {
     #[command(flatten)]
     pub target: TargetArgs,
 
-    #[arg(long, default_value_t = 1_048_576)]
+    #[arg(
+        long,
+        default_value_t = 1_048_576,
+        help = "Max bytes to download per job log (default: 1 MiB)."
+    )]
     pub log_download_max_bytes: u64,
 
     /// Base directory for smoke test log downloads (a run-specific folder is created inside)
