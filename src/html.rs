@@ -22,6 +22,29 @@ pub fn get_csrf_from_login_html(html: &str) -> Option<String> {
     Some(html_decode(value))
 }
 
+pub fn get_csrf_token_from_html(html: &str) -> Option<String> {
+    // Forgejo/Gitea pages typically embed the CSRF token in `window.config`.
+    let patterns = [
+        r#"csrfToken:\s*'([^']+)'"#,
+        r#"csrfToken:\s*"([^"]+)""#,
+        // Some pages also expose it via htmx headers on the <body>.
+        r#"hx-headers=['"][^'"]*"x-csrf-token"\s*:\s*"([^"]+)"[^'"]*['"]"#,
+    ];
+
+    for pattern in patterns {
+        let re = Regex::new(pattern).ok()?;
+        if let Some(caps) = re.captures(html) {
+            if let Some(value) = caps.get(1).map(|m| m.as_str()) {
+                if !value.trim().is_empty() {
+                    return Some(html_decode(value));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -30,6 +53,18 @@ mod tests {
     fn csrf_is_extracted_and_decoded() {
         let html = r#"<input type="hidden" name="_csrf" value="abc&amp;123">"#;
         assert_eq!(get_csrf_from_login_html(html).as_deref(), Some("abc&123"));
+    }
+
+    #[test]
+    fn csrf_token_is_extracted_from_page_script() {
+        let html = r#"window.config = {csrfToken: 'abc&amp;123', other: 1};"#;
+        assert_eq!(get_csrf_token_from_html(html).as_deref(), Some("abc&123"));
+    }
+
+    #[test]
+    fn csrf_token_is_extracted_from_hx_headers() {
+        let html = r#"<body hx-headers='{"x-csrf-token": "abc&amp;123"}'>"#;
+        assert_eq!(get_csrf_token_from_html(html).as_deref(), Some("abc&123"));
     }
 
     #[test]

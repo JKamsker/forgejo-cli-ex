@@ -73,22 +73,14 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
         job0.job_index, meta.attempt_number
     ));
 
-    let repo_path = repo.trim_matches('/');
-    let logs_url = format!(
-        "{}/{repo_path}/actions/runs/{latest_run_index}/jobs/{}/attempt/{}/logs",
-        session.base_url(),
+    let bytes = crate::ui_actions::download_job_logs(
+        &session,
+        &repo,
+        latest_run_index,
         job0.job_index,
-        meta.attempt_number
-    );
-    let resp = session.get_response(&logs_url, true).await?;
-    if resp.status() != reqwest::StatusCode::OK {
-        return Err(eyre::eyre!(
-            "Failed to download logs from '{}'. HTTP {}.",
-            logs_url,
-            resp.status()
-        ));
-    }
-    let bytes = resp.bytes().await?;
+        meta.attempt_number,
+    )
+    .await?;
     if bytes.is_empty() {
         return Err(eyre::eyre!("Log file non-empty"));
     }
@@ -104,6 +96,7 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
     println!("logBytes={len} outFile={}", out_file.display());
 
     println!("[7] Non-destructive command checks");
+    let repo_path = repo.trim_matches('/');
     let cancel_url = format!(
         "{}/{repo_path}/actions/runs/{latest_run_index}/cancel",
         session.base_url()
