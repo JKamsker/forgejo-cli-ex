@@ -69,9 +69,9 @@ Two options:
 **Option A (preferred):** Flatten `TargetArgs` into each `ActionsSubcommand` variant individually. Verbose but standard clap behavior.
 **Option B (lighter):** Keep the current structure but add a prominent note to `ActionsCommand`'s about text: `"Note: --host/--repo/--remote must appear before the subcommand name"`.
 
-- [ ] Decide between Option A and Option B
-- [ ] Implement chosen option
-- [ ] Verify `fj-ex actions runs --host forge.example.com` either works (Option A) or prints a clear error with guidance (Option B)
+- [x] Decide between Option A and Option B
+- [x] Implement chosen option
+- [x] Verify `fj-ex actions runs --host forge.example.com` either works (Option A) or prints a clear error with guidance (Option B)
 
 ---
 

@@ -42,15 +42,15 @@ pub enum AuthCommand {
 #[derive(Args, Debug, Clone)]
 pub struct TargetArgs {
     /// Forgejo host or base URL (e.g. forge.example.com or https://forge.example.com)
-    #[arg(long, short = 'H')]
+    #[arg(long, short = 'H', global = true)]
     pub host: Option<String>,
 
     /// Repo to operate on (owner/name or host/owner/name)
-    #[arg(long, short = 'r')]
+    #[arg(long, short = 'r', global = true)]
     pub repo: Option<crate::target::RepoArg>,
 
     /// Local git remote used to infer host/repo (default: origin)
-    #[arg(long, short = 'R')]
+    #[arg(long, short = 'R', global = true)]
     pub remote: Option<String>,
 }
 
