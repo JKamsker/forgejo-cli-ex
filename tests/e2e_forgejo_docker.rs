@@ -69,7 +69,7 @@ async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
     api_create_repo(&base_url, username, password, &repo_name).await?;
     git_push_workflow(&repo_dir, &base_url, username, password, &repo_name).await?;
 
-    let fj_ex = cargo_bin("fj-ex")?;
+    let fj_ex = fj_ex_bin()?;
 
     // Login (non-interactive)
     fj_ex_cmd(
@@ -704,23 +704,30 @@ fn git(repo_dir: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn cargo_bin(name: &str) -> Result<PathBuf> {
-    // Cargo uses CARGO_BIN_EXE_<name> for integration tests. Some environments replace '-' with '_'.
-    let candidates = [
-        format!("CARGO_BIN_EXE_{name}"),
-        format!("CARGO_BIN_EXE_{}", name.replace('-', "_")),
-    ];
+fn fj_ex_bin() -> Result<PathBuf> {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_fj-ex") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = option_env!("CARGO_BIN_EXE_fj_ex") {
+        return Ok(PathBuf::from(path));
+    }
 
-    for key in candidates {
-        if let Ok(path) = std::env::var(&key) {
-            if !path.trim().is_empty() {
-                return Ok(PathBuf::from(path));
-            }
-        }
+    // Fallback: target/debug/<bin>, next to the integration test executable.
+    let exe = std::env::current_exe().wrap_err("failed to locate current test executable")?;
+    let Some(debug_dir) = exe.parent().and_then(|p| p.parent()) else {
+        return Err(eyre!(
+            "unable to locate built fj-ex binary (could not infer target dir from {})",
+            exe.display()
+        ));
+    };
+    let bin = debug_dir.join(if cfg!(windows) { "fj-ex.exe" } else { "fj-ex" });
+    if bin.is_file() {
+        return Ok(bin);
     }
 
     Err(eyre!(
-        "unable to locate built binary for '{name}'. Make sure this test is run via `cargo test`."
+        "unable to locate built fj-ex binary. Looked for CARGO_BIN_EXE_fj-ex/CARGO_BIN_EXE_fj_ex and {}",
+        bin.display()
     ))
 }
 
