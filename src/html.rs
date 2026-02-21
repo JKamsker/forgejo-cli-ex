@@ -84,4 +84,13 @@ mod tests {
             Some(r#"{"a":1}"#)
         );
     }
+
+    #[test]
+    fn data_attribute_accepts_double_quotes_and_whitespace() {
+        let html = r#"<div data-initial-post-response = "{&quot;a&quot;:1}"></div>"#;
+        assert_eq!(
+            get_html_attribute_value(html, "data-initial-post-response").as_deref(),
+            Some(r#"{"a":1}"#)
+        );
+    }
 }

@@ -341,7 +341,7 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
         ],
         None,
     )?;
-    assert!(smoke_out.stdout.contains("\nOK\n"));
+    assert!(smoke_out.stdout.lines().any(|l| l.trim() == "OK"));
 
     // Logout should remove the entry.
     fj_ex_cmd(
@@ -461,7 +461,7 @@ impl DockerStack {
             "-e",
             &format!("GITEA_RUNNER_NAME={runner_name}"),
             "-e",
-            "GITEA_RUNNER_LABELS=ubuntu-latest:docker://node:16-buster",
+            "GITEA_RUNNER_LABELS=ubuntu-latest:docker://node:20-bookworm",
             "-e",
             "CONFIG_FILE=/data/config.yml",
             "-v",
@@ -508,6 +508,9 @@ fn docker_available() -> bool {
 }
 
 fn pick_free_port() -> Result<u16> {
+    // NOTE: This has a small TOCTOU race (another process could bind the port
+    // after we release it and before Docker binds). In CI this is extremely
+    // unlikely, and Docker will fail fast if the port is taken.
     let listener = TcpListener::bind("127.0.0.1:0").wrap_err("failed to bind to ephemeral port")?;
     let port = listener
         .local_addr()
@@ -552,7 +555,7 @@ fn docker_status(args: &[&str]) -> Result<()> {
 
 async fn wait_for_http(base_url: &str, timeout: Duration) -> Result<()> {
     let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(0))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .wrap_err("failed to build http client")?;
 
@@ -586,7 +589,12 @@ async fn wait_for_runner(runner_name: &str, timeout: Duration) -> Result<()> {
                 .args(["logs", runner_name])
                 .output()
                 .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .map(|o| {
+                    let mut s = String::new();
+                    s.push_str(&String::from_utf8_lossy(&o.stdout));
+                    s.push_str(&String::from_utf8_lossy(&o.stderr));
+                    s
+                })
                 .unwrap_or_default();
             return Err(eyre!(
                 "timeout waiting for runner to register. last logs:\n{logs}"
@@ -597,7 +605,12 @@ async fn wait_for_runner(runner_name: &str, timeout: Duration) -> Result<()> {
             .args(["logs", runner_name])
             .output()
             .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .map(|o| {
+                let mut s = String::new();
+                s.push_str(&String::from_utf8_lossy(&o.stdout));
+                s.push_str(&String::from_utf8_lossy(&o.stderr));
+                s
+            })
             .unwrap_or_default();
 
         if logs.contains("SUCCESS") || logs.contains("Runner registered successfully") {
@@ -668,7 +681,7 @@ jobs:
           echo "fj-ex-e2e: hello"
           echo "fj-ex-e2e: artifact" > artifact.txt
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: my-artifact
           path: artifact.txt
@@ -764,18 +777,17 @@ fn fj_ex_cmd(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().wrap_err_with(|| {
-        format!(
-            "failed to spawn fj-ex {}",
-            args.iter().copied().collect::<Vec<_>>().join(" ")
-        )
-    })?;
+    let mut child = cmd
+        .spawn()
+        .wrap_err_with(|| format!("failed to spawn fj-ex {}", args.join(" ")))?;
 
     if let Some(input) = stdin {
-        if let Some(mut s) = child.stdin.take() {
-            use std::io::Write;
-            s.write_all(&input).ok();
-        }
+        use std::io::Write;
+        let Some(mut s) = child.stdin.take() else {
+            return Err(eyre!("failed to open fj-ex stdin pipe"));
+        };
+        s.write_all(&input)
+            .wrap_err("failed to write to fj-ex stdin")?;
     }
 
     let output: Output = child
@@ -788,7 +800,7 @@ fn fj_ex_cmd(
     if !output.status.success() {
         return Err(eyre!(
             "fj-ex {} failed (exit={}):\nstdout:\n{}\nstderr:\n{}",
-            args.iter().copied().collect::<Vec<_>>().join(" "),
+            args.join(" "),
             output.status,
             stdout,
             stderr
@@ -819,8 +831,24 @@ async fn wait_for_first_run(
                 "actions", "--host", base_url, "--repo", repo, "runs", "--limit", "5", "--json",
             ],
             None,
-        )?;
-        let json: Value = serde_json::from_str(&out.stdout)?;
+        );
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("warn: failed to list runs (will retry): {e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let json: Value = match serde_json::from_str(&out.stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("warn: failed to parse runs json (will retry): {e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
         if let Some(first) = json["runs"].as_array().and_then(|a| a.first()) {
             if let Some(idx) = first["runIndex"].as_i64() {
                 if idx > 0 {
@@ -863,8 +891,24 @@ async fn wait_for_run_success(
                 "--json",
             ],
             None,
-        )?;
-        let json: Value = serde_json::from_str(&out.stdout)?;
+        );
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("warn: failed to query jobs for run {run_index} (will retry): {e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let json: Value = match serde_json::from_str(&out.stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("warn: failed to parse jobs json for run {run_index} (will retry): {e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
         let Some(jobs) = json["jobs"].as_array() else {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
@@ -893,10 +937,13 @@ async fn wait_for_run_success(
             .iter()
             .all(|s| !running.iter().any(|r| s.eq_ignore_ascii_case(r)))
         {
-            // Success (or other terminal state like skipped/cancelled) — but we expect success.
+            // Terminal state reached; we expect success.
             if statuses.iter().any(|s| s.eq_ignore_ascii_case("success")) {
                 return Ok(());
             }
+            return Err(eyre!(
+                "run {run_index} ended in non-success terminal states: {statuses:?}"
+            ));
         }
 
         tokio::time::sleep(Duration::from_secs(2)).await;
