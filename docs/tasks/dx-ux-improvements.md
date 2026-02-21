@@ -29,11 +29,11 @@ Root cause: `run_index: Option<i64>` + `latest: bool` are both optional, so clap
 
 Fix: use a `clap::ArgGroup` with `required(true)` so that at least one of `--run-index` or `--latest` must be provided.
 
-- [ ] Add `#[command(group(clap::ArgGroup::new("run_selector").required(true).args(["run_index", "latest"])))]` to `ActionsSubcommand::Jobs` (`cli.rs`)
-- [ ] Add the same `ArgGroup` to `ActionsLogsSubcommand::Run` (`cli.rs`)
-- [ ] Add the same `ArgGroup` to `ActionsArtifactsSubcommand::List` (`cli.rs`)
-- [ ] Verify that bare `fj-ex actions jobs` now prints an error and help hint instead of executing
-- [ ] Verify that `fj-ex actions jobs --latest` and `fj-ex actions jobs --run-index 50` still work
+- [x] Add `#[command(group(clap::ArgGroup::new("run_selector").required(true).args(["run_index", "latest"])))]` to `ActionsSubcommand::Jobs` (`cli.rs`)
+- [x] Add the same `ArgGroup` to `ActionsLogsSubcommand::Run` (`cli.rs`)
+- [x] Add the same `ArgGroup` to `ActionsArtifactsSubcommand::List` (`cli.rs`)
+- [x] Verify that bare `fj-ex actions jobs` now prints an error and help hint instead of executing
+- [x] Verify that `fj-ex actions jobs --latest` and `fj-ex actions jobs --run-index 50` still work
 
 ---
 

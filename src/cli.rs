@@ -152,6 +152,11 @@ pub enum ActionsSubcommand {
         json: bool,
     },
     /// List jobs for a run.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     Jobs {
         #[arg(long, help = "Run index to inspect.")]
         run_index: Option<i64>,
@@ -193,6 +198,11 @@ pub enum ActionsLogsSubcommand {
     /// Download logs for all jobs in a run.
     ///
     /// Note: Job separators (`== job N ==`) are written to stderr; log content goes to stdout.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     Run {
         #[arg(long, help = "Run index to download logs for.")]
         run_index: Option<i64>,
@@ -223,6 +233,11 @@ pub enum ActionsLogsSubcommand {
 #[derive(Subcommand, Debug, Clone)]
 pub enum ActionsArtifactsSubcommand {
     /// List artifacts for a run.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     List {
         #[arg(long, help = "Run index to list artifacts for.")]
         run_index: Option<i64>,
