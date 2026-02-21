@@ -168,14 +168,62 @@ pub async fn get_run_view_data(
     let html_s = resp.text().await.wrap_err("failed to read response html")?;
 
     let initial_job_json = html::get_html_attribute_value(&html_s, "data-initial-post-response")
-        .ok_or_else(|| {
-            eyre!("Unable to find data-initial-post-response in run view HTML ({url}).")
-        })?;
+        .filter(|s| !s.trim().is_empty());
     let initial_artifacts_json =
         html::get_html_attribute_value(&html_s, "data-initial-artifacts-response");
 
-    let view: Value = serde_json::from_str(&initial_job_json)
-        .wrap_err("failed to parse data-initial-post-response json")?;
+    let view: Value = if let Some(job_json) = initial_job_json {
+        serde_json::from_str(&job_json)
+            .wrap_err("failed to parse data-initial-post-response json")?
+    } else {
+        // Older Forgejo versions (e.g. 11.x) don't embed the initial JSON response and instead
+        // fetch it via a CSRF-protected UI endpoint.
+        let csrf_token = html::get_csrf_token_from_html(&html_s)
+            .ok_or_else(|| eyre!("Unable to determine CSRF token in run view HTML ({url})."))?;
+        let actions_url =
+            html::get_html_attribute_value(&html_s, "data-actions-url").ok_or_else(|| {
+                eyre!("Unable to determine data-actions-url in run view HTML ({url}).")
+            })?;
+
+        let effective_run_index = html::get_html_attribute_value(&html_s, "data-run-index")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(run_index);
+        let job_index = html::get_html_attribute_value(&html_s, "data-job-index")
+            .and_then(|s| s.parse::<i64>().ok())
+            .unwrap_or(0);
+
+        let actions_base =
+            if actions_url.starts_with("http://") || actions_url.starts_with("https://") {
+                actions_url
+            } else if actions_url.starts_with('/') {
+                format!("{}{}", session.base_url(), actions_url)
+            } else {
+                format!(
+                    "{}/{}",
+                    session.base_url().trim_end_matches('/'),
+                    actions_url
+                )
+            };
+        let job_url = format!("{actions_base}/runs/{effective_run_index}/jobs/{job_index}");
+        let body = serde_json::json!({ "logCursors": [] });
+
+        let resp = session
+            .post_json_response_with_csrf(&job_url, &body, &csrf_token, true)
+            .await
+            .wrap_err("failed to fetch run/job json")?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if status != reqwest::StatusCode::OK {
+            return Err(eyre!(
+                "Failed to load run/job state from '{}'. HTTP {} body={}",
+                job_url,
+                status,
+                text
+            ));
+        }
+
+        serde_json::from_str(&text).wrap_err("failed to parse run/job json")?
+    };
     let artifacts: Option<Value> = match initial_artifacts_json {
         Some(s) if !s.trim().is_empty() => Some(
             serde_json::from_str(&s)
@@ -256,9 +304,19 @@ pub async fn get_job_view_meta(
     }
     let html_s = resp.text().await.wrap_err("failed to read response html")?;
 
-    let attempt_attr = html::get_html_attribute_value(&html_s, "data-attempt-number")
-        .ok_or_else(|| eyre!("Unable to determine attempt number for run '{run_index}' job '{job_index}' from '{url}'."))?;
-    let attempt_number: i64 = attempt_attr.parse().wrap_err("invalid attempt number")?;
+    let attempt_number: i64 = match html::get_html_attribute_value(&html_s, "data-attempt-number") {
+        Some(s) => s.parse().wrap_err("invalid attempt number")?,
+        None => {
+            // Older Forgejo versions don't expose attempt numbers in the job view.
+            // They still make logs available, typically without an attempt segment.
+            let re = Regex::new(r#"/attempt/(?P<n>\d+)/logs"#).ok();
+            re.and_then(|re| {
+                re.captures(&html_s)
+                    .and_then(|caps| caps.name("n").and_then(|m| m.as_str().parse::<i64>().ok()))
+            })
+            .unwrap_or(1)
+        }
+    };
 
     Ok(JobViewMeta {
         url,
@@ -272,6 +330,48 @@ pub async fn get_job_view_meta(
         attempt_number,
         actions_url: html::get_html_attribute_value(&html_s, "data-actions-url"),
     })
+}
+
+pub async fn download_job_logs(
+    session: &UiSession,
+    repo: &str,
+    run_index: i64,
+    job_index: i64,
+    attempt_number: i64,
+) -> eyre::Result<Vec<u8>> {
+    let repo_path = repo.trim_matches('/');
+
+    // Newer Forgejo versions expose logs under an attempt URL.
+    let url_attempt = format!(
+        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/attempt/{attempt_number}/logs",
+        session.base_url()
+    );
+    let resp = session.get_response(&url_attempt, true).await?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::OK {
+        let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
+        return Ok(bytes.to_vec());
+    }
+
+    // Older Forgejo versions (e.g. 11.x) expose logs without attempt numbers.
+    let url_legacy = format!(
+        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/logs",
+        session.base_url()
+    );
+    let resp = session.get_response(&url_legacy, true).await?;
+    let legacy_status = resp.status();
+    if legacy_status == reqwest::StatusCode::OK {
+        let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
+        return Ok(bytes.to_vec());
+    }
+
+    Err(eyre!(
+        "Failed to download logs from '{}' (HTTP {}) and '{}' (HTTP {}).",
+        url_attempt,
+        status,
+        url_legacy,
+        legacy_status
+    ))
 }
 
 pub async fn latest_run_index(session: &UiSession, repo: &str) -> eyre::Result<i64> {

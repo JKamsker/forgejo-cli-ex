@@ -219,6 +219,22 @@ impl UiSession {
             .await
     }
 
+    pub async fn post_json_response_with_csrf(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        csrf_token: &str,
+        retry_on_logout: bool,
+    ) -> eyre::Result<reqwest::Response> {
+        self.send_with_retry(retry_on_logout, || {
+            self.client
+                .post(url)
+                .header("X-Csrf-Token", csrf_token)
+                .json(body)
+        })
+        .await
+    }
+
     pub async fn persist_cookie_jar(&self) -> eyre::Result<()> {
         let jar = cookie_jar_from_store(&self.cookie_store)?;
         store::save_cookie_jar(&self.base_url, jar).await?;

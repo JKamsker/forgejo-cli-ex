@@ -121,22 +121,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             .attempt_number
                     }
                 };
-
-                let repo_path = repo.trim_matches('/');
-                let logs_url = format!(
-                    "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/attempt/{attempt}/logs",
-                    session.base_url()
-                );
-
-                let resp = session.get_response(&logs_url, true).await?;
-                if resp.status() != reqwest::StatusCode::OK {
-                    return Err(eyre!(
-                        "Failed to download logs from '{}'. HTTP {}.",
-                        logs_url,
-                        resp.status()
-                    ));
-                }
-                let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
+                let bytes = crate::ui_actions::download_job_logs(
+                    &session, &repo, run_index, job_index, attempt,
+                )
+                .await?;
 
                 if let Some(out_file) = out_file {
                     if let Some(parent) = out_file.parent() {
@@ -193,16 +181,12 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 continue;
                             }
                         };
-
-                        let repo_path = repo.trim_matches('/');
-                        let logs_url = format!(
-                            "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/attempt/{attempt}/logs",
-                            session.base_url()
-                        );
-                        match session.get_response(&logs_url, true).await {
-                            Ok(resp) if resp.status() == reqwest::StatusCode::OK => {
-                                let bytes =
-                                    resp.bytes().await.wrap_err("failed to read log bytes")?;
+                        match crate::ui_actions::download_job_logs(
+                            &session, &repo, run_index, job_index, attempt,
+                        )
+                        .await
+                        {
+                            Ok(bytes) => {
                                 tokio::fs::write(&out_file, &bytes).await?;
                                 println!(
                                     "Saved: job {} (attempt {}) -> {}",
@@ -211,18 +195,12 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                     out_file.display()
                                 );
                             }
-                            Ok(resp) => {
-                                let msg =
-                                    format!("Job {job_index} ({job_name}): HTTP {}", resp.status());
-                                eprintln!("warn: {msg}");
-                                failures.push(msg);
-                            }
                             Err(e) => {
                                 let msg = format!("Job {job_index} ({job_name}): {e}");
                                 eprintln!("warn: {msg}");
                                 failures.push(msg);
                             }
-                        }
+                        };
                     }
 
                     if !failures.is_empty() {
@@ -246,22 +224,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         "== job {} (attempt {}) :: {} ==",
                         job_index, attempt, job_name
                     );
-
-                    let repo_path = repo.trim_matches('/');
-                    let logs_url = format!(
-                        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/attempt/{attempt}/logs",
-                        session.base_url()
-                    );
-
-                    let resp = session.get_response(&logs_url, true).await?;
-                    if resp.status() != reqwest::StatusCode::OK {
-                        return Err(eyre!(
-                            "Failed to download logs from '{}'. HTTP {}.",
-                            logs_url,
-                            resp.status()
-                        ));
-                    }
-                    let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
+                    let bytes = crate::ui_actions::download_job_logs(
+                        &session, &repo, run_index, job_index, attempt,
+                    )
+                    .await?;
 
                     let mut stdout = tokio::io::stdout();
                     stdout.write_all(&bytes).await?;
