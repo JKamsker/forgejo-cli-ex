@@ -176,16 +176,30 @@ pub enum ActionsSubcommand {
         command: ActionsArtifactsSubcommand,
     },
     /// Cancel a run.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     Cancel {
         #[arg(long, help = "Run index to cancel.")]
-        run_index: i64,
+        run_index: Option<i64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
         #[arg(long, help = "Print the request that would be made, but do not perform it.")]
         dry_run: bool,
     },
     /// Rerun a run (or a single job within a run).
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     Rerun {
         #[arg(long, help = "Run index to rerun.")]
-        run_index: i64,
+        run_index: Option<i64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
         #[arg(long, help = "Rerun a specific job index within the run.")]
         job_index: Option<i64>,
         #[arg(long, help = "Print the request that would be made, but do not perform it.")]
@@ -247,9 +261,16 @@ pub enum ActionsArtifactsSubcommand {
         json: bool,
     },
     /// Download a single artifact from a run.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     Get {
         #[arg(long, help = "Run index to download the artifact from.")]
-        run_index: i64,
+        run_index: Option<i64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
         #[arg(long, help = "Artifact name or id.")]
         artifact: String,
         #[arg(long, help = "Output file path.")]

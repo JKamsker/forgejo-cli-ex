@@ -41,14 +41,14 @@ Fix: use a `clap::ArgGroup` with `required(true)` so that at least one of `--run
 
 Every other run-scoped command supports `--latest`; `cancel`, `rerun`, and `artifacts get` require `--run-index` explicitly.
 
-- [ ] Change `run_index: i64` to `run_index: Option<i64>` in `ActionsSubcommand::Cancel` (`cli.rs`)
-- [ ] Add `latest: bool` field to `ActionsSubcommand::Cancel` (`cli.rs`)
-- [ ] Add `ArgGroup` requiring `run_index | latest` to `Cancel` (`cli.rs`)
-- [ ] Update `actions.rs` cancel handler to resolve `run_index` from latest when needed (same pattern as `jobs`) (`actions.rs`)
-- [ ] Repeat the above four steps for `ActionsSubcommand::Rerun` (`cli.rs`, `actions.rs`)
-- [ ] Change `run_index: i64` to `Option<i64>` in `ActionsArtifactsSubcommand::Get`, add `latest: bool`, add `ArgGroup` (`cli.rs`)
-- [ ] Update `actions.rs` artifacts-get handler to resolve latest run index when needed (`actions.rs`)
-- [ ] Verify `fj-ex actions cancel --latest --dry-run` works correctly
+- [x] Change `run_index: i64` to `run_index: Option<i64>` in `ActionsSubcommand::Cancel` (`cli.rs`)
+- [x] Add `latest: bool` field to `ActionsSubcommand::Cancel` (`cli.rs`)
+- [x] Add `ArgGroup` requiring `run_index | latest` to `Cancel` (`cli.rs`)
+- [x] Update `actions.rs` cancel handler to resolve `run_index` from latest when needed (same pattern as `jobs`) (`actions.rs`)
+- [x] Repeat the above four steps for `ActionsSubcommand::Rerun` (`cli.rs`, `actions.rs`)
+- [x] Change `run_index: i64` to `Option<i64>` in `ActionsArtifactsSubcommand::Get`, add `latest: bool`, add `ArgGroup` (`cli.rs`)
+- [x] Update `actions.rs` artifacts-get handler to resolve latest run index when needed (`actions.rs`)
+- [x] Verify `fj-ex actions cancel --latest --dry-run` works correctly
 
 ---
 

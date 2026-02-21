@@ -291,9 +291,15 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             }
             ActionsArtifactsSubcommand::Get {
                 run_index,
+                latest,
                 artifact,
                 out_file,
             } => {
+                let run_index = match (run_index, latest) {
+                    (Some(n), false) if n > 0 => n,
+                    (Some(_), false) => return Err(eyre!("--run-index must be a positive integer")),
+                    _ => crate::ui_actions::latest_run_index(&session, &repo).await?,
+                };
                 let bytes =
                     crate::ui_actions::download_artifact(&session, &repo, run_index, &artifact)
                         .await?;
@@ -304,7 +310,16 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 println!("{}", out_file.display());
             }
         },
-        ActionsSubcommand::Cancel { run_index, dry_run } => {
+        ActionsSubcommand::Cancel {
+            run_index,
+            latest,
+            dry_run,
+        } => {
+            let run_index = match (run_index, latest) {
+                (Some(n), false) if n > 0 => n,
+                (Some(_), false) => return Err(eyre!("--run-index must be a positive integer")),
+                _ => crate::ui_actions::latest_run_index(&session, &repo).await?,
+            };
             let repo_path = repo.trim_matches('/');
             let url = format!(
                 "{}/{repo_path}/actions/runs/{run_index}/cancel",
@@ -330,9 +345,15 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
         }
         ActionsSubcommand::Rerun {
             run_index,
+            latest,
             job_index,
             dry_run,
         } => {
+            let run_index = match (run_index, latest) {
+                (Some(n), false) if n > 0 => n,
+                (Some(_), false) => return Err(eyre!("--run-index must be a positive integer")),
+                _ => crate::ui_actions::latest_run_index(&session, &repo).await?,
+            };
             let repo_path = repo.trim_matches('/');
             let url = match job_index {
                 Some(job_index) if job_index >= 0 => format!(
