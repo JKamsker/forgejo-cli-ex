@@ -681,7 +681,7 @@ jobs:
           echo "fj-ex-e2e: hello"
           echo "fj-ex-e2e: artifact" > artifact.txt
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
           name: my-artifact
           path: artifact.txt
