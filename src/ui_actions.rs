@@ -12,6 +12,9 @@ const STATUS_LOOKBACK_BYTES: usize = 800;
 /// Maximum bytes after a run-href match to search for branch/created_at metadata.
 const RUN_BLOCK_LOOKAHEAD_BYTES: usize = 8_000;
 
+static WORKFLOW_HREF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"href="\?workflow=([^"&]+)"#).expect("WORKFLOW_HREF_RE regex must be valid")
+});
 static RUN_HREF_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"href="/(?P<repo>[^"]+)/actions/runs/(?P<idx>\d+)""#)
         .expect("RUN_HREF_RE regex must be valid")
@@ -110,9 +113,8 @@ pub async fn list_workflows(
     }
     let html_s = resp.text().await.wrap_err("failed to read response html")?;
 
-    let re = Regex::new(r#"href="\?workflow=([^"&]+)"#).wrap_err("failed to build regex")?;
     let mut names = BTreeSet::new();
-    for caps in re.captures_iter(&html_s) {
+    for caps in WORKFLOW_HREF_RE.captures_iter(&html_s) {
         let raw = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
         if raw.is_empty() {
             continue;

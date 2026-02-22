@@ -142,7 +142,6 @@ pub enum ActionsSubcommand {
         page: u32,
         #[arg(long, default_value_t = 20, help = "Items per page.")]
         limit: u32,
-        /// Print JSON output.
         #[arg(long, help = "Print JSON output.")]
         json: bool,
     },

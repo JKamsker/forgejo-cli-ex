@@ -1,5 +1,6 @@
 use std::io::IsTerminal;
 use std::num::NonZeroU64;
+use std::sync::LazyLock;
 
 use eyre::{eyre, Context};
 use tokio::io::AsyncWriteExt;
@@ -7,6 +8,9 @@ use tokio::io::AsyncWriteExt;
 use crate::cli::{
     ActionsArtifactsSubcommand, ActionsCommand, ActionsLogsSubcommand, ActionsSubcommand,
 };
+
+static SAFE_FILENAME_COMPONENT_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r#"[^a-zA-Z0-9._-]+"#).expect("valid regex"));
 
 pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
     let target = crate::target::resolve_target(
@@ -636,128 +640,15 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             let repo_path = repo.trim_matches('/');
 
             if failed_only {
-                let view = crate::ui_actions::get_run_view_data(&session, &repo, run_index)
-                    .await
-                    .wrap_err("failed to load run view")?;
-                let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
-                let failed_job_indexes: Vec<i64> = jobs
-                    .iter()
-                    .filter(|j| {
-                        j.status
-                            .as_deref()
-                            .is_some_and(|s| s.eq_ignore_ascii_case("failure"))
-                    })
-                    .map(|j| j.job_index)
-                    .collect();
-
-                if dry_run {
-                    if json {
-                        let payload = serde_json::json!({
-                            "baseUrl": target.base_url,
-                            "repo": repo,
-                            "runIndex": run_index,
-                            "failedOnly": true,
-                            "jobIndexes": failed_job_indexes,
-                            "dryRun": true,
-                            "requested": !failed_job_indexes.is_empty(),
-                        });
-                        println!("{}", serde_json::to_string_pretty(&payload)?);
-                    } else if failed_job_indexes.is_empty() {
-                        println!("No failed jobs found for run #{run_index}.");
-                    } else {
-                        for job_index in &failed_job_indexes {
-                            let url = format!(
-                                "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
-                                session.base_url()
-                            );
-                            println!("DRY RUN: POST {url}");
-                        }
-                    }
-                    return Ok(());
-                }
-
-                if failed_job_indexes.is_empty() {
-                    if json {
-                        let payload = serde_json::json!({
-                            "baseUrl": target.base_url,
-                            "repo": repo,
-                            "runIndex": run_index,
-                            "failedOnly": true,
-                            "jobIndexes": [],
-                            "dryRun": false,
-                            "requested": false,
-                        });
-                        println!("{}", serde_json::to_string_pretty(&payload)?);
-                    } else {
-                        println!("No failed jobs found for run #{run_index}.");
-                    }
-                    return Ok(());
-                }
-
-                let mut failures: Vec<String> = Vec::new();
-                let mut redirects: Vec<String> = Vec::new();
-
-                for job_index in &failed_job_indexes {
-                    let url = format!(
-                        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
-                        session.base_url()
-                    );
-                    let body = serde_json::json!({});
-                    let resp = session.post_json_response(&url, &body, true).await?;
-                    if resp.status() != reqwest::StatusCode::OK {
-                        failures.push(format!(
-                            "job {}: POST {} -> HTTP {}",
-                            job_index,
-                            url,
-                            resp.status()
-                        ));
-                        continue;
-                    }
-
-                    let text = resp.text().await.unwrap_or_default();
-                    if !text.trim().is_empty() {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if let Some(redirect_url) = v.get("redirect").and_then(|v| v.as_str()) {
-                                redirects.push(redirect_url.to_string());
-                            }
-                        }
-                    }
-                }
-
-                if !failures.is_empty() {
-                    return Err(eyre!(
-                        "Some job reruns failed:\n - {}",
-                        failures.join("\n - ")
-                    ));
-                }
-
-                if json {
-                    let payload = serde_json::json!({
-                        "baseUrl": target.base_url,
-                        "repo": repo,
-                        "runIndex": run_index,
-                        "failedOnly": true,
-                        "jobIndexes": failed_job_indexes,
-                        "dryRun": false,
-                        "redirects": redirects,
-                        "requested": true,
-                    });
-                    println!("{}", serde_json::to_string_pretty(&payload)?);
-                } else {
-                    println!(
-                        "Rerun requested for run #{run_index} (failed jobs: {}).",
-                        failed_job_indexes
-                            .iter()
-                            .map(|n| n.to_string())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    for redirect in redirects {
-                        println!("{redirect}");
-                    }
-                }
-
-                return Ok(());
+                return rerun_failed_jobs(
+                    &session,
+                    target.base_url.as_str(),
+                    &repo,
+                    run_index,
+                    dry_run,
+                    json,
+                )
+                .await;
             }
 
             let url = match job_index {
@@ -832,6 +723,149 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             if let Some(redirect) = redirect {
                 println!("{redirect}");
             }
+        }
+    }
+
+    Ok(())
+}
+
+async fn rerun_failed_jobs(
+    session: &crate::session::UiSession,
+    target_base_url: &str,
+    repo: &str,
+    run_index: i64,
+    dry_run: bool,
+    json: bool,
+) -> eyre::Result<()> {
+    let repo_path = repo.trim_matches('/');
+
+    let view = crate::ui_actions::get_run_view_data(session, repo, run_index)
+        .await
+        .wrap_err("failed to load run view")?;
+    let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+    let failed_job_indexes: Vec<i64> = jobs
+        .iter()
+        .filter(|j| {
+            j.status
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case("failure"))
+        })
+        .map(|j| j.job_index)
+        .collect();
+
+    if dry_run {
+        if json {
+            let payload = serde_json::json!({
+                "baseUrl": target_base_url,
+                "repo": repo,
+                "runIndex": run_index,
+                "failedOnly": true,
+                "jobIndexes": failed_job_indexes,
+                "dryRun": true,
+                "requested": !failed_job_indexes.is_empty(),
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else if failed_job_indexes.is_empty() {
+            println!("No failed jobs found for run #{run_index}.");
+        } else {
+            for job_index in &failed_job_indexes {
+                let url = format!(
+                    "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
+                    session.base_url()
+                );
+                println!("DRY RUN: POST {url}");
+            }
+        }
+        return Ok(());
+    }
+
+    if failed_job_indexes.is_empty() {
+        if json {
+            let payload = serde_json::json!({
+                "baseUrl": target_base_url,
+                "repo": repo,
+                "runIndex": run_index,
+                "failedOnly": true,
+                "jobIndexes": [],
+                "dryRun": false,
+                "requested": false,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("No failed jobs found for run #{run_index}.");
+        }
+        return Ok(());
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut redirects: Vec<String> = Vec::new();
+
+    for job_index in &failed_job_indexes {
+        let url = format!(
+            "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
+            session.base_url()
+        );
+        let body = serde_json::json!({});
+        let resp = match session.post_json_response(&url, &body, true).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                failures.push(format!(
+                    "job {}: POST {} -> transport error: {}",
+                    job_index, url, e
+                ));
+                continue;
+            }
+        };
+        if resp.status() != reqwest::StatusCode::OK {
+            failures.push(format!(
+                "job {}: POST {} -> HTTP {}",
+                job_index,
+                url,
+                resp.status()
+            ));
+            continue;
+        }
+
+        let text = resp.text().await.unwrap_or_default();
+        if !text.trim().is_empty() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(redirect_url) = v.get("redirect").and_then(|v| v.as_str()) {
+                    redirects.push(redirect_url.to_string());
+                }
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        return Err(eyre!(
+            "Some job reruns failed:\n - {}",
+            failures.join("\n - ")
+        ));
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "baseUrl": target_base_url,
+            "repo": repo,
+            "runIndex": run_index,
+            "failedOnly": true,
+            "jobIndexes": failed_job_indexes,
+            "dryRun": false,
+            "redirects": redirects,
+            "requested": true,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "Rerun requested for run #{run_index} (failed jobs: {}).",
+            failed_job_indexes
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for redirect in redirects {
+            println!("{redirect}");
         }
     }
 
@@ -918,10 +952,9 @@ fn normalize_run_status(raw: &str) -> String {
 fn is_run_done_from_jobs(jobs: &[crate::ui_actions::JobInfo]) -> bool {
     let in_progress = ["running", "queued", "pending", "waiting"];
     !jobs.iter().any(|j| {
-        let Some(status) = j.status.as_deref() else {
-            return false;
-        };
-        in_progress.iter().any(|s| status.eq_ignore_ascii_case(s))
+        j.status.as_deref().map_or(true, |status| {
+            in_progress.iter().any(|s| status.eq_ignore_ascii_case(s))
+        })
     })
 }
 
@@ -955,8 +988,9 @@ fn run_terminal_error_from_jobs(
 }
 
 fn safe_filename_component(job_name: &str, job_index: i64) -> String {
-    let re = regex::Regex::new(r#"[^a-zA-Z0-9._-]+"#).expect("valid regex");
-    let mut safe = re.replace_all(job_name, "_").to_string();
+    let mut safe = SAFE_FILENAME_COMPONENT_RE
+        .replace_all(job_name, "_")
+        .to_string();
     safe = safe.trim_matches('_').to_string();
     if safe.is_empty() {
         safe = format!("job-{job_index}");

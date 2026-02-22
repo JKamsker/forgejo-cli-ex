@@ -56,7 +56,7 @@ Every other run-scoped command supports `--latest`; `cancel`, `rerun`, and `arti
 
 `TargetArgs` is flattened onto `ActionsCommand`, not onto each subcommand. This means `--host`/`--repo`/`--remote` must come _before_ the subcommand name, which is the opposite of user expectation:
 
-```
+```text
 # Works:
 fj-ex actions --host forge.example.com runs
 
