@@ -1,10 +1,45 @@
 use std::collections::{BTreeSet, HashSet};
+use std::sync::LazyLock;
 
 use eyre::{eyre, Context};
 use regex::Regex;
 use serde_json::Value;
 
 use crate::{html, session::UiSession};
+
+/// Maximum bytes before a run-href match to search for its status tooltip.
+const STATUS_LOOKBACK_BYTES: usize = 800;
+/// Maximum bytes after a run-href match to search for branch/created_at metadata.
+const RUN_BLOCK_LOOKAHEAD_BYTES: usize = 8_000;
+
+static RUN_HREF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"href="/(?P<repo>[^"]+)/actions/runs/(?P<idx>\d+)""#)
+        .expect("RUN_HREF_RE regex must be valid")
+});
+static STATUS_TOOLTIP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"data-tooltip-content="(?P<status>Success|Failure|Running|Waiting|Canceled|Cancelled|Skipped|Blocked)""#,
+    )
+    .expect("STATUS_TOOLTIP_RE regex must be valid")
+});
+static RUN_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"class="ui label run-list-ref[^"]*"[^>]*>(?P<ref>[^<]+)</a>"#)
+        .expect("RUN_REF_RE regex must be valid")
+});
+static CREATED_AT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<(?:relative-time|time)[^>]*datetime=['"](?P<dt>[^'"]+)['"]"#)
+        .expect("CREATED_AT_RE regex must be valid")
+});
+
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx > s.len() {
+        idx = s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
 
 #[derive(Clone, Debug)]
 pub struct RunRef {
@@ -117,28 +152,17 @@ pub async fn list_runs(
     let html_s = resp.text().await.wrap_err("failed to read response html")?;
 
     let run_href_prefix = format!("href=\"/{repo_path}/actions/runs/");
-    let re = Regex::new(&format!(
-        r#"href="/{}/actions/runs/(?P<idx>\d+)""#,
-        regex::escape(repo_path)
-    ))
-    .wrap_err("failed to build regex")?;
-
-    let status_re = Regex::new(
-        r#"data-tooltip-content="(?P<status>Success|Failure|Running|Waiting|Canceled|Cancelled|Skipped|Blocked)""#,
-    )
-    .wrap_err("failed to build status regex")?;
-    let ref_re = Regex::new(r#"class="ui label run-list-ref[^"]*"[^>]*>(?P<ref>[^<]+)</a>"#)
-        .wrap_err("failed to build ref regex")?;
-    let created_at_re =
-        Regex::new(r#"<(?:relative-time|time)[^>]*datetime=['"](?P<dt>[^'"]+)['"]"#)
-            .wrap_err("failed to build created-at regex")?;
 
     let mut seen = HashSet::new();
     let mut runs = Vec::new();
-    for caps in re.captures_iter(&html_s) {
+    for caps in RUN_HREF_RE.captures_iter(&html_s) {
         let m = caps
             .get(0)
             .ok_or_else(|| eyre!("run regex capture missing match"))?;
+        let repo_m = caps.name("repo").map(|m| m.as_str()).unwrap_or_default();
+        if repo_m != repo_path {
+            continue;
+        }
         let idx_s = caps.name("idx").map(|m| m.as_str()).unwrap_or_default();
         if idx_s.is_empty() {
             continue;
@@ -151,24 +175,27 @@ pub async fn list_runs(
             continue;
         }
 
-        let before_start = m.start().saturating_sub(800);
+        let before_start = floor_char_boundary(&html_s, m.start().saturating_sub(STATUS_LOOKBACK_BYTES));
         let before = &html_s[before_start..m.end()];
-        let status = status_re
+        let status = STATUS_TOOLTIP_RE
             .captures_iter(before)
             .last()
             .and_then(|c| c.name("status").map(|m| m.as_str().to_string()));
 
-        let max_after_end = (m.end() + 8_000).min(html_s.len());
+        let max_after_end = floor_char_boundary(
+            &html_s,
+            (m.end() + RUN_BLOCK_LOOKAHEAD_BYTES).min(html_s.len()),
+        );
         let after_end = html_s[m.end()..max_after_end]
             .find(&run_href_prefix)
             .map(|i| m.end() + i)
             .unwrap_or(max_after_end);
         let after = &html_s[m.end()..after_end];
 
-        let branch = ref_re
+        let branch = RUN_REF_RE
             .captures(after)
             .and_then(|c| c.name("ref").map(|m| html::html_decode(m.as_str())));
-        let created_at = created_at_re
+        let created_at = CREATED_AT_RE
             .captures(after)
             .and_then(|c| c.name("dt").map(|m| m.as_str().to_string()));
 

@@ -49,7 +49,7 @@ fn format_row<'a>(cells: impl Iterator<Item = &'a str>, widths: &[usize]) -> Str
         out.push_str(cell);
         let padding = width.saturating_sub(cell.chars().count());
         if padding > 0 {
-            out.extend(std::iter::repeat_n(' ', padding));
+            out.extend(std::iter::repeat(' ').take(padding));
         }
     }
     out

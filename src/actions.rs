@@ -562,8 +562,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     ),
                     remote: None,
                 },
-                log_download_max_bytes: args.log_download_max_bytes,
-                out_dir: args.out_dir,
+                opts: args,
             };
             crate::smoke_test::run(cmd).await?;
         }
@@ -660,7 +659,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             "failedOnly": true,
                             "jobIndexes": failed_job_indexes,
                             "dryRun": true,
-                            "requested": failed_job_indexes.len() > 0,
+                            "requested": !failed_job_indexes.is_empty(),
                         });
                         println!("{}", serde_json::to_string_pretty(&payload)?);
                     } else if failed_job_indexes.is_empty() {
@@ -766,7 +765,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
                     session.base_url()
                 ),
-                _ => format!(
+                None => format!(
                     "{}/{repo_path}/actions/runs/{run_index}/rerun",
                     session.base_url()
                 ),
@@ -825,10 +824,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             }
 
             match job_index {
-                Some(job_index) => {
-                    println!("Rerun requested for run #{run_index}, job #{job_index}.");
-                }
-                _ => println!("Rerun requested for run #{run_index}."),
+                Some(job_index) => println!("Rerun requested for run #{run_index}, job #{job_index}."),
+                None => println!("Rerun requested for run #{run_index}."),
             }
             if let Some(redirect) = redirect {
                 println!("{redirect}");
@@ -887,7 +884,7 @@ fn parse_workflow_inputs(
         }
         out.insert(
             key.to_string(),
-            serde_json::Value::String(value.to_string()),
+            serde_json::Value::String(value.trim().to_string()),
         );
     }
     Ok(out)

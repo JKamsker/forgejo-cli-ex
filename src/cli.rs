@@ -191,7 +191,8 @@ pub enum ActionsSubcommand {
         #[arg(
             long,
             default_value_t = 2,
-            help = "Polling interval in seconds for --watch."
+            value_parser = clap::value_parser!(u64).range(1..),
+            help = "Polling interval in seconds for --watch (minimum 1)."
         )]
         watch_interval: u64,
         #[arg(long, help = "Always print the header row (even when piping).")]
@@ -269,7 +270,7 @@ pub enum ActionsSubcommand {
         latest: bool,
         #[arg(long, help = "When using --latest, filter runs by workflow name.")]
         workflow: Option<String>,
-        #[arg(long, help = "Rerun a specific job index within the run.")]
+        #[arg(long, help = "Rerun a specific job index within the run (0-based).")]
         job_index: Option<u32>,
         #[arg(long, conflicts_with = "job_index", help = "Rerun failed jobs only.")]
         failed_only: bool,
@@ -321,7 +322,7 @@ pub enum ActionsLogsSubcommand {
         latest: bool,
         #[arg(long, help = "When using --latest, filter runs by workflow name.")]
         workflow: Option<String>,
-        #[arg(long, help = "Job index within the run.")]
+        #[arg(long, help = "Job index within the run (0-based).")]
         job_index: u32,
         #[arg(long, help = "Attempt number (defaults to latest attempt).")]
         attempt: Option<NonZeroU32>,
@@ -392,15 +393,6 @@ pub struct SmokeTestCommand {
     #[command(flatten)]
     pub target: TargetArgs,
 
-    #[arg(
-        long,
-        default_value_t = 1_048_576,
-        help = "Max bytes to download per job log (default: 1 MiB)."
-    )]
-    pub log_download_max_bytes: u64,
-
-    /// Base directory for smoke test log downloads (a run-specific folder is created inside).
-    /// Default: system temp dir (e.g. $TMPDIR/fj-ex/forgejo-logs).
-    #[arg(long)]
-    pub out_dir: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    pub opts: ActionsSmokeTestCommand,
 }

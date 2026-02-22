@@ -77,7 +77,7 @@ Two options:
 
 ## 5. `--max-jobs 0` means "unlimited" — counterintuitive
 
-`cli.rs:191` — default is `0` and the check is `if max_jobs > 0`. Passing `--max-jobs 0` expecting to download nothing silently downloads everything.
+`ActionsLogsSubcommand::Run::max_jobs` — treating `--max-jobs 0` as "unlimited" is counterintuitive: users often expect `0` to mean "download nothing".
 
 - [x] Add `#[arg(help = "Max jobs to download (0 = unlimited)")]` to `max_jobs` in `ActionsLogsSubcommand::Run` (`cli.rs`)
 - [x] Consider renaming to `--max-jobs-limit` or changing sentinel value — at minimum document the `0 = unlimited` convention clearly
@@ -86,7 +86,7 @@ Two options:
 
 ## 6. Implicit `--run-index 0` / negative fallback to latest
 
-`actions.rs:73-76` — the pattern `(Some(n), false) if n > 0 => n` silently treats `--run-index 0` and `--run-index -1` as "use latest" instead of erroring. This can mask scripting bugs where the index fails to parse.
+`resolve_run_index` — run index selection should reject `--run-index 0` / negative values rather than silently treating them as "use latest", to avoid masking scripting bugs.
 
 - [x] Add an explicit error branch for `run_index == Some(0)` or negative values: `return Err(eyre!("--run-index must be a positive integer"))` (`actions.rs`)
 - [x] Apply the same fix to `ActionsLogsSubcommand::Run` handler (`actions.rs`)

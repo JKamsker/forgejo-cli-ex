@@ -58,7 +58,7 @@ Most commands accept `--host`/`-H`, `--repo`/`-r`, or `--remote`/`-R`. If omitte
 
 Credentials and cookies are stored in plaintext at:
 
-```
+```text
 %APPDATA%\Cyborus\forgejo-cli\data\ui-creds.json   # Windows
 ~/.local/share/Cyborus/forgejo-cli/data/ui-creds.json  # Linux
 ```
