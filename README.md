@@ -1,143 +1,70 @@
-# fj-ex
+# forgejo-cli-ex
 
-`fj-ex` is a small Rust CLI that polyfills missing Forgejo CLI (`fj`) functionality by calling Forgejo **web UI endpoints** (a “UI API”), mainly for Forgejo Actions (full logs, artifacts, cancel/rerun, …).
+[![crates.io](https://img.shields.io/crates/v/forgejo-cli-ex)](https://crates.io/crates/forgejo-cli-ex)
+[![license](https://img.shields.io/crates/l/forgejo-cli-ex)](LICENSE)
+[![GitHub](https://img.shields.io/badge/GitHub-JKamsker%2Fforgejo--cli--ex-181717?logo=github)](https://github.com/JKamsker/forgejo-cli-ex)
+[![Codeberg](https://img.shields.io/badge/Codeberg-JKamsker%2Fforgejo--cli--ex-2185D0?logo=codeberg)](https://codeberg.org/JKamsker/forgejo-cli-ex)
+[![Blog](https://img.shields.io/badge/blog-how%20fj--ex%20was%20built-orange)](https://blog.kamsker.at/blog/how-fj-ex-was-built)
 
-This is a port of a PowerShell PoC (not included in this repo; originally in a `Scripts/Forgejo` folder).
+`fj-ex` extends the official Forgejo CLI (`fj`) with functionality that requires hitting **web UI endpoints** — full action logs, artifacts, cancel/rerun, workflow dispatch, and more.
 
-## Security notes
+## Install
 
-- `fj-ex` stores **plaintext** UI credentials by design (required for auto re-login).
-- Cookies are stored alongside credentials to avoid logging in for every request.
-- Downloaded logs and artifacts may contain secrets.
-
-Storage location (shared with the PowerShell scripts):
-
-- `%APPDATA%\Cyborus\forgejo-cli\data\ui-creds.json`
-
-## Target resolution (fj-like)
-
-Most commands accept:
-
-- `--host`, `-H` to explicitly target a server (host or base URL)
-- `--repo`, `-r` for `owner/name` (or `host/owner/name`)
-- `--remote`, `-R` to infer host+repo from a git remote
-
-If `--host` is omitted, `fj-ex` attempts to infer it from the current repo’s git remotes. If that fails, it falls back to:
-
-- `FJ_FALLBACK_HOST`
-
-## Install (cargo)
-
-Once published to crates.io:
-
-```powershell
+```sh
 cargo install forgejo-cli-ex
 fj-ex --help
 ```
 
-Releasing / crates.io publishing: see `docs/releasing.md`.
+## Quickstart
 
-## Login
-
-Login validates the UI session and persists creds + cookies.
-
-Interactive:
-
-```powershell
+```sh
+# Login (interactive)
 fj-ex auth login --host forge.example.com
+
+# List recent runs
+fj-ex actions runs --repo owner/name --latest
+
+# Stream job logs to stdout
+fj-ex actions logs job --repo owner/name --latest --job-index 0
+
+# Cancel / rerun (preview first with --dry-run)
+fj-ex actions cancel --repo owner/name --run-index 50 --dry-run
+fj-ex actions rerun  --repo owner/name --latest --failed-only
 ```
 
-Via stdin (recommended vs `--password`):
+> `--host` can be omitted — `fj-ex` infers it from the current repo's git remotes, or falls back to `$FJ_FALLBACK_HOST`.
 
-```powershell
-("my-password`n") | fj-ex auth login --host forge.example.com --username my-user --password-stdin
+## Commands
+
+| Group | What it does |
+|---|---|
+| `auth` | Login, logout, status, list saved sessions |
+| `actions runs` | List workflow runs (filter by status, workflow, latest) |
+| `actions jobs` | List jobs for a run, optionally `--watch` |
+| `actions logs` | Download logs for a job or full run |
+| `actions artifacts` | List / download artifacts |
+| `actions cancel` | Cancel a running workflow |
+| `actions rerun` | Rerun a workflow (optionally `--failed-only`) |
+| `actions trigger` | Dispatch a `workflow_dispatch` event |
+| `smoke-test` | Non-destructive end-to-end validation |
+
+Full command reference with all flags: [docs/commands.md](docs/commands.md)
+
+## Target resolution
+
+Most commands accept `--host`/`-H`, `--repo`/`-r`, or `--remote`/`-R`. If omitted, `fj-ex` infers host and repo from the current directory's git remotes.
+
+## Credentials
+
+Credentials and cookies are stored in plaintext at:
+
+```
+%APPDATA%\Cyborus\forgejo-cli\data\ui-creds.json   # Windows
+~/.local/share/Cyborus/forgejo-cli/data/ui-creds.json  # Linux
 ```
 
-Environment fallbacks (no `.env` support):
+This is required for automatic re-login. Downloaded logs and artifacts may contain secrets — handle accordingly.
 
-- `FJ_USER`
-- `FJ_PASS`
+## License
 
-Legacy alias:
-
-```powershell
-fj-ex login --host forge.example.com
-```
-
-## Auth (credential management)
-
-```powershell
-fj-ex auth status --host forge.example.com
-fj-ex auth list
-fj-ex auth show --host forge.example.com
-fj-ex auth logout --host forge.example.com
-fj-ex auth clear-cookies --host forge.example.com
-```
-
-## Actions (UI endpoints)
-
-List workflows/runs/jobs:
-
-```powershell
-fj-ex actions workflows --host forge.example.com --repo owner/name
-fj-ex actions runs --host forge.example.com --repo owner/name --limit 20
-fj-ex actions runs --host forge.example.com --repo owner/name --latest
-fj-ex actions runs --host forge.example.com --repo owner/name --status failure
-fj-ex actions jobs --host forge.example.com --repo owner/name --latest
-fj-ex actions jobs --host forge.example.com --repo owner/name --latest --watch
-```
-
-Download logs:
-
-```powershell
-# Single job to stdout (attempt auto-detected if omitted)
-fj-ex actions logs job --host forge.example.com --repo owner/name --latest --job-index 0
-fj-ex actions logs job --host forge.example.com --repo owner/name --run-index 50 --job-index 0
-
-# Whole run to files
-fj-ex actions logs run --host forge.example.com --repo owner/name --run-index 50 --out-dir .tmp\\forgejo-logs\\run-50
-fj-ex actions logs run --host forge.example.com --repo owner/name --latest --workflow ci.yml --out-dir .tmp\\forgejo-logs\\latest-ci
-```
-
-Artifacts:
-
-```powershell
-fj-ex actions artifacts list --host forge.example.com --repo owner/name --latest
-fj-ex actions artifacts get --host forge.example.com --repo owner/name --run-index 50 --artifact my-artifact --out-file .tmp\\artifact.zip
-```
-
-Cancel / rerun (destructive)
-
-These execute immediately by default. Use `--dry-run` to preview.
-
-```powershell
-fj-ex actions cancel --host forge.example.com --repo owner/name --run-index 50 --dry-run
-fj-ex actions rerun  --host forge.example.com --repo owner/name --run-index 50 --dry-run
-fj-ex actions rerun  --host forge.example.com --repo owner/name --latest --failed-only --dry-run
-```
-
-Trigger / workflow_dispatch
-
-```powershell
-fj-ex actions trigger --host forge.example.com --repo owner/name --workflow ci.yml --ref main
-```
-
-## Smoke test
-
-Non-destructive validation similar to the PoC:
-
-```powershell
-fj-ex smoke-test --host forge.example.com --repo owner/name
-```
-
-Also available under `actions`:
-
-```powershell
-fj-ex actions --host forge.example.com --repo owner/name smoke-test
-```
-
-Write logs somewhere else (defaults to system temp dir):
-
-```powershell
-fj-ex smoke-test --host forge.example.com --repo owner/name --out-dir $env:TEMP\\fj-ex-smoke
-```
+LGPL-3.0-or-later
