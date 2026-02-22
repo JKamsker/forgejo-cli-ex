@@ -175,7 +175,8 @@ pub async fn list_runs(
             continue;
         }
 
-        let before_start = floor_char_boundary(&html_s, m.start().saturating_sub(STATUS_LOOKBACK_BYTES));
+        let before_start =
+            floor_char_boundary(&html_s, m.start().saturating_sub(STATUS_LOOKBACK_BYTES));
         let before = &html_s[before_start..m.end()];
         let status = STATUS_TOOLTIP_RE
             .captures_iter(before)

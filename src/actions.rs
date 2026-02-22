@@ -824,7 +824,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             }
 
             match job_index {
-                Some(job_index) => println!("Rerun requested for run #{run_index}, job #{job_index}."),
+                Some(job_index) => {
+                    println!("Rerun requested for run #{run_index}, job #{job_index}.")
+                }
                 None => println!("Rerun requested for run #{run_index}."),
             }
             if let Some(redirect) = redirect {
