@@ -33,6 +33,9 @@ static CREATED_AT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"<(?:relative-time|time)[^>]*datetime=['"](?P<dt>[^'"]+)['"]"#)
         .expect("CREATED_AT_RE regex must be valid")
 });
+static ATTEMPT_LOG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"/attempt/(?P<n>\d+)/logs"#).expect("ATTEMPT_LOG_RE regex must be valid")
+});
 
 fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
     if idx > s.len() {
@@ -97,6 +100,10 @@ pub async fn list_workflows(
     page: u32,
     limit: u32,
 ) -> eyre::Result<Vec<String>> {
+    if limit == 0 {
+        return Err(eyre!("limit must be >= 1"));
+    }
+
     let repo_path = repo.trim_matches('/');
     let url = format!(
         "{}/{repo_path}/actions?page={page}&limit={limit}&list_inner=true",
@@ -132,6 +139,10 @@ pub async fn list_runs(
     page: u32,
     limit: u32,
 ) -> eyre::Result<Vec<RunRef>> {
+    if limit == 0 {
+        return Err(eyre!("limit must be >= 1"));
+    }
+
     let repo_path = repo.trim_matches('/');
     let workflow_param = workflow
         .filter(|s| !s.trim().is_empty())
@@ -382,12 +393,10 @@ pub async fn get_job_view_meta(
         None => {
             // Older Forgejo versions don't expose attempt numbers in the job view.
             // They still make logs available, typically without an attempt segment.
-            let re = Regex::new(r#"/attempt/(?P<n>\d+)/logs"#).ok();
-            re.and_then(|re| {
-                re.captures(&html_s)
-                    .and_then(|caps| caps.name("n").and_then(|m| m.as_str().parse::<i64>().ok()))
-            })
-            .unwrap_or(1)
+            ATTEMPT_LOG_RE
+                .captures(&html_s)
+                .and_then(|caps| caps.name("n").and_then(|m| m.as_str().parse::<i64>().ok()))
+                .unwrap_or(1)
         }
     };
 

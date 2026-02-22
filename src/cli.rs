@@ -138,9 +138,19 @@ pub struct ActionsCommand {
 pub enum ActionsSubcommand {
     /// List available workflows for the repo.
     Workflows {
-        #[arg(long, default_value_t = 1, help = "Page number (1-based).")]
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..),
+            help = "Page number (1-based)."
+        )]
         page: u32,
-        #[arg(long, default_value_t = 20, help = "Items per page.")]
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..),
+            help = "Items per page."
+        )]
         limit: u32,
         #[arg(long, help = "Print JSON output.")]
         json: bool,
@@ -159,9 +169,19 @@ pub enum ActionsSubcommand {
             help = "Show only the latest run (equivalent to --page 1 --limit 1)."
         )]
         latest: bool,
-        #[arg(long, default_value_t = 1, help = "Page number (1-based).")]
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..),
+            help = "Page number (1-based)."
+        )]
         page: u32,
-        #[arg(long, default_value_t = 20, help = "Max runs per page.")]
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..),
+            help = "Max runs per page."
+        )]
         limit: u32,
         #[arg(long, help = "Include the run URL column in text output.")]
         show_url: bool,

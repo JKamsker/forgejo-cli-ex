@@ -96,7 +96,7 @@ Two options:
 
 ## 7. `rerun` output is non-deterministic
 
-`actions.rs:363-373` — success output is either a redirect URL (if Forgejo responds with `{"redirect": "..."}`) or the string `"Rerun requested."`, depending on server behavior. Scripts cannot reliably detect success by output.
+`ActionsSubcommand::Rerun` — success output is either a redirect URL (if Forgejo responds with `{"redirect": "..."}`) or the string `"Rerun requested."`, depending on server behavior. Scripts cannot reliably detect success by output.
 
 - [x] Always print a consistent success line, e.g. `"Rerun requested for run #{run_index}."`, and print the redirect URL on a second line only if present (or suppress it) (`actions.rs`)
 - [x] Consider adding `--json` output to `rerun` and `cancel` for scripting (`cli.rs`, `actions.rs`)
@@ -105,7 +105,7 @@ Two options:
 
 ## 8. `runs` output lacks useful columns
 
-`actions.rs:63-66` — text output is only `RunIndex` and `Url`. No status, branch, trigger event, or timestamp — information a developer needs to choose which run to investigate.
+`ActionsSubcommand::Runs` — text output is only `RunIndex` and `Url`. No status, branch, trigger event, or timestamp — information a developer needs to choose which run to investigate.
 
 - [x] Check whether `list_runs` in `ui_actions.rs` already returns status/branch/trigger data
 - [x] If not, extend the scraping/API call to retrieve those fields
@@ -116,7 +116,7 @@ Two options:
 
 ## 9. `logs run` stdout separator destination undocumented
 
-`actions.rs:223-226, 236` — `== job N (attempt M) :: name ==` separators go to stderr while log content goes to stdout. Correct for piping, but nowhere documented.
+`ActionsLogsSubcommand::Run` (stdout mode `eprintln!("== job ... ==")`) — `== job N (attempt M) :: name ==` separators go to stderr while log content goes to stdout. Correct for piping, but nowhere documented.
 
 - [x] Add a note to the `logs run` subcommand's help text: `"Job separators (== job N ==) are written to stderr; log content goes to stdout"` (`cli.rs`)
 
