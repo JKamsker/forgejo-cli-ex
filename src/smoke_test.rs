@@ -21,7 +21,7 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
     let session = crate::session::UiSession::from_store(&target.base_url, false).await?;
 
     println!("[2] Workflows");
-    let workflows = crate::ui_actions::list_workflows(&session, &repo, 1).await?;
+    let workflows = crate::ui_actions::list_workflows(&session, &repo, 1, 20).await?;
     println!("workflows={}", workflows.len());
 
     println!("[3] Runs (page 1, limit 5)");
@@ -65,7 +65,7 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
 
     let base_out_dir = args
         .out_dir
-        .unwrap_or_else(|| std::path::PathBuf::from(".tmp").join("forgejo-logs"));
+        .unwrap_or_else(|| std::env::temp_dir().join("fj-ex").join("forgejo-logs"));
     let out_dir = base_out_dir.join(format!("smoketest-run-{latest_run_index}"));
     tokio::fs::create_dir_all(&out_dir).await?;
     let out_file = out_dir.join(format!(

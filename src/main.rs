@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod html;
 mod login;
+mod output;
 mod session;
 mod smoke_test;
 mod store;

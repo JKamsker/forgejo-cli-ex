@@ -81,17 +81,22 @@ List workflows/runs/jobs:
 ```powershell
 fj-ex actions workflows --host forge.example.com --repo owner/name
 fj-ex actions runs --host forge.example.com --repo owner/name --limit 20
+fj-ex actions runs --host forge.example.com --repo owner/name --latest
+fj-ex actions runs --host forge.example.com --repo owner/name --status failure
 fj-ex actions jobs --host forge.example.com --repo owner/name --latest
+fj-ex actions jobs --host forge.example.com --repo owner/name --latest --watch
 ```
 
 Download logs:
 
 ```powershell
 # Single job to stdout (attempt auto-detected if omitted)
+fj-ex actions logs job --host forge.example.com --repo owner/name --latest --job-index 0
 fj-ex actions logs job --host forge.example.com --repo owner/name --run-index 50 --job-index 0
 
 # Whole run to files
 fj-ex actions logs run --host forge.example.com --repo owner/name --run-index 50 --out-dir .tmp\\forgejo-logs\\run-50
+fj-ex actions logs run --host forge.example.com --repo owner/name --latest --workflow ci.yml --out-dir .tmp\\forgejo-logs\\latest-ci
 ```
 
 Artifacts:
@@ -108,6 +113,13 @@ These execute immediately by default. Use `--dry-run` to preview.
 ```powershell
 fj-ex actions cancel --host forge.example.com --repo owner/name --run-index 50 --dry-run
 fj-ex actions rerun  --host forge.example.com --repo owner/name --run-index 50 --dry-run
+fj-ex actions rerun  --host forge.example.com --repo owner/name --latest --failed-only --dry-run
+```
+
+Trigger / workflow_dispatch
+
+```powershell
+fj-ex actions trigger --host forge.example.com --repo owner/name --workflow ci.yml --ref main
 ```
 
 ## Smoke test
@@ -118,7 +130,13 @@ Non-destructive validation similar to the PoC:
 fj-ex smoke-test --host forge.example.com --repo owner/name
 ```
 
-Write logs somewhere else (avoids creating `.tmp` in the current directory):
+Also available under `actions`:
+
+```powershell
+fj-ex actions --host forge.example.com --repo owner/name smoke-test
+```
+
+Write logs somewhere else (defaults to system temp dir):
 
 ```powershell
 fj-ex smoke-test --host forge.example.com --repo owner/name --out-dir $env:TEMP\\fj-ex-smoke

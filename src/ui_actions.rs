@@ -57,10 +57,11 @@ pub async fn list_workflows(
     session: &UiSession,
     repo: &str,
     page: u32,
+    limit: u32,
 ) -> eyre::Result<Vec<String>> {
     let repo_path = repo.trim_matches('/');
     let url = format!(
-        "{}/{repo_path}/actions?page={page}&list_inner=true",
+        "{}/{repo_path}/actions?page={page}&limit={limit}&list_inner=true",
         session.base_url()
     );
 
@@ -128,13 +129,16 @@ pub async fn list_runs(
     .wrap_err("failed to build status regex")?;
     let ref_re = Regex::new(r#"class="ui label run-list-ref[^"]*"[^>]*>(?P<ref>[^<]+)</a>"#)
         .wrap_err("failed to build ref regex")?;
-    let created_at_re = Regex::new(r#"<(?:relative-time|time)[^>]*datetime=['"](?P<dt>[^'"]+)['"]"#)
-        .wrap_err("failed to build created-at regex")?;
+    let created_at_re =
+        Regex::new(r#"<(?:relative-time|time)[^>]*datetime=['"](?P<dt>[^'"]+)['"]"#)
+            .wrap_err("failed to build created-at regex")?;
 
     let mut seen = HashSet::new();
     let mut runs = Vec::new();
     for caps in re.captures_iter(&html_s) {
-        let m = caps.get(0).ok_or_else(|| eyre!("run regex capture missing match"))?;
+        let m = caps
+            .get(0)
+            .ok_or_else(|| eyre!("run regex capture missing match"))?;
         let idx_s = caps.name("idx").map(|m| m.as_str()).unwrap_or_default();
         if idx_s.is_empty() {
             continue;
@@ -413,8 +417,12 @@ pub async fn download_job_logs(
     ))
 }
 
-pub async fn latest_run_index(session: &UiSession, repo: &str) -> eyre::Result<i64> {
-    let runs = list_runs(session, repo, None, 1, 1).await?;
+pub async fn latest_run_index(
+    session: &UiSession,
+    repo: &str,
+    workflow: Option<&str>,
+) -> eyre::Result<i64> {
+    let runs = list_runs(session, repo, workflow, 1, 1).await?;
     let latest = runs
         .first()
         .ok_or_else(|| eyre!("No action runs found for {repo}."))?;
