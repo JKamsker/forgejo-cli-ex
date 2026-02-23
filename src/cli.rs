@@ -1,3 +1,5 @@
+use std::num::{NonZeroU32, NonZeroU64};
+
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
@@ -12,7 +14,9 @@ pub enum Command {
     /// Authentication and credential management (UI session cookies + plaintext creds).
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Forgejo Actions: workflows, runs, jobs, logs, artifacts, cancel/rerun.
     Actions(ActionsCommand),
+    /// Smoke test for Actions access (useful for debugging auth/connectivity/log downloads).
     #[command(name = "smoke-test")]
     SmokeTest(SmokeTestCommand),
     /// Legacy alias for `fj-ex auth login`.
@@ -40,15 +44,15 @@ pub enum AuthCommand {
 #[derive(Args, Debug, Clone)]
 pub struct TargetArgs {
     /// Forgejo host or base URL (e.g. forge.example.com or https://forge.example.com)
-    #[arg(long, short = 'H')]
+    #[arg(long, short = 'H', global = true)]
     pub host: Option<String>,
 
     /// Repo to operate on (owner/name or host/owner/name)
-    #[arg(long, short = 'r')]
+    #[arg(long, short = 'r', global = true)]
     pub repo: Option<crate::target::RepoArg>,
 
     /// Local git remote used to infer host/repo (default: origin)
-    #[arg(long, short = 'R')]
+    #[arg(long, short = 'R', global = true)]
     pub remote: Option<String>,
 }
 
@@ -132,94 +136,275 @@ pub struct ActionsCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ActionsSubcommand {
+    /// List available workflows for the repo.
     Workflows {
-        #[arg(long)]
-        json: bool,
-    },
-    Runs {
-        #[arg(long)]
-        workflow: Option<String>,
-        #[arg(long, default_value_t = 1)]
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..),
+            help = "Page number (1-based)."
+        )]
         page: u32,
-        #[arg(long, default_value_t = 20)]
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..),
+            help = "Items per page."
+        )]
         limit: u32,
-        #[arg(long)]
+        #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
-    Jobs {
-        #[arg(long)]
-        run_index: Option<i64>,
-        #[arg(long)]
+    /// List workflow runs for the repo.
+    Runs {
+        #[arg(long, help = "Filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(
+            long,
+            help = "Filter runs by status (success, failure, running, waiting, canceled, skipped, blocked)."
+        )]
+        status: Option<String>,
+        #[arg(
+            long,
+            help = "Show only the latest run (equivalent to --page 1 --limit 1)."
+        )]
         latest: bool,
-        #[arg(long)]
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..),
+            help = "Page number (1-based)."
+        )]
+        page: u32,
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..),
+            help = "Max runs per page."
+        )]
+        limit: u32,
+        #[arg(long, help = "Include the run URL column in text output.")]
+        show_url: bool,
+        #[arg(long, help = "Always print the header row (even when piping).")]
+        header: bool,
+        #[arg(long, conflicts_with = "header", help = "Never print the header row.")]
+        no_header: bool,
+        #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// List jobs for a run.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
+    Jobs {
+        #[arg(long, help = "Run index to inspect.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(long, help = "Watch until the run completes (polls the server).")]
+        watch: bool,
+        #[arg(
+            long,
+            default_value_t = 2,
+            value_parser = clap::value_parser!(u64).range(1..),
+            help = "Polling interval in seconds for --watch (minimum 1)."
+        )]
+        watch_interval: u64,
+        #[arg(long, help = "Always print the header row (even when piping).")]
+        header: bool,
+        #[arg(long, conflicts_with = "header", help = "Never print the header row.")]
+        no_header: bool,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
+    },
+    /// Download and print logs.
     Logs {
         #[command(subcommand)]
         command: ActionsLogsSubcommand,
     },
+    /// List or download run artifacts.
     Artifacts {
         #[command(subcommand)]
         command: ActionsArtifactsSubcommand,
     },
-    Cancel {
-        #[arg(long)]
-        run_index: i64,
-        #[arg(long)]
+    /// Trigger a workflow via workflow_dispatch.
+    #[command(alias = "workflow-dispatch")]
+    Trigger {
+        #[arg(long, help = "Workflow file name or id (e.g. ci.yml).")]
+        workflow: String,
+        #[arg(
+            long = "ref",
+            default_value = "main",
+            help = "Git ref to run on (branch name like 'main' or full 'refs/heads/main')."
+        )]
+        git_ref: String,
+        #[arg(long, value_name = "KEY=VALUE", help = "Workflow input (repeatable).")]
+        input: Vec<String>,
+        #[arg(
+            long,
+            help = "Print the request that would be made, but do not perform it."
+        )]
         dry_run: bool,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
     },
-    Rerun {
-        #[arg(long)]
-        run_index: i64,
-        #[arg(long)]
-        job_index: Option<i64>,
-        #[arg(long)]
+    /// Smoke test for Actions access (useful for debugging auth/connectivity/log downloads).
+    #[command(name = "smoke-test")]
+    SmokeTest(ActionsSmokeTestCommand),
+    /// Cancel a run.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
+    Cancel {
+        #[arg(long, help = "Run index to cancel.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(
+            long,
+            help = "Print the request that would be made, but do not perform it."
+        )]
         dry_run: bool,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
+    },
+    /// Rerun a run (or a single job within a run).
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
+    Rerun {
+        #[arg(long, help = "Run index to rerun.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(long, help = "Rerun a specific job index within the run (0-based).")]
+        job_index: Option<u32>,
+        #[arg(long, conflicts_with = "job_index", help = "Rerun failed jobs only.")]
+        failed_only: bool,
+        #[arg(
+            long,
+            help = "Print the request that would be made, but do not perform it."
+        )]
+        dry_run: bool,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
     },
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ActionsLogsSubcommand {
+    /// Download logs for all jobs in a run.
+    ///
+    /// Note: Job separators (`== job N ==`) are written to stderr; log content goes to stdout.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     Run {
-        #[arg(long)]
-        run_index: Option<i64>,
-        #[arg(long)]
+        #[arg(long, help = "Run index to download logs for.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Use the latest run.")]
         latest: bool,
-        #[arg(long)]
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(
+            long,
+            help = "Write per-job log files to this directory (otherwise stdout)."
+        )]
         out_dir: Option<std::path::PathBuf>,
-        #[arg(long, default_value_t = 0)]
-        max_jobs: u32,
+        #[arg(long, help = "Max jobs to download (default: unlimited).")]
+        max_jobs: Option<u32>,
     },
+    /// Download logs for a single job in a run.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     Job {
-        #[arg(long)]
-        run_index: i64,
-        #[arg(long)]
-        job_index: i64,
-        #[arg(long)]
-        attempt: Option<i64>,
-        #[arg(long)]
+        #[arg(long, help = "Run index to download logs for.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(long, help = "Job index within the run (0-based).")]
+        job_index: u32,
+        #[arg(long, help = "Attempt number (defaults to latest attempt).")]
+        attempt: Option<NonZeroU32>,
+        #[arg(long, help = "Write logs to this file (otherwise stdout).")]
         out_file: Option<std::path::PathBuf>,
     },
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ActionsArtifactsSubcommand {
+    /// List artifacts for a run.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     List {
-        #[arg(long)]
-        run_index: Option<i64>,
-        #[arg(long)]
+        #[arg(long, help = "Run index to list artifacts for.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Use the latest run.")]
         latest: bool,
-        #[arg(long)]
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(long, help = "Always print the header row (even when piping).")]
+        header: bool,
+        #[arg(long, conflicts_with = "header", help = "Never print the header row.")]
+        no_header: bool,
+        #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// Download a single artifact from a run.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
     Get {
-        #[arg(long)]
-        run_index: i64,
-        #[arg(long)]
+        #[arg(long, help = "Run index to download the artifact from.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(long, help = "Artifact name or id.")]
         artifact: String,
-        #[arg(long)]
+        #[arg(long, help = "Output file path.")]
         out_file: std::path::PathBuf,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ActionsSmokeTestCommand {
+    #[arg(
+        long,
+        default_value_t = 1_048_576,
+        help = "Max bytes to download per job log (default: 1 MiB)."
+    )]
+    pub log_download_max_bytes: u64,
+
+    /// Base directory for smoke test log downloads (a run-specific folder is created inside).
+    /// Default: system temp dir (e.g. $TMPDIR/fj-ex/forgejo-logs).
+    #[arg(long)]
+    pub out_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -227,10 +412,6 @@ pub struct SmokeTestCommand {
     #[command(flatten)]
     pub target: TargetArgs,
 
-    #[arg(long, default_value_t = 1_048_576)]
-    pub log_download_max_bytes: u64,
-
-    /// Base directory for smoke test log downloads (a run-specific folder is created inside)
-    #[arg(long)]
-    pub out_dir: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    pub opts: ActionsSmokeTestCommand,
 }

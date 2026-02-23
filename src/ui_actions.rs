@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashSet};
+use std::sync::LazyLock;
 
 use eyre::{eyre, Context};
 use regex::Regex;
@@ -6,10 +7,53 @@ use serde_json::Value;
 
 use crate::{html, session::UiSession};
 
+/// Maximum bytes before a run-href match to search for its status tooltip.
+const STATUS_LOOKBACK_BYTES: usize = 800;
+/// Maximum bytes after a run-href match to search for branch/created_at metadata.
+const RUN_BLOCK_LOOKAHEAD_BYTES: usize = 8_000;
+
+static WORKFLOW_HREF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"href="\?workflow=([^"&]+)"#).expect("WORKFLOW_HREF_RE regex must be valid")
+});
+static RUN_HREF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"href="/(?P<repo>[^"]+)/actions/runs/(?P<idx>\d+)""#)
+        .expect("RUN_HREF_RE regex must be valid")
+});
+static STATUS_TOOLTIP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"data-tooltip-content="(?P<status>Success|Failure|Running|Waiting|Canceled|Cancelled|Skipped|Blocked)""#,
+    )
+    .expect("STATUS_TOOLTIP_RE regex must be valid")
+});
+static RUN_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"class="ui label run-list-ref[^"]*"[^>]*>(?P<ref>[^<]+)</a>"#)
+        .expect("RUN_REF_RE regex must be valid")
+});
+static CREATED_AT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"<(?:relative-time|time)[^>]*datetime=['"](?P<dt>[^'"]+)['"]"#)
+        .expect("CREATED_AT_RE regex must be valid")
+});
+static ATTEMPT_LOG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"/attempt/(?P<n>\d+)/logs"#).expect("ATTEMPT_LOG_RE regex must be valid")
+});
+
+fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
+    if idx > s.len() {
+        idx = s.len();
+    }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
 #[derive(Clone, Debug)]
 pub struct RunRef {
     pub run_index: i64,
     pub url: String,
+    pub status: Option<String>,
+    pub branch: Option<String>,
+    pub created_at: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,10 +98,15 @@ pub async fn list_workflows(
     session: &UiSession,
     repo: &str,
     page: u32,
+    limit: u32,
 ) -> eyre::Result<Vec<String>> {
+    if limit == 0 {
+        return Err(eyre!("limit must be >= 1"));
+    }
+
     let repo_path = repo.trim_matches('/');
     let url = format!(
-        "{}/{repo_path}/actions?page={page}&list_inner=true",
+        "{}/{repo_path}/actions?page={page}&limit={limit}&list_inner=true",
         session.base_url()
     );
 
@@ -71,9 +120,8 @@ pub async fn list_workflows(
     }
     let html_s = resp.text().await.wrap_err("failed to read response html")?;
 
-    let re = Regex::new(r#"href="\?workflow=([^"&]+)"#).wrap_err("failed to build regex")?;
     let mut names = BTreeSet::new();
-    for caps in re.captures_iter(&html_s) {
+    for caps in WORKFLOW_HREF_RE.captures_iter(&html_s) {
         let raw = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
         if raw.is_empty() {
             continue;
@@ -91,6 +139,10 @@ pub async fn list_runs(
     page: u32,
     limit: u32,
 ) -> eyre::Result<Vec<RunRef>> {
+    if limit == 0 {
+        return Err(eyre!("limit must be >= 1"));
+    }
+
     let repo_path = repo.trim_matches('/');
     let workflow_param = workflow
         .filter(|s| !s.trim().is_empty())
@@ -112,15 +164,18 @@ pub async fn list_runs(
     }
     let html_s = resp.text().await.wrap_err("failed to read response html")?;
 
-    let re = Regex::new(&format!(
-        r#"/{}/actions/runs/(?P<idx>\d+)"#,
-        regex::escape(repo_path)
-    ))
-    .wrap_err("failed to build regex")?;
+    let run_href_prefix = format!("href=\"/{repo_path}/actions/runs/");
 
     let mut seen = HashSet::new();
     let mut runs = Vec::new();
-    for caps in re.captures_iter(&html_s) {
+    for caps in RUN_HREF_RE.captures_iter(&html_s) {
+        let m = caps
+            .get(0)
+            .ok_or_else(|| eyre!("run regex capture missing match"))?;
+        let repo_m = caps.name("repo").map(|m| m.as_str()).unwrap_or_default();
+        if repo_m != repo_path {
+            continue;
+        }
         let idx_s = caps.name("idx").map(|m| m.as_str()).unwrap_or_default();
         if idx_s.is_empty() {
             continue;
@@ -132,6 +187,32 @@ pub async fn list_runs(
         if run_index <= 0 {
             continue;
         }
+
+        let before_start =
+            floor_char_boundary(&html_s, m.start().saturating_sub(STATUS_LOOKBACK_BYTES));
+        let before = &html_s[before_start..m.end()];
+        let status = STATUS_TOOLTIP_RE
+            .captures_iter(before)
+            .last()
+            .and_then(|c| c.name("status").map(|m| m.as_str().to_string()));
+
+        let max_after_end = floor_char_boundary(
+            &html_s,
+            (m.end() + RUN_BLOCK_LOOKAHEAD_BYTES).min(html_s.len()),
+        );
+        let after_end = html_s[m.end()..max_after_end]
+            .find(&run_href_prefix)
+            .map(|i| m.end() + i)
+            .unwrap_or(max_after_end);
+        let after = &html_s[m.end()..after_end];
+
+        let branch = RUN_REF_RE
+            .captures(after)
+            .and_then(|c| c.name("ref").map(|m| html::html_decode(m.as_str())));
+        let created_at = CREATED_AT_RE
+            .captures(after)
+            .and_then(|c| c.name("dt").map(|m| m.as_str().to_string()));
+
         let run_url = format!(
             "{}/{repo_path}/actions/runs/{run_index}",
             session.base_url()
@@ -139,6 +220,9 @@ pub async fn list_runs(
         runs.push(RunRef {
             run_index,
             url: run_url,
+            status,
+            branch,
+            created_at,
         });
     }
 
@@ -309,12 +393,10 @@ pub async fn get_job_view_meta(
         None => {
             // Older Forgejo versions don't expose attempt numbers in the job view.
             // They still make logs available, typically without an attempt segment.
-            let re = Regex::new(r#"/attempt/(?P<n>\d+)/logs"#).ok();
-            re.and_then(|re| {
-                re.captures(&html_s)
-                    .and_then(|caps| caps.name("n").and_then(|m| m.as_str().parse::<i64>().ok()))
-            })
-            .unwrap_or(1)
+            ATTEMPT_LOG_RE
+                .captures(&html_s)
+                .and_then(|caps| caps.name("n").and_then(|m| m.as_str().parse::<i64>().ok()))
+                .unwrap_or(1)
         }
     };
 
@@ -374,8 +456,12 @@ pub async fn download_job_logs(
     ))
 }
 
-pub async fn latest_run_index(session: &UiSession, repo: &str) -> eyre::Result<i64> {
-    let runs = list_runs(session, repo, None, 1, 1).await?;
+pub async fn latest_run_index(
+    session: &UiSession,
+    repo: &str,
+    workflow: Option<&str>,
+) -> eyre::Result<i64> {
+    let runs = list_runs(session, repo, workflow, 1, 1).await?;
     let latest = runs
         .first()
         .ok_or_else(|| eyre!("No action runs found for {repo}."))?;

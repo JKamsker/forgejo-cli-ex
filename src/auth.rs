@@ -182,6 +182,10 @@ async fn run_show(args: AuthShowCommand) -> eyre::Result<()> {
         })
     });
 
+    if args.unsafe_show_password {
+        eprintln!("warn: --unsafe-show-password prints the plaintext password to stdout.");
+    }
+
     if args.json {
         let mut payload = serde_json::json!({
             "baseUrl": base_url,
@@ -243,7 +247,7 @@ async fn run_logout(args: AuthLogoutCommand) -> eyre::Result<()> {
         let username = entry.username.unwrap_or_else(|| "?".to_string());
         println!("signed out of {username}@{host_key}");
     } else {
-        println!("already not signed in to {host_key}");
+        println!("already signed out of {host_key}");
     }
     Ok(())
 }

@@ -21,7 +21,7 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
     let session = crate::session::UiSession::from_store(&target.base_url, false).await?;
 
     println!("[2] Workflows");
-    let workflows = crate::ui_actions::list_workflows(&session, &repo, 1).await?;
+    let workflows = crate::ui_actions::list_workflows(&session, &repo, 1, 20).await?;
     println!("workflows={}", workflows.len());
 
     println!("[3] Runs (page 1, limit 5)");
@@ -64,8 +64,9 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
     println!("attempt={}", meta.attempt_number);
 
     let base_out_dir = args
+        .opts
         .out_dir
-        .unwrap_or_else(|| std::path::PathBuf::from(".tmp").join("forgejo-logs"));
+        .unwrap_or_else(|| std::env::temp_dir().join("fj-ex").join("forgejo-logs"));
     let out_dir = base_out_dir.join(format!("smoketest-run-{latest_run_index}"));
     tokio::fs::create_dir_all(&out_dir).await?;
     let out_file = out_dir.join(format!(
@@ -82,12 +83,13 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
     )
     .await?;
     if bytes.is_empty() {
-        return Err(eyre::eyre!("Log file non-empty"));
+        return Err(eyre::eyre!("Log file is empty (expected non-empty)"));
     }
-    if bytes.len() as u64 > args.log_download_max_bytes {
+    if bytes.len() as u64 > args.opts.log_download_max_bytes {
         return Err(eyre::eyre!(
-            "Log file <= LogDownloadMaxBytes ({}). If this fails, rerun with a larger limit.",
-            args.log_download_max_bytes
+            "Log file ({} bytes) exceeds LogDownloadMaxBytes ({}). Rerun with a larger limit.",
+            bytes.len(),
+            args.opts.log_download_max_bytes
         ));
     }
     tokio::fs::write(&out_file, bytes).await?;
