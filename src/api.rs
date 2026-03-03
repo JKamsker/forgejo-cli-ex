@@ -59,19 +59,17 @@ impl ApiClient {
             .wrap_err_with(|| format!("failed to read response body from GET {url}"))?;
 
         if !status.is_success() {
-            let preview = String::from_utf8_lossy(&body)
-                .chars()
-                .take(4096)
-                .collect::<String>();
-            return Err(eyre!("GET {url} failed: HTTP {status} body={preview}"));
+            return Err(eyre!(
+                "GET {url} failed: HTTP {status} (body_length={})",
+                body.len()
+            ));
         }
 
         serde_json::from_slice::<T>(&body).wrap_err_with(|| {
-            let preview = String::from_utf8_lossy(&body)
-                .chars()
-                .take(4096)
-                .collect::<String>();
-            format!("failed to decode JSON from GET {url}: body={preview}")
+            format!(
+                "failed to decode JSON from GET {url} (body_length={})",
+                body.len()
+            )
         })
     }
 }
