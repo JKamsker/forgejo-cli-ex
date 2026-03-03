@@ -839,7 +839,8 @@ jobs:
   waiting:
     runs-on: missing-label
     steps:
-      - run: echo "fj-ex-e2e: waiting"
+      - run: |
+          echo "fj-ex-e2e: waiting"
 "#,
     )
     .wrap_err("failed to write waiting workflow")?;
