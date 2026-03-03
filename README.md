@@ -30,6 +30,10 @@ fj-ex actions logs job --repo owner/name --latest --job-index 0
 # Cancel / rerun (preview first with --dry-run)
 fj-ex actions cancel --repo owner/name --run-index 50 --dry-run
 fj-ex actions rerun  --repo owner/name --latest --failed-only
+
+# Runner registration token + queued jobs (requires `fj auth login`)
+fj-ex actions runners token --repo owner/name
+fj-ex actions runners jobs  --repo owner/name --waiting
 ```
 
 > `--host` can be omitted — `fj-ex` infers it from the current repo's git remotes, or falls back to `$FJ_FALLBACK_HOST`.
@@ -46,6 +50,7 @@ fj-ex actions rerun  --repo owner/name --latest --failed-only
 | `actions cancel` | Cancel a running workflow |
 | `actions rerun` | Rerun a workflow (optionally `--failed-only`) |
 | `actions trigger` | Dispatch a `workflow_dispatch` event |
+| `actions runners` | Runner tokens + queued jobs (REST API; uses `fj` token store) |
 | `smoke-test` | Non-destructive end-to-end validation |
 
 Full command reference with all flags: [docs/commands.md](docs/commands.md)
@@ -61,6 +66,13 @@ Credentials and cookies are stored in plaintext at:
 ```text
 %APPDATA%\Cyborus\forgejo-cli\data\ui-creds.json   # Windows
 ~/.local/share/Cyborus/forgejo-cli/data/ui-creds.json  # Linux
+```
+
+`fj-ex actions runners` uses the API token stored by the official `fj` CLI at:
+
+```text
+%APPDATA%\Cyborus\forgejo-cli\data\keys.json   # Windows
+~/.local/share/Cyborus/forgejo-cli/data/keys.json  # Linux
 ```
 
 This is required for automatic re-login. Downloaded logs and artifacts may contain secrets — handle accordingly.

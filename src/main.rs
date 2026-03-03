@@ -1,4 +1,5 @@
 mod actions;
+mod api;
 mod auth;
 mod cli;
 mod html;

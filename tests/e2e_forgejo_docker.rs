@@ -8,6 +8,7 @@ use std::{
 
 use eyre::{eyre, Context, Result};
 use serde_json::Value;
+use url::Url;
 
 const FORGEJO_IMAGE: &str = "codeberg.org/forgejo/forgejo:14.0.2";
 const FORGEJO_IMAGE_11_0_10: &str = "codeberg.org/forgejo/forgejo:11.0.10";
@@ -83,6 +84,57 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
 
     let fj_ex = fj_ex_bin()?;
 
+    // Runners (REST API) requires `fj`'s stored API token. Ensure missing-token UX is clear.
+    let missing_token_out = fj_ex_cmd_expect_failure(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions", "--host", &base_url, "runners", "token", "--scope", "global",
+        ],
+        None,
+    )?;
+    assert!(
+        missing_token_out
+            .stderr
+            .contains("No Forgejo API token found"),
+        "expected missing token error, got stderr:\n{}",
+        missing_token_out.stderr
+    );
+    assert!(
+        missing_token_out.stderr.contains("fj --host"),
+        "expected fj auth instructions, got stderr:\n{}",
+        missing_token_out.stderr
+    );
+    assert!(
+        missing_token_out.stderr.contains("keys.json"),
+        "expected keys.json path mention, got stderr:\n{}",
+        missing_token_out.stderr
+    );
+
+    // Create an API token and write it to the same keys.json store that `fj` uses.
+    let fj_api_token = docker_stdout(&[
+        "exec",
+        "-u",
+        "git",
+        &forgejo_name,
+        "forgejo",
+        "admin",
+        "user",
+        "generate-access-token",
+        "--username",
+        username,
+        "--token-name",
+        "fj-ex-e2e",
+        "--scopes",
+        "all",
+        "--raw",
+    ])
+    .wrap_err("failed to generate api token")?;
+    if fj_api_token.trim().is_empty() {
+        return Err(eyre!("api token was empty"));
+    }
+    write_fj_keys_json(&appdata_dir, &base_url, fj_api_token.trim())?;
+
     // Login (non-interactive)
     fj_ex_cmd(
         &fj_ex,
@@ -127,6 +179,65 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     let show_json: Value = serde_json::from_str(&show_out.stdout)?;
     assert_eq!(show_json["username"], username);
     assert_eq!(show_json["hasPassword"], true);
+
+    // Runner registration tokens (global/repo/user)
+    let token_repo_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions", "--host", &base_url, "--repo", &repo, "runners", "token", "--json",
+        ],
+        None,
+    )?;
+    let token_repo_json: Value = serde_json::from_str(&token_repo_out.stdout)?;
+    assert_eq!(token_repo_json["baseUrl"], base_url);
+    assert_eq!(token_repo_json["scope"], "repo");
+    assert_eq!(token_repo_json["repo"], repo);
+    assert!(
+        token_repo_json["token"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty()),
+        "expected repo token, got: {}",
+        token_repo_out.stdout
+    );
+
+    let token_global_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions", "--host", &base_url, "runners", "token", "--scope", "global", "--json",
+        ],
+        None,
+    )?;
+    let token_global_json: Value = serde_json::from_str(&token_global_out.stdout)?;
+    assert_eq!(token_global_json["baseUrl"], base_url);
+    assert_eq!(token_global_json["scope"], "global");
+    assert!(
+        token_global_json["token"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty()),
+        "expected global token, got: {}",
+        token_global_out.stdout
+    );
+
+    let token_user_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions", "--host", &base_url, "runners", "token", "--scope", "user", "--json",
+        ],
+        None,
+    )?;
+    let token_user_json: Value = serde_json::from_str(&token_user_out.stdout)?;
+    assert_eq!(token_user_json["baseUrl"], base_url);
+    assert_eq!(token_user_json["scope"], "user");
+    assert!(
+        token_user_json["token"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty()),
+        "expected user token, got: {}",
+        token_user_out.stdout
+    );
 
     // Wait for the first run to exist and finish.
     let run_index = wait_for_first_run(&fj_ex, &appdata_dir, &base_url, &repo).await?;
@@ -342,6 +453,36 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
         None,
     )?;
     assert!(smoke_out.stdout.lines().any(|l| l.trim() == "OK"));
+
+    // Trigger a workflow with a mismatched runs-on label to ensure runner jobs can be listed/filtered.
+    let _trigger_waiting_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &[
+            "actions",
+            "--host",
+            &base_url,
+            "--repo",
+            &repo,
+            "trigger",
+            "--workflow",
+            "e2e-waiting.yml",
+            "--ref",
+            "main",
+            "--json",
+        ],
+        None,
+    )?;
+    let waiting_jobs_json =
+        wait_for_waiting_runner_jobs(&fj_ex, &appdata_dir, &base_url, &repo, "missing-label")
+            .await?;
+    assert_eq!(waiting_jobs_json["baseUrl"], base_url);
+    assert_eq!(waiting_jobs_json["scope"], "repo");
+    assert_eq!(waiting_jobs_json["repo"], repo);
+    assert_eq!(waiting_jobs_json["waitingOnly"], true);
+    assert!(waiting_jobs_json["jobs"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty()));
 
     // Logout should remove the entry.
     fj_ex_cmd(
@@ -688,6 +829,20 @@ jobs:
 "#,
     )
     .wrap_err("failed to write workflow")?;
+    fs::write(
+        wf_dir.join("e2e-waiting.yml"),
+        r#"name: fj-ex e2e waiting
+on:
+  workflow_dispatch:
+
+jobs:
+  waiting:
+    runs-on: missing-label
+    steps:
+      - run: echo "fj-ex-e2e: waiting"
+"#,
+    )
+    .wrap_err("failed to write waiting workflow")?;
     fs::write(repo_dir.join("README.md"), "# fj-ex e2e\n").wrap_err("failed to write readme")?;
 
     git(repo_dir, &["init", "-b", "main"]).wrap_err("git init failed")?;
@@ -759,7 +914,6 @@ fn fj_ex_bin() -> Result<PathBuf> {
 
 struct FjOut {
     stdout: String,
-    #[allow(dead_code)]
     stderr: String,
 }
 
@@ -810,6 +964,83 @@ fn fj_ex_cmd(
     Ok(FjOut { stdout, stderr })
 }
 
+fn fj_ex_cmd_expect_failure(
+    bin: &Path,
+    appdata_dir: &Path,
+    args: &[&str],
+    stdin: Option<Vec<u8>>,
+) -> Result<FjOut> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .env("APPDATA", appdata_dir)
+        .env("RUST_BACKTRACE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .wrap_err_with(|| format!("failed to spawn fj-ex {}", args.join(" ")))?;
+
+    if let Some(input) = stdin {
+        use std::io::Write;
+        let Some(mut s) = child.stdin.take() else {
+            return Err(eyre!("failed to open fj-ex stdin pipe"));
+        };
+        s.write_all(&input)
+            .wrap_err("failed to write to fj-ex stdin")?;
+    }
+
+    let output: Output = child
+        .wait_with_output()
+        .wrap_err("failed to wait for fj-ex")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        return Err(eyre!(
+            "fj-ex {} unexpectedly succeeded:\nstdout:\n{}\nstderr:\n{}",
+            args.join(" "),
+            stdout,
+            stderr
+        ));
+    }
+
+    Ok(FjOut { stdout, stderr })
+}
+
+fn write_fj_keys_json(appdata_dir: &Path, base_url: &str, token: &str) -> Result<PathBuf> {
+    let host_key = host_key_from_base_url(base_url)?;
+
+    let dir = appdata_dir.join("Cyborus").join("forgejo-cli").join("data");
+    fs::create_dir_all(&dir).wrap_err("failed to create keys store dir")?;
+    let path = dir.join("keys.json");
+
+    let json = serde_json::json!({
+        "hosts": {
+            host_key: {
+                "token": token,
+            }
+        },
+        "aliases": {},
+    });
+
+    fs::write(&path, serde_json::to_vec_pretty(&json)?).wrap_err("failed to write keys.json")?;
+    Ok(path)
+}
+
+fn host_key_from_base_url(base_url: &str) -> Result<String> {
+    let url = Url::parse(base_url).wrap_err("invalid base url")?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| eyre!("base url missing host"))?;
+    if let Some(port) = url.port() {
+        return Ok(format!("{host}:{port}"));
+    }
+    Ok(host.to_string())
+}
+
 async fn wait_for_first_run(
     bin: &Path,
     appdata_dir: &Path,
@@ -858,6 +1089,70 @@ async fn wait_for_first_run(
         }
 
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+async fn wait_for_waiting_runner_jobs(
+    bin: &Path,
+    appdata_dir: &Path,
+    base_url: &str,
+    repo: &str,
+    label: &str,
+) -> Result<Value> {
+    let start = Instant::now();
+    let timeout = Duration::from_secs(120);
+
+    loop {
+        if start.elapsed() > timeout {
+            return Err(eyre!("timeout waiting for waiting runner jobs to appear"));
+        }
+
+        let out = fj_ex_cmd(
+            bin,
+            appdata_dir,
+            &[
+                "actions",
+                "--host",
+                base_url,
+                "--repo",
+                repo,
+                "runners",
+                "jobs",
+                "--waiting",
+                "--label",
+                label,
+                "--json",
+            ],
+            None,
+        );
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("warn: failed to list runner jobs (will retry): {e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let json: Value = match serde_json::from_str(&out.stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("warn: failed to parse runner jobs json (will retry): {e}");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
+
+        let Some(jobs) = json["jobs"].as_array() else {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        };
+        if jobs.is_empty() {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        return Ok(json);
     }
 }
 
