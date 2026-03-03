@@ -103,6 +103,53 @@ fj-ex actions trigger --repo owner/name --workflow ci.yml --ref main
 
 ---
 
+## actions runners
+
+These commands use the Forgejo REST API and require being authenticated via the official `fj` CLI
+(API token stored by `fj`).
+
+Runner registration tokens:
+
+```sh
+# Repo scope (default if --repo is set / inferred)
+fj-ex actions runners token --repo owner/name
+
+# Global scope (admin endpoints)
+fj-ex actions runners token --scope global
+
+# Org scope
+fj-ex actions runners token --scope org --org my-org
+
+# User scope
+fj-ex actions runners token --scope user
+```
+
+Runner jobs:
+
+```sh
+# Show waiting jobs for the repo
+fj-ex actions runners jobs --repo owner/name --waiting
+
+# Filter by runner labels (repeatable; sent as labels=a,b)
+fj-ex actions runners jobs --scope global --label self-hosted --label linux
+```
+
+If you get a "No Forgejo API token found" error, authenticate via `fj`:
+
+```sh
+fj --host forge.example.com auth login
+fj --host forge.example.com auth add-key <USER>
+```
+
+Token store location (read by `fj-ex`):
+
+```text
+%APPDATA%/Cyborus/forgejo-cli/data/keys.json   # Windows
+~/.local/share/Cyborus/forgejo-cli/data/keys.json  # Linux
+```
+
+---
+
 ## actions workflows
 
 ```sh

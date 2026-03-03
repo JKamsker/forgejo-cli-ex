@@ -1,6 +1,6 @@
 use std::num::{NonZeroU32, NonZeroU64};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(name = "fj-ex", version, about)]
@@ -252,6 +252,11 @@ pub enum ActionsSubcommand {
         #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// Runner registration tokens and queued jobs (REST API; uses `fj`'s stored API token).
+    Runners {
+        #[command(subcommand)]
+        command: ActionsRunnersSubcommand,
+    },
     /// Smoke test for Actions access (useful for debugging auth/connectivity/log downloads).
     #[command(name = "smoke-test")]
     SmokeTest(ActionsSmokeTestCommand),
@@ -414,4 +419,60 @@ pub struct SmokeTestCommand {
 
     #[command(flatten)]
     pub opts: ActionsSmokeTestCommand,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerScope {
+    Global,
+    Org,
+    Repo,
+    User,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ActionsRunnersSubcommand {
+    /// Print a runner registration token.
+    Token {
+        /// Runner scope (default: org if --org is set, else repo if resolved, else global).
+        #[arg(long, value_enum)]
+        scope: Option<RunnerScope>,
+
+        /// Org name (required for --scope org).
+        #[arg(long)]
+        org: Option<String>,
+
+        /// Print JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List runner jobs (useful for diagnosing "waiting" and label mismatches).
+    Jobs {
+        /// Runner scope (default: org if --org is set, else repo if resolved, else global).
+        #[arg(long, value_enum)]
+        scope: Option<RunnerScope>,
+
+        /// Org name (required for --scope org).
+        #[arg(long)]
+        org: Option<String>,
+
+        /// Filter by runner label (repeatable; sent as labels=a,b).
+        #[arg(long, value_name = "LABEL")]
+        label: Vec<String>,
+
+        /// Show only jobs with status == "waiting" (case-insensitive).
+        #[arg(long)]
+        waiting: bool,
+
+        /// Always print the header row (even when piping).
+        #[arg(long)]
+        header: bool,
+
+        /// Never print the header row.
+        #[arg(long, conflicts_with = "header")]
+        no_header: bool,
+
+        /// Print JSON output.
+        #[arg(long)]
+        json: bool,
+    },
 }

@@ -6,7 +6,8 @@ use eyre::{eyre, Context};
 use tokio::io::AsyncWriteExt;
 
 use crate::cli::{
-    ActionsArtifactsSubcommand, ActionsCommand, ActionsLogsSubcommand, ActionsSubcommand,
+    ActionsArtifactsSubcommand, ActionsCommand, ActionsLogsSubcommand, ActionsRunnersSubcommand,
+    ActionsSubcommand, RunnerScope,
 };
 
 static SAFE_FILENAME_COMPONENT_RE: LazyLock<regex::Regex> =
@@ -19,13 +20,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
         args.target.remote.as_deref(),
     )?;
 
-    let repo = target.repo.ok_or_else(|| {
-        eyre!(
-            "Repo could not be resolved. Pass --repo owner/name or run inside a git repo with a Forgejo remote."
-        )
-    })?;
-
     match args.command {
+        ActionsSubcommand::Runners { command } => {
+            run_runners(command, &target).await?;
+        }
         ActionsSubcommand::Trigger {
             workflow,
             git_ref,
@@ -33,6 +31,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             dry_run,
             json,
         } => {
+            let repo = require_repo_owned(&target)?;
             let repo_path = repo.trim_matches('/');
             let (owner, name) = repo_path.split_once('/').ok_or_else(|| {
                 eyre!(
@@ -134,6 +133,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             }
         }
         command => {
+            let repo = require_repo_owned(&target)?;
             let session = crate::session::UiSession::from_store(&target.base_url, false).await?;
 
             match command {
@@ -766,6 +766,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 ActionsSubcommand::Trigger { .. } => {
                     unreachable!("Trigger is handled before UiSession initialization")
                 }
+                ActionsSubcommand::Runners { .. } => {
+                    unreachable!("Runners is handled before UiSession initialization")
+                }
             }
         }
     }
@@ -917,6 +920,212 @@ async fn rerun_failed_jobs(
         );
         for redirect in redirects {
             println!("{redirect}");
+        }
+    }
+
+    Ok(())
+}
+
+fn require_repo_owned(target: &crate::target::ResolvedTarget) -> eyre::Result<String> {
+    target.repo.clone().ok_or_else(|| {
+        eyre!(
+            "Repo could not be resolved. Pass --repo owner/name or run inside a git repo with a Forgejo remote."
+        )
+    })
+}
+
+fn runner_scope_name(scope: RunnerScope) -> &'static str {
+    match scope {
+        RunnerScope::Global => "global",
+        RunnerScope::Org => "org",
+        RunnerScope::Repo => "repo",
+        RunnerScope::User => "user",
+    }
+}
+
+fn resolve_runner_scope(
+    scope: Option<RunnerScope>,
+    org: Option<&str>,
+    target: &crate::target::ResolvedTarget,
+) -> RunnerScope {
+    if let Some(scope) = scope {
+        return scope;
+    }
+    if org.is_some() {
+        return RunnerScope::Org;
+    }
+    if target.repo.is_some() {
+        return RunnerScope::Repo;
+    }
+    RunnerScope::Global
+}
+
+fn fj_missing_api_token_error(base_url: &str) -> eyre::Report {
+    let host_key = crate::target::normalize_host_key(base_url).unwrap_or_else(|_| base_url.into());
+    let path = crate::store::keys_store_paths()
+        .map(|p| p.path.display().to_string())
+        .unwrap_or_else(|_| "%APPDATA%/Cyborus/forgejo-cli/data/keys.json".to_string());
+
+    eyre!(
+        "No Forgejo API token found for host '{host_key}'. Authenticate via `fj`:\n  fj --host {host_key} auth login\n  fj --host {host_key} auth add-key <USER>  # reads token from stdin if omitted\nToken store:\n  %APPDATA%/Cyborus/forgejo-cli/data/keys.json (Windows)\n  ~/.local/share/Cyborus/forgejo-cli/data/keys.json (Linux)\nReading: {path}"
+    )
+}
+
+fn resolve_runner_endpoint_url(
+    client: &crate::api::ApiClient,
+    scope: RunnerScope,
+    org: Option<String>,
+    target: &crate::target::ResolvedTarget,
+    endpoint: &str,
+) -> eyre::Result<(Option<String>, Option<String>, String)> {
+    match scope {
+        RunnerScope::Global => Ok((
+            None,
+            None,
+            client.api_v1_url(&format!("/admin/runners/{endpoint}")),
+        )),
+        RunnerScope::Org => {
+            let org = org.ok_or_else(|| eyre!("--org is required for --scope org"))?;
+            let url = client.api_v1_url(&format!(
+                "/orgs/{}/actions/runners/{endpoint}",
+                urlencoding::encode(&org)
+            ));
+            Ok((Some(org), None, url))
+        }
+        RunnerScope::Repo => {
+            let owner = target.owner.as_deref().ok_or_else(|| {
+                eyre!(
+                    "Repo could not be resolved. Pass --repo owner/name or run inside a git repo with a Forgejo remote."
+                )
+            })?;
+            let name = target
+                .name
+                .as_deref()
+                .ok_or_else(|| eyre!("resolved repo is missing name"))?;
+            let repo = target
+                .repo
+                .clone()
+                .unwrap_or_else(|| format!("{owner}/{name}"));
+            let url = client.api_v1_url(&format!(
+                "/repos/{}/{}/actions/runners/{endpoint}",
+                urlencoding::encode(owner),
+                urlencoding::encode(name)
+            ));
+            Ok((None, Some(repo), url))
+        }
+        RunnerScope::User => Ok((
+            None,
+            None,
+            client.api_v1_url(&format!("/user/actions/runners/{endpoint}")),
+        )),
+    }
+}
+
+async fn run_runners(
+    command: ActionsRunnersSubcommand,
+    target: &crate::target::ResolvedTarget,
+) -> eyre::Result<()> {
+    let token = crate::store::get_fj_api_token_for_base_url(&target.base_url)?
+        .ok_or_else(|| fj_missing_api_token_error(&target.base_url))?;
+    let client = crate::api::ApiClient::new(&target.base_url, &token)?;
+
+    match command {
+        ActionsRunnersSubcommand::Token { scope, org, json } => {
+            let scope = resolve_runner_scope(scope, org.as_deref(), target);
+            let (org_out, repo_out, url) =
+                resolve_runner_endpoint_url(&client, scope, org, target, "registration-token")?;
+
+            let reg: crate::api::RegistrationToken = client.get_json(&url).await?;
+
+            if json {
+                let payload = serde_json::json!({
+                    "baseUrl": target.base_url,
+                    "scope": runner_scope_name(scope),
+                    "org": org_out,
+                    "repo": repo_out,
+                    "token": reg.token,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", reg.token);
+            }
+        }
+        ActionsRunnersSubcommand::Jobs {
+            scope,
+            org,
+            label,
+            waiting,
+            header,
+            no_header,
+            json,
+        } => {
+            let scope = resolve_runner_scope(scope, org.as_deref(), target);
+
+            let labels = {
+                let mut out = Vec::with_capacity(label.len());
+                for l in label {
+                    let trimmed = l.trim();
+                    if trimmed.is_empty() {
+                        return Err(eyre!("--label cannot be empty"));
+                    }
+                    out.push(trimmed.to_string());
+                }
+                out
+            };
+            let labels_query = if labels.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "?labels={}",
+                    labels
+                        .iter()
+                        .map(|l| urlencoding::encode(l).into_owned())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+
+            let (org_out, repo_out, base_jobs_url) =
+                resolve_runner_endpoint_url(&client, scope, org, target, "jobs")?;
+
+            let url = format!("{base_jobs_url}{labels_query}");
+            let mut jobs: Vec<crate::api::ActionRunJob> = client.get_json(&url).await?;
+
+            if waiting {
+                jobs.retain(|j| {
+                    j.status
+                        .as_deref()
+                        .is_some_and(|s| s.eq_ignore_ascii_case("waiting"))
+                });
+            }
+
+            if json {
+                let payload = serde_json::json!({
+                    "baseUrl": target.base_url,
+                    "scope": runner_scope_name(scope),
+                    "org": org_out,
+                    "repo": repo_out,
+                    "labels": labels,
+                    "waitingOnly": waiting,
+                    "jobs": jobs,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+
+            let show_header = crate::output::should_print_header(header, no_header);
+            let headers = vec!["Id", "Status", "Name", "RunsOn"];
+            let mut rows = Vec::with_capacity(jobs.len());
+            for j in jobs {
+                let runs_on = j.runs_on_display();
+                rows.push(vec![
+                    j.id.to_string(),
+                    j.status.unwrap_or_else(|| "?".to_string()),
+                    j.name,
+                    runs_on,
+                ]);
+            }
+            crate::output::print_table(&headers, &rows, show_header);
         }
     }
 
