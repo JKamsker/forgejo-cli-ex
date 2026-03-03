@@ -17,12 +17,16 @@ pub struct StorePaths {
     pub path: PathBuf,
 }
 
-pub fn ui_creds_store_paths() -> eyre::Result<StorePaths> {
-    let app_data = std::env::var_os("APPDATA")
+fn app_data_base_dir() -> eyre::Result<PathBuf> {
+    std::env::var_os("APPDATA")
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .or_else(|| directories::BaseDirs::new().map(|d| d.data_dir().to_path_buf()))
-        .ok_or_else(|| eyre!("unable to locate AppData directory"))?;
+        .ok_or_else(|| eyre!("unable to locate AppData directory"))
+}
+
+pub fn ui_creds_store_paths() -> eyre::Result<StorePaths> {
+    let app_data = app_data_base_dir()?;
 
     let dir = app_data.join("Cyborus").join("forgejo-cli").join("data");
     let path = dir.join("ui-creds.json");
@@ -30,11 +34,7 @@ pub fn ui_creds_store_paths() -> eyre::Result<StorePaths> {
 }
 
 pub fn keys_store_paths() -> eyre::Result<StorePaths> {
-    let app_data = std::env::var_os("APPDATA")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| directories::BaseDirs::new().map(|d| d.data_dir().to_path_buf()))
-        .ok_or_else(|| eyre!("unable to locate AppData directory"))?;
+    let app_data = app_data_base_dir()?;
 
     let dir = app_data.join("Cyborus").join("forgejo-cli").join("data");
     let path = dir.join("keys.json");

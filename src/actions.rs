@@ -971,6 +971,56 @@ fn fj_missing_api_token_error(base_url: &str) -> eyre::Report {
     )
 }
 
+fn resolve_runner_endpoint_url(
+    client: &crate::api::ApiClient,
+    scope: RunnerScope,
+    org: Option<String>,
+    target: &crate::target::ResolvedTarget,
+    endpoint: &str,
+) -> eyre::Result<(Option<String>, Option<String>, String)> {
+    match scope {
+        RunnerScope::Global => Ok((
+            None,
+            None,
+            client.api_v1_url(&format!("/admin/runners/{endpoint}")),
+        )),
+        RunnerScope::Org => {
+            let org = org.ok_or_else(|| eyre!("--org is required for --scope org"))?;
+            let url = client.api_v1_url(&format!(
+                "/orgs/{}/actions/runners/{endpoint}",
+                urlencoding::encode(&org)
+            ));
+            Ok((Some(org), None, url))
+        }
+        RunnerScope::Repo => {
+            let owner = target.owner.as_deref().ok_or_else(|| {
+                eyre!(
+                    "Repo could not be resolved. Pass --repo owner/name or run inside a git repo with a Forgejo remote."
+                )
+            })?;
+            let name = target
+                .name
+                .as_deref()
+                .ok_or_else(|| eyre!("resolved repo is missing name"))?;
+            let repo = target
+                .repo
+                .clone()
+                .unwrap_or_else(|| format!("{owner}/{name}"));
+            let url = client.api_v1_url(&format!(
+                "/repos/{}/{}/actions/runners/{endpoint}",
+                urlencoding::encode(owner),
+                urlencoding::encode(name)
+            ));
+            Ok((None, Some(repo), url))
+        }
+        RunnerScope::User => Ok((
+            None,
+            None,
+            client.api_v1_url(&format!("/user/actions/runners/{endpoint}")),
+        )),
+    }
+}
+
 async fn run_runners(
     command: ActionsRunnersSubcommand,
     target: &crate::target::ResolvedTarget,
@@ -982,48 +1032,8 @@ async fn run_runners(
     match command {
         ActionsRunnersSubcommand::Token { scope, org, json } => {
             let scope = resolve_runner_scope(scope, org.as_deref(), target);
-
-            let (org_out, repo_out, url) = match scope {
-                RunnerScope::Global => (
-                    None,
-                    None,
-                    client.api_v1_url("/admin/runners/registration-token"),
-                ),
-                RunnerScope::Org => {
-                    let org = org.ok_or_else(|| eyre!("--org is required for --scope org"))?;
-                    let url = client.api_v1_url(&format!(
-                        "/orgs/{}/actions/runners/registration-token",
-                        urlencoding::encode(&org)
-                    ));
-                    (Some(org), None, url)
-                }
-                RunnerScope::Repo => {
-                    let owner = target.owner.as_deref().ok_or_else(|| {
-                        eyre!(
-                            "Repo could not be resolved. Pass --repo owner/name or run inside a git repo with a Forgejo remote."
-                        )
-                    })?;
-                    let name = target
-                        .name
-                        .as_deref()
-                        .ok_or_else(|| eyre!("resolved repo is missing name"))?;
-                    let repo = target
-                        .repo
-                        .clone()
-                        .unwrap_or_else(|| format!("{owner}/{name}"));
-                    let url = client.api_v1_url(&format!(
-                        "/repos/{}/{}/actions/runners/registration-token",
-                        urlencoding::encode(owner),
-                        urlencoding::encode(name)
-                    ));
-                    (None, Some(repo), url)
-                }
-                RunnerScope::User => (
-                    None,
-                    None,
-                    client.api_v1_url("/user/actions/runners/registration-token"),
-                ),
-            };
+            let (org_out, repo_out, url) =
+                resolve_runner_endpoint_url(&client, scope, org, target, "registration-token")?;
 
             let reg: crate::api::RegistrationToken = client.get_json(&url).await?;
 
@@ -1075,39 +1085,8 @@ async fn run_runners(
                 )
             };
 
-            let (org_out, repo_out, base_jobs_url) = match scope {
-                RunnerScope::Global => (None, None, client.api_v1_url("/admin/runners/jobs")),
-                RunnerScope::Org => {
-                    let org = org.ok_or_else(|| eyre!("--org is required for --scope org"))?;
-                    let url = client.api_v1_url(&format!(
-                        "/orgs/{}/actions/runners/jobs",
-                        urlencoding::encode(&org)
-                    ));
-                    (Some(org), None, url)
-                }
-                RunnerScope::Repo => {
-                    let owner = target.owner.as_deref().ok_or_else(|| {
-                        eyre!(
-                            "Repo could not be resolved. Pass --repo owner/name or run inside a git repo with a Forgejo remote."
-                        )
-                    })?;
-                    let name = target
-                        .name
-                        .as_deref()
-                        .ok_or_else(|| eyre!("resolved repo is missing name"))?;
-                    let repo = target
-                        .repo
-                        .clone()
-                        .unwrap_or_else(|| format!("{owner}/{name}"));
-                    let url = client.api_v1_url(&format!(
-                        "/repos/{}/{}/actions/runners/jobs",
-                        urlencoding::encode(owner),
-                        urlencoding::encode(name)
-                    ));
-                    (None, Some(repo), url)
-                }
-                RunnerScope::User => (None, None, client.api_v1_url("/user/actions/runners/jobs")),
-            };
+            let (org_out, repo_out, base_jobs_url) =
+                resolve_runner_endpoint_url(&client, scope, org, target, "jobs")?;
 
             let url = format!("{base_jobs_url}{labels_query}");
             let mut jobs: Vec<crate::api::ActionRunJob> = client.get_json(&url).await?;

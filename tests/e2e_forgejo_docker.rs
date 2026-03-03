@@ -918,11 +918,12 @@ struct FjOut {
     stderr: String,
 }
 
-fn fj_ex_cmd(
+fn fj_ex_cmd_with_expectation(
     bin: &Path,
     appdata_dir: &Path,
     args: &[&str],
     stdin: Option<Vec<u8>>,
+    expect_success: bool,
 ) -> Result<FjOut> {
     let mut cmd = Command::new(bin);
     cmd.args(args)
@@ -952,7 +953,7 @@ fn fj_ex_cmd(
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() {
+    if expect_success && !output.status.success() {
         return Err(eyre!(
             "fj-ex {} failed (exit={}):\nstdout:\n{}\nstderr:\n{}",
             args.join(" "),
@@ -961,45 +962,7 @@ fn fj_ex_cmd(
             stderr
         ));
     }
-
-    Ok(FjOut { stdout, stderr })
-}
-
-fn fj_ex_cmd_expect_failure(
-    bin: &Path,
-    appdata_dir: &Path,
-    args: &[&str],
-    stdin: Option<Vec<u8>>,
-) -> Result<FjOut> {
-    let mut cmd = Command::new(bin);
-    cmd.args(args)
-        .env("APPDATA", appdata_dir)
-        .env("RUST_BACKTRACE", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .wrap_err_with(|| format!("failed to spawn fj-ex {}", args.join(" ")))?;
-
-    if let Some(input) = stdin {
-        use std::io::Write;
-        let Some(mut s) = child.stdin.take() else {
-            return Err(eyre!("failed to open fj-ex stdin pipe"));
-        };
-        s.write_all(&input)
-            .wrap_err("failed to write to fj-ex stdin")?;
-    }
-
-    let output: Output = child
-        .wait_with_output()
-        .wrap_err("failed to wait for fj-ex")?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if output.status.success() {
+    if !expect_success && output.status.success() {
         return Err(eyre!(
             "fj-ex {} unexpectedly succeeded:\nstdout:\n{}\nstderr:\n{}",
             args.join(" "),
@@ -1009,6 +972,24 @@ fn fj_ex_cmd_expect_failure(
     }
 
     Ok(FjOut { stdout, stderr })
+}
+
+fn fj_ex_cmd(
+    bin: &Path,
+    appdata_dir: &Path,
+    args: &[&str],
+    stdin: Option<Vec<u8>>,
+) -> Result<FjOut> {
+    fj_ex_cmd_with_expectation(bin, appdata_dir, args, stdin, true)
+}
+
+fn fj_ex_cmd_expect_failure(
+    bin: &Path,
+    appdata_dir: &Path,
+    args: &[&str],
+    stdin: Option<Vec<u8>>,
+) -> Result<FjOut> {
+    fj_ex_cmd_with_expectation(bin, appdata_dir, args, stdin, false)
 }
 
 fn write_fj_keys_json(appdata_dir: &Path, base_url: &str, token: &str) -> Result<PathBuf> {
