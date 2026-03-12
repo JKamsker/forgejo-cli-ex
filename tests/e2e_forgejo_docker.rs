@@ -180,6 +180,30 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     assert_eq!(show_json["username"], username);
     assert_eq!(show_json["hasPassword"], true);
 
+    // Mint a Forgejo NuGet API key entirely through fj-ex.
+    let nuget_key_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &["token", "mint", "nuget", "--host", &base_url, "--json"],
+        None,
+    )?;
+    let nuget_key_json: Value = serde_json::from_str(&nuget_key_out.stdout)?;
+    assert_eq!(nuget_key_json["baseUrl"], base_url);
+    assert_eq!(nuget_key_json["owner"], username);
+    assert_eq!(nuget_key_json["username"], username);
+    assert_eq!(
+        nuget_key_json["registryUrl"],
+        format!("{base_url}/api/packages/{username}/nuget/index.json")
+    );
+    assert_eq!(nuget_key_json["scope"], "write:package");
+    assert!(
+        nuget_key_json["apiKey"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty()),
+        "expected nuget api key, got: {}",
+        nuget_key_out.stdout
+    );
+
     // Runner registration tokens (global/repo/user)
     let token_repo_out = fj_ex_cmd(
         &fj_ex,

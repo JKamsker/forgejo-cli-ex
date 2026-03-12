@@ -32,6 +32,32 @@ Legacy alias: `fj-ex login --host forge.example.com`
 
 ---
 
+## token mint nuget
+
+Create a NuGet API key using the stored `fj` API token plus the stored `fj-ex` username/password:
+
+```sh
+fj-ex token mint nuget --host forge.example.com --owner my-org
+fj-ex token mint nuget --host forge.example.com --owner my-team --json
+```
+
+Default behavior:
+
+- Mints a new Forgejo personal access token with scope `write:package`
+- Defaults `--owner` to the authenticated username
+- Prints:
+  - `FORGEJO_NUGET_USERNAME=...`
+  - `FORGEJO_NUGET_SOURCE=https://.../api/packages/<owner>/nuget/index.json`
+  - `FORGEJO_NUGET_API_KEY=...`
+
+Read-only package key:
+
+```sh
+fj-ex token mint nuget --host forge.example.com --owner my-org --read-only
+```
+
+---
+
 ## actions runs
 
 ```sh
