@@ -52,12 +52,48 @@ pub enum TokenCommand {
     /// Mint a new token.
     #[command(subcommand)]
     Mint(TokenMintCommand),
+    /// List tokens for the authenticated user.
+    List(TokenListCommand),
 }
 
 #[derive(Subcommand, Debug)]
 pub enum TokenMintCommand {
     /// Mint a package token suitable for Forgejo NuGet auth.
     Nuget(AuthNugetApiKeyCommand),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct TokenListCommand {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    /// Page number (1-based).
+    #[arg(
+        long,
+        default_value_t = 1,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub page: u32,
+
+    /// Items per page.
+    #[arg(
+        long,
+        default_value_t = 20,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub limit: u32,
+
+    /// Always print the header row.
+    #[arg(long)]
+    pub header: bool,
+
+    /// Never print the header row.
+    #[arg(long, conflicts_with = "header")]
+    pub no_header: bool,
+
+    /// Print JSON output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, Clone)]

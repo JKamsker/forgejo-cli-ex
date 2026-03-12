@@ -203,8 +203,33 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
         "expected nuget api key, got: {}",
         nuget_key_out.stdout
     );
+    let minted_token_name = nuget_key_json["tokenName"]
+        .as_str()
+        .ok_or_else(|| eyre!("minted token name missing"))?;
 
     // Runner registration tokens (global/repo/user)
+    let token_list_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &["token", "list", "--host", &base_url, "--json"],
+        None,
+    )?;
+    let token_list_json: Value = serde_json::from_str(&token_list_out.stdout)?;
+    assert_eq!(token_list_json["baseUrl"], base_url);
+    assert_eq!(token_list_json["username"], username);
+    assert!(
+        token_list_json["tokens"].as_array().is_some_and(|tokens| {
+            tokens.iter().any(|tok| {
+                tok["name"].as_str() == Some(minted_token_name)
+                    && tok["scopes"]
+                        .as_array()
+                        .is_some_and(|scopes| scopes.iter().any(|scope| scope == "write:package"))
+            })
+        }),
+        "expected minted token in token list, got: {}",
+        token_list_out.stdout
+    );
+
     let token_repo_out = fj_ex_cmd(
         &fj_ex,
         &appdata_dir,
