@@ -21,6 +21,9 @@ fj-ex --help
 # Login (interactive)
 fj-ex auth login --host forge.example.com
 
+# Mint a NuGet API key (requires `fj auth login` + `fj-ex auth login`)
+fj-ex token mint nuget --host forge.example.com --owner my-org
+
 # List recent runs
 fj-ex actions runs --repo owner/name --latest
 
@@ -73,6 +76,13 @@ Credentials and cookies are stored in plaintext at:
 ```text
 %APPDATA%\Cyborus\forgejo-cli\data\keys.json   # Windows
 ~/.local/share/Cyborus/forgejo-cli/data/keys.json  # Linux
+```
+
+`fj-ex token mint nuget` needs both:
+
+```text
+fj-ex auth login   # stored username/password for basic auth
+fj auth login      # stored API token for Authorization: token ...
 ```
 
 This is required for automatic re-login. Downloaded logs and artifacts may contain secrets — handle accordingly.

@@ -1,8 +1,9 @@
 use crate::cli::{
-    AuthClearCookiesCommand, AuthCommand, AuthListCommand, AuthLogoutCommand, AuthShowCommand,
-    AuthStatusCommand, LoginCommand,
+    AuthClearCookiesCommand, AuthCommand, AuthListCommand, AuthLogoutCommand,
+    AuthNugetApiKeyCommand, AuthShowCommand, AuthStatusCommand, LoginCommand,
 };
 use eyre::{eyre, Context};
+use time::OffsetDateTime;
 
 pub async fn run(args: AuthCommand) -> eyre::Result<()> {
     match args {
@@ -12,6 +13,7 @@ pub async fn run(args: AuthCommand) -> eyre::Result<()> {
         AuthCommand::Show(args) => run_show(args).await,
         AuthCommand::Logout(args) => run_logout(args).await,
         AuthCommand::ClearCookies(args) => run_clear_cookies(args).await,
+        AuthCommand::NugetApiKey(args) => run_nuget_api_key(args).await,
     }
 }
 
@@ -264,4 +266,101 @@ async fn run_clear_cookies(args: AuthClearCookiesCommand) -> eyre::Result<()> {
     crate::store::clear_cookie_jar(&base_url).await?;
     println!("Cleared cookies for {host_key}");
     Ok(())
+}
+
+pub async fn run_nuget_api_key(args: AuthNugetApiKeyCommand) -> eyre::Result<()> {
+    let target = crate::target::resolve_target(
+        args.target.host.as_deref(),
+        args.target.repo.as_ref(),
+        args.target.remote.as_deref(),
+    )?;
+    let base_url = target.base_url;
+
+    let fj_api_token = crate::store::get_fj_api_token_for_base_url(&base_url)?
+        .ok_or_else(|| crate::actions::fj_missing_api_token_error(&base_url))?;
+    let creds = crate::store::get_ui_creds(&base_url)
+        .await?
+        .ok_or_else(|| {
+            eyre!(
+                "No stored UI creds for '{}'. Run `fj-ex auth login` first.",
+                base_url
+            )
+        })?;
+
+    let username = creds.username.trim().to_string();
+    if username.is_empty() {
+        return Err(eyre!(
+            "Stored UI creds for '{}' are missing a username. Re-run `fj-ex auth login`.",
+            base_url
+        ));
+    }
+
+    let owner = args.owner.unwrap_or_else(|| username.clone());
+    let owner = owner.trim().to_string();
+    if owner.is_empty() {
+        return Err(eyre!("--owner cannot be empty"));
+    }
+
+    let token_name = args
+        .token_name
+        .unwrap_or_else(default_nuget_token_name)
+        .trim()
+        .to_string();
+    if token_name.is_empty() {
+        return Err(eyre!("--token-name cannot be empty"));
+    }
+
+    let scope = if args.read_only {
+        "read:package"
+    } else {
+        "write:package"
+    };
+
+    let client = crate::api::ApiClient::new(&base_url, &fj_api_token)?;
+    let url = client.api_v1_url(&format!("/users/{}/tokens", urlencoding::encode(&username)));
+    let body = serde_json::json!({
+        "name": token_name,
+        "scopes": [scope],
+    });
+    let created: crate::api::AccessToken = client
+        .post_json_with_basic_auth(&url, &body, &username, &creds.password)
+        .await?;
+
+    let registry_url = format!(
+        "{}/api/packages/{}/nuget/index.json",
+        base_url.trim_end_matches('/'),
+        urlencoding::encode(&owner)
+    );
+
+    if args.json {
+        let payload = serde_json::json!({
+            "baseUrl": &base_url,
+            "owner": &owner,
+            "username": &username,
+            "registryUrl": &registry_url,
+            "tokenName": &created.name,
+            "scope": scope,
+            "apiKey": &created.token,
+            "tokenLastEight": &created.token_last_eight,
+            "env": {
+                "FORGEJO_NUGET_USERNAME": &username,
+                "FORGEJO_NUGET_SOURCE": &registry_url,
+                "FORGEJO_NUGET_API_KEY": &created.token,
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!("FORGEJO_NUGET_USERNAME={username}");
+    println!("FORGEJO_NUGET_SOURCE={registry_url}");
+    println!("FORGEJO_NUGET_API_KEY={}", created.token);
+    Ok(())
+}
+
+fn default_nuget_token_name() -> String {
+    format!(
+        "fj-ex-nuget-{}",
+        OffsetDateTime::now_utc().unix_timestamp_nanos()
+    )
 }

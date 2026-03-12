@@ -960,7 +960,7 @@ fn resolve_runner_scope(
     RunnerScope::Global
 }
 
-fn fj_missing_api_token_error(base_url: &str) -> eyre::Report {
+pub(crate) fn fj_missing_api_token_error(base_url: &str) -> eyre::Report {
     let host_key = crate::target::normalize_host_key(base_url).unwrap_or_else(|_| base_url.into());
     let path = crate::store::keys_store_paths()
         .map(|p| p.path.display().to_string())

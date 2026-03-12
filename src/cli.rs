@@ -14,6 +14,9 @@ pub enum Command {
     /// Authentication and credential management (UI session cookies + plaintext creds).
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Token minting helpers.
+    #[command(subcommand)]
+    Token(TokenCommand),
     /// Forgejo Actions: workflows, runs, jobs, logs, artifacts, cancel/rerun.
     Actions(ActionsCommand),
     /// Smoke test for Actions access (useful for debugging auth/connectivity/log downloads).
@@ -39,6 +42,22 @@ pub enum AuthCommand {
     /// Clear stored UI cookies for a host (keeps creds).
     #[command(name = "clear-cookies")]
     ClearCookies(AuthClearCookiesCommand),
+    /// Create a package token suitable for Forgejo NuGet auth.
+    #[command(name = "nuget-api-key", hide = true)]
+    NugetApiKey(AuthNugetApiKeyCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TokenCommand {
+    /// Mint a new token.
+    #[command(subcommand)]
+    Mint(TokenMintCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TokenMintCommand {
+    /// Mint a package token suitable for Forgejo NuGet auth.
+    Nuget(AuthNugetApiKeyCommand),
 }
 
 #[derive(Args, Debug, Clone)]
@@ -123,6 +142,28 @@ pub struct AuthLogoutCommand {
 pub struct AuthClearCookiesCommand {
     #[command(flatten)]
     pub target: TargetArgs,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AuthNugetApiKeyCommand {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    /// Owner/org segment for the NuGet registry URL (default: current username).
+    #[arg(long)]
+    pub owner: Option<String>,
+
+    /// Access token name (default: fj-ex-nuget-<timestamp>).
+    #[arg(long = "token-name")]
+    pub token_name: Option<String>,
+
+    /// Create a read-only package token instead of a publish-capable one.
+    #[arg(long)]
+    pub read_only: bool,
+
+    /// Print JSON output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug, Clone)]

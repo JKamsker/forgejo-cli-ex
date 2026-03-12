@@ -72,11 +72,60 @@ impl ApiClient {
             )
         })
     }
+
+    pub async fn post_json_with_basic_auth<T: DeserializeOwned, B: Serialize>(
+        &self,
+        url: &str,
+        body: &B,
+        username: &str,
+        password: &str,
+    ) -> eyre::Result<T> {
+        let resp = self
+            .client
+            .post(url)
+            .basic_auth(username, Some(password))
+            .json(body)
+            .send()
+            .await
+            .wrap_err_with(|| format!("POST {url} failed"))?;
+
+        let status = resp.status();
+        let body = resp
+            .bytes()
+            .await
+            .wrap_err_with(|| format!("failed to read response body from POST {url}"))?;
+
+        if !status.is_success() {
+            return Err(eyre!(
+                "POST {url} failed: HTTP {status} (body_length={})",
+                body.len()
+            ));
+        }
+
+        serde_json::from_slice::<T>(&body).wrap_err_with(|| {
+            format!(
+                "failed to decode JSON from POST {url} (body_length={})",
+                body.len()
+            )
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RegistrationToken {
     pub token: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AccessToken {
+    pub id: i64,
+    pub name: String,
+    #[serde(rename = "sha1")]
+    pub token: String,
+    #[serde(rename = "token_last_eight")]
+    pub token_last_eight: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -110,6 +159,25 @@ mod tests {
         let raw = r#"{ "token": "abc" }"#;
         let tok: RegistrationToken = serde_json::from_str(raw).unwrap();
         assert_eq!(tok.token, "abc");
+    }
+
+    #[test]
+    fn access_token_deserializes() {
+        let raw = r#"
+{
+  "id": 1,
+  "name": "fj-ex-nuget",
+  "sha1": "abc123",
+  "token_last_eight": "bc123",
+  "scopes": ["write:package"]
+}
+"#;
+        let tok: AccessToken = serde_json::from_str(raw).unwrap();
+        assert_eq!(tok.id, 1);
+        assert_eq!(tok.name, "fj-ex-nuget");
+        assert_eq!(tok.token, "abc123");
+        assert_eq!(tok.token_last_eight, "bc123");
+        assert_eq!(tok.scopes, vec!["write:package"]);
     }
 
     #[test]
