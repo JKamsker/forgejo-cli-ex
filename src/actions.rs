@@ -134,7 +134,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
         }
         command => {
             let repo = require_repo_owned(&target)?;
-            let session = crate::session::UiSession::from_store(&target.base_url, false).await?;
+            let session = crate::session::UiSession::from_store_with_socket(&target.base_url, false, target.unix_socket.as_deref()).await?;
 
             match command {
                 ActionsSubcommand::Workflows { page, limit, json } => {
@@ -1027,7 +1027,7 @@ async fn run_runners(
 ) -> eyre::Result<()> {
     let token = crate::store::get_fj_api_token_for_base_url(&target.base_url)?
         .ok_or_else(|| fj_missing_api_token_error(&target.base_url))?;
-    let client = crate::api::ApiClient::new(&target.base_url, &token)?;
+    let client = crate::api::ApiClient::new_with_socket(&target.base_url, &token, target.unix_socket.as_deref())?;
 
     match command {
         ActionsRunnersSubcommand::Token { scope, org, json } => {

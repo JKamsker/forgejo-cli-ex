@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use cookie_store::{Cookie, CookieExpiration, CookieStore};
 use eyre::{eyre, Context};
@@ -24,6 +24,10 @@ impl UiSession {
     }
 
     pub async fn from_store(base_url: &str, force_relogin: bool) -> eyre::Result<Self> {
+        Self::from_store_with_socket(base_url, force_relogin, None).await
+    }
+
+    pub async fn from_store_with_socket(base_url: &str, force_relogin: bool, unix_socket: Option<&Path>) -> eyre::Result<Self> {
         let normalized = crate::target::normalize_base_url(base_url)?;
         let info = store::get_store_entry(&normalized).await?;
         let cookie_jar = if force_relogin {
@@ -32,7 +36,7 @@ impl UiSession {
             info.entry.and_then(|e| e.cookie_jar)
         };
 
-        let session = Self::new(&normalized, cookie_jar.as_ref())?;
+        let session = Self::new_with_socket(&normalized, cookie_jar.as_ref(), unix_socket)?;
         if !force_relogin {
             if session.test_session().await.unwrap_or(false) {
                 let _ = session.persist_cookie_jar().await;
@@ -55,6 +59,10 @@ impl UiSession {
     }
 
     pub fn new(base_url: &str, cookie_jar: Option<&store::CookieJar>) -> eyre::Result<Self> {
+        Self::new_with_socket(base_url, cookie_jar, None)
+    }
+
+    pub fn new_with_socket(base_url: &str, cookie_jar: Option<&store::CookieJar>, unix_socket: Option<&Path>) -> eyre::Result<Self> {
         let base_url = crate::target::normalize_base_url(base_url)?;
         let cookie_store = CookieStoreMutex::new(CookieStore::default());
 
@@ -63,11 +71,18 @@ impl UiSession {
         }
 
         let cookie_store = Arc::new(cookie_store);
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .redirect(Policy::limited(10))
             .timeout(Duration::from_secs(60))
-            .cookie_provider(Arc::clone(&cookie_store))
+            .cookie_provider(Arc::clone(&cookie_store));
+
+        #[cfg(unix)]
+        if let Some(socket_path) = unix_socket {
+            builder = builder.unix_socket(socket_path);
+        }
+
+        let client = builder
             .build()
             .wrap_err("failed to build http client")?;
 

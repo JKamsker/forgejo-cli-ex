@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::path::PathBuf;
 
 use eyre::{eyre, Context};
 use url::Url;
@@ -81,12 +82,32 @@ pub struct ResolvedTarget {
     pub repo: Option<String>,
     pub owner: Option<String>,
     pub name: Option<String>,
+    pub unix_socket: Option<PathBuf>,
+}
+
+pub fn parse_unix_socket_url(url: &str) -> Option<(PathBuf, String)> {
+    if !url.starts_with("http+unix://") {
+        return None;
+    }
+
+    let without_scheme = url.trim_start_matches("http+unix://");
+    let socket_path = PathBuf::from(without_scheme);
+
+    let base_url = "http://localhost".to_string();
+    Some((socket_path, base_url))
 }
 
 pub fn normalize_base_url(host_or_url: &str) -> eyre::Result<String> {
     let trimmed = host_or_url.trim();
     if trimmed.is_empty() {
         return Err(eyre!("host is required"));
+    }
+
+    if trimmed.starts_with("http+unix://") {
+        if let Some((_, base_url)) = parse_unix_socket_url(trimmed) {
+            return Ok(base_url);
+        }
+        return Err(eyre!("invalid unix socket url"));
     }
 
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -114,6 +135,10 @@ pub fn normalize_host_key(host_or_url: &str) -> eyre::Result<String> {
     let trimmed = host_or_url.trim();
     if trimmed.is_empty() {
         return Err(eyre!("host is required"));
+    }
+
+    if trimmed.starts_with("http+unix://") {
+        return Ok(trimmed.to_string());
     }
 
     if trimmed.starts_with("http://")
@@ -280,21 +305,35 @@ pub fn resolve_target(
     });
 
     let mut resolved_base_url: Option<String> = None;
+    let mut resolved_unix_socket: Option<PathBuf> = None;
+    let mut raw_host: Option<String> = None;
 
     if let Some(repo) = repo {
         if let Some(repo_host) = repo.host.as_deref() {
-            resolved_base_url = Some(normalize_base_url(repo_host)?);
+            raw_host = Some(repo_host.to_string());
+            if let Some((socket, base)) = parse_unix_socket_url(repo_host) {
+                resolved_unix_socket = Some(socket);
+                resolved_base_url = Some(base);
+            } else {
+                resolved_base_url = Some(normalize_base_url(repo_host)?);
+            }
         }
     }
 
     if resolved_base_url.is_none() {
         if let Some(host) = host {
-            resolved_base_url = Some(normalize_base_url(host)?);
+            raw_host = Some(host.to_string());
+            if let Some((socket, base)) = parse_unix_socket_url(host) {
+                resolved_unix_socket = Some(socket);
+                resolved_base_url = Some(base);
+            } else {
+                resolved_base_url = Some(normalize_base_url(host)?);
+            }
         }
     }
 
     if resolved_base_url.is_none() || resolved_repo.is_none() {
-        if let Some((base, repo_name)) = infer_from_git(remote, host)? {
+        if let Some((base, repo_name)) = infer_from_git(remote, raw_host.as_deref())? {
             resolved_base_url.get_or_insert(base);
             if resolved_repo.is_none() {
                 resolved_repo = Some(
@@ -309,8 +348,14 @@ pub fn resolve_target(
 
     if resolved_base_url.is_none() {
         if let Some(url) = fallback_host_from_env() {
-            let base = normalize_base_url(url.as_str())?;
-            resolved_base_url = Some(base);
+            let url_str = url.as_str();
+            if let Some((socket, base)) = parse_unix_socket_url(url_str) {
+                resolved_unix_socket = Some(socket);
+                resolved_base_url = Some(base);
+            } else {
+                let base = normalize_base_url(url_str)?;
+                resolved_base_url = Some(base);
+            }
         }
     }
 
@@ -325,6 +370,7 @@ pub fn resolve_target(
         owner: resolved_repo.as_ref().map(|r| r.owner.clone()),
         name: resolved_repo.as_ref().map(|r| r.name.clone()),
         base_url,
+        unix_socket: resolved_unix_socket,
     })
 }
 
@@ -398,5 +444,30 @@ mod tests {
             .unwrap();
         assert_eq!(host, "forge.example.com");
         assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
+    }
+
+    #[test]
+    fn parse_unix_socket_url_works() {
+        let result = parse_unix_socket_url("http+unix:///run/forgejo/http.sock");
+        assert!(result.is_some());
+        let (socket, base) = result.unwrap();
+        assert_eq!(socket, PathBuf::from("/run/forgejo/http.sock"));
+        assert_eq!(base, "http://localhost");
+    }
+
+    #[test]
+    fn normalize_base_url_handles_unix_socket() {
+        assert_eq!(
+            normalize_base_url("http+unix:///run/forgejo/http.sock").unwrap(),
+            "http://localhost"
+        );
+    }
+
+    #[test]
+    fn normalize_host_key_preserves_unix_socket() {
+        assert_eq!(
+            normalize_host_key("http+unix:///run/forgejo/http.sock").unwrap(),
+            "http+unix:///run/forgejo/http.sock"
+        );
     }
 }

@@ -443,6 +443,7 @@ dependencies = [
  "eyre",
  "git2",
  "html-escape",
+ "libc",
  "regex",
  "reqwest",
  "reqwest_cookie_store",

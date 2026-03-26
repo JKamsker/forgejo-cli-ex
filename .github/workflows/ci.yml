@@ -54,6 +54,11 @@ jobs:
           FJ_EX_E2E: "1"
         run: cargo test --locked --test e2e_forgejo_docker -- --ignored --test-threads=1
 
+      - name: Run Unix socket tests
+        env:
+          FJ_EX_UNIX_SOCKET_TEST: "1"
+        run: cargo test --locked --test unix_socket_test -- --ignored --test-threads=1
+
   publish:
     needs: [test, e2e]
     runs-on: ubuntu-latest
