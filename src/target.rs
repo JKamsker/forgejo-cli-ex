@@ -1,5 +1,5 @@
-use std::str::FromStr;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use eyre::{eyre, Context};
 use url::Url;
@@ -91,7 +91,10 @@ pub fn parse_unix_socket_url(url: &str) -> Option<(PathBuf, String)> {
     }
 
     let without_scheme = url.trim_start_matches("http+unix://");
-    let socket_path = PathBuf::from(without_scheme);
+
+    // Percent-decode the path
+    let decoded = urlencoding::decode(without_scheme).ok()?;
+    let socket_path = PathBuf::from(decoded.as_ref());
 
     let base_url = "http://localhost".to_string();
     Some((socket_path, base_url))
@@ -104,10 +107,9 @@ pub fn normalize_base_url(host_or_url: &str) -> eyre::Result<String> {
     }
 
     if trimmed.starts_with("http+unix://") {
-        if let Some((_, base_url)) = parse_unix_socket_url(trimmed) {
-            return Ok(base_url);
-        }
-        return Err(eyre!("invalid unix socket url"));
+        let (_, base_url) = parse_unix_socket_url(trimmed)
+            .expect("parse_unix_socket_url returns Some when starts_with http+unix://");
+        return Ok(base_url);
     }
 
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -452,6 +454,30 @@ mod tests {
         assert!(result.is_some());
         let (socket, base) = result.unwrap();
         assert_eq!(socket, PathBuf::from("/run/forgejo/http.sock"));
+        assert_eq!(base, "http://localhost");
+    }
+
+    #[test]
+    fn parse_unix_socket_url_with_dynamic_path() {
+        // Test with a dynamic path to verify the parser works correctly
+        let test_path = PathBuf::from("/tmp/test/socket.sock");
+        let socket_url = format!("http+unix://{}", test_path.display());
+
+        let result = parse_unix_socket_url(&socket_url);
+        assert!(result.is_some());
+
+        let (parsed_socket, parsed_base) = result.unwrap();
+        assert_eq!(parsed_socket, test_path);
+        assert_eq!(parsed_base, "http://localhost");
+    }
+
+    #[test]
+    fn parse_unix_socket_url_with_percent_encoding() {
+        // Test percent-encoded paths
+        let result = parse_unix_socket_url("http+unix:///run/my%20socket/http.sock");
+        assert!(result.is_some());
+        let (socket, base) = result.unwrap();
+        assert_eq!(socket, PathBuf::from("/run/my socket/http.sock"));
         assert_eq!(base, "http://localhost");
     }
 

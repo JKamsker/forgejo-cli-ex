@@ -18,7 +18,12 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
 
     println!();
     println!("[1] Session from store (cookie jar preferred)");
-    let session = crate::session::UiSession::from_store_with_socket(&target.base_url, false, target.unix_socket.as_deref()).await?;
+    let session = crate::session::UiSession::from_store_with_socket(
+        &target.base_url,
+        false,
+        target.unix_socket.as_deref(),
+    )
+    .await?;
 
     println!("[2] Workflows");
     let workflows = crate::ui_actions::list_workflows(&session, &repo, 1, 20).await?;

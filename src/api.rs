@@ -21,7 +21,11 @@ impl ApiClient {
         Self::new_with_socket(base_url, token, None)
     }
 
-    pub fn new_with_socket(base_url: &str, token: &str, unix_socket: Option<&Path>) -> eyre::Result<Self> {
+    pub fn new_with_socket(
+        base_url: &str,
+        token: &str,
+        unix_socket: Option<&Path>,
+    ) -> eyre::Result<Self> {
         let base_url = crate::target::normalize_base_url(base_url)?;
         let base_url = base_url.trim_end_matches('/').to_string();
 
@@ -40,9 +44,7 @@ impl ApiClient {
             builder = builder.unix_socket(socket_path);
         }
 
-        let client = builder
-            .build()
-            .wrap_err("failed to build http client")?;
+        let client = builder.build().wrap_err("failed to build http client")?;
 
         Ok(Self { base_url, client })
     }

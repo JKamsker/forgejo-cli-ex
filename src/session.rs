@@ -27,7 +27,11 @@ impl UiSession {
         Self::from_store_with_socket(base_url, force_relogin, None).await
     }
 
-    pub async fn from_store_with_socket(base_url: &str, force_relogin: bool, unix_socket: Option<&Path>) -> eyre::Result<Self> {
+    pub async fn from_store_with_socket(
+        base_url: &str,
+        force_relogin: bool,
+        unix_socket: Option<&Path>,
+    ) -> eyre::Result<Self> {
         let normalized = crate::target::normalize_base_url(base_url)?;
         let info = store::get_store_entry(&normalized).await?;
         let cookie_jar = if force_relogin {
@@ -62,7 +66,11 @@ impl UiSession {
         Self::new_with_socket(base_url, cookie_jar, None)
     }
 
-    pub fn new_with_socket(base_url: &str, cookie_jar: Option<&store::CookieJar>, unix_socket: Option<&Path>) -> eyre::Result<Self> {
+    pub fn new_with_socket(
+        base_url: &str,
+        cookie_jar: Option<&store::CookieJar>,
+        unix_socket: Option<&Path>,
+    ) -> eyre::Result<Self> {
         let base_url = crate::target::normalize_base_url(base_url)?;
         let cookie_store = CookieStoreMutex::new(CookieStore::default());
 
@@ -82,9 +90,7 @@ impl UiSession {
             builder = builder.unix_socket(socket_path);
         }
 
-        let client = builder
-            .build()
-            .wrap_err("failed to build http client")?;
+        let client = builder.build().wrap_err("failed to build http client")?;
 
         Ok(Self {
             base_url,

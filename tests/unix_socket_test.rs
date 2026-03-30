@@ -10,14 +10,10 @@ use tempfile::TempDir;
 
 const FORGEJO_ROOTLESS_IMAGE: &str = "codeberg.org/forgejo/forgejo:14-rootless";
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 #[ignore]
 async fn test_unix_socket_connection() -> Result<()> {
-    if !cfg!(target_os = "linux") {
-        eprintln!("skipping unix socket test: requires Linux");
-        return Ok(());
-    }
     if std::env::var("FJ_EX_UNIX_SOCKET_TEST").ok().as_deref() != Some("1") {
         eprintln!("skipping unix socket test: set FJ_EX_UNIX_SOCKET_TEST=1 to enable");
         return Ok(());
@@ -39,11 +35,8 @@ async fn test_unix_socket_connection() -> Result<()> {
     let socket_path = sockets_dir.join("http.sock");
 
     println!("Starting Forgejo container with Unix socket...");
-    let _container = ForgejoUnixSocketContainer::start(
-        &container_name,
-        &sockets_dir,
-        &data_dir,
-    ).await?;
+    let _container =
+        ForgejoUnixSocketContainer::start(&container_name, &sockets_dir, &data_dir).await?;
 
     // Wait for socket to be created
     wait_for_socket(&socket_path, Duration::from_secs(30))?;
@@ -70,12 +63,11 @@ async fn test_unix_socket_connection() -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn test_unix_socket_url_parsing(socket_path: &Path) -> Result<()> {
-    // Test the parse_unix_socket_url function
+    // Test that the URL format is correct
     let socket_url = format!("http+unix://{}", socket_path.display());
 
-    // This tests that our URL parsing works
     assert!(socket_url.starts_with("http+unix://"));
     assert!(socket_url.contains("http.sock"));
 
@@ -83,7 +75,7 @@ fn test_unix_socket_url_parsing(socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn test_curl_unix_socket(socket_path: &Path) -> Result<()> {
     let output = Command::new("curl")
         .arg("--unix-socket")
@@ -109,7 +101,7 @@ fn test_curl_unix_socket(socket_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn test_fj_ex_login(socket_path: &Path, temp: &TempDir) -> Result<()> {
     let fj_ex = fj_ex_bin()?;
     let socket_url = format!("http+unix://{}", socket_path.display());
@@ -149,7 +141,7 @@ fn test_fj_ex_login(socket_path: &Path, temp: &TempDir) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn test_fj_ex_status(socket_path: &Path, temp: &TempDir) -> Result<()> {
     let fj_ex = fj_ex_bin()?;
     let socket_url = format!("http+unix://{}", socket_path.display());
@@ -183,7 +175,36 @@ fn test_fj_ex_status(socket_path: &Path, temp: &TempDir) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn wait_for_forgejo_ready(container_name: &str, timeout: Duration) -> Result<()> {
+    let start = std::time::Instant::now();
+    let poll_interval = Duration::from_millis(500);
+
+    while start.elapsed() < timeout {
+        let output = Command::new("docker")
+            .args([
+                "exec",
+                container_name,
+                "curl",
+                "--silent",
+                "--fail",
+                "http://localhost:3000/api/v1/version",
+            ])
+            .output();
+
+        if let Ok(output) = output {
+            if output.status.success() {
+                return Ok(());
+            }
+        }
+
+        std::thread::sleep(poll_interval);
+    }
+
+    Err(eyre!("Forgejo did not become ready within timeout"))
+}
+
+#[cfg(target_os = "linux")]
 fn wait_for_socket(socket_path: &Path, timeout: Duration) -> Result<()> {
     let start = std::time::Instant::now();
 
@@ -191,7 +212,7 @@ fn wait_for_socket(socket_path: &Path, timeout: Duration) -> Result<()> {
         if socket_path.exists() {
             // Additional check: try to stat the socket
             if let Ok(metadata) = fs::metadata(socket_path) {
-                #[cfg(unix)]
+                #[cfg(target_os = "linux")]
                 {
                     use std::os::unix::fs::FileTypeExt;
                     if metadata.file_type().is_socket() {
@@ -206,11 +227,17 @@ fn wait_for_socket(socket_path: &Path, timeout: Duration) -> Result<()> {
     Err(eyre!("Socket not created within timeout"))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn create_admin_user_in_container() -> Result<()> {
     // Find the running container
     let containers = Command::new("docker")
-        .args(["ps", "--filter", "name=fj-ex-unix-test", "--format", "{{.Names}}"])
+        .args([
+            "ps",
+            "--filter",
+            "name=fj-ex-unix-test",
+            "--format",
+            "{{.Names}}",
+        ])
         .output()
         .wrap_err("failed to list containers")?;
 
@@ -220,8 +247,8 @@ fn create_admin_user_in_container() -> Result<()> {
         .ok_or_else(|| eyre!("no test container found"))?
         .to_string();
 
-    // Wait for Forgejo to be ready
-    std::thread::sleep(Duration::from_secs(5));
+    // Wait for Forgejo to be ready by polling the health endpoint
+    wait_for_forgejo_ready(&container_name, Duration::from_secs(30))?;
 
     let output = Command::new("docker")
         .args([
@@ -253,24 +280,22 @@ fn create_admin_user_in_container() -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct ForgejoUnixSocketContainer {
     name: String,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl ForgejoUnixSocketContainer {
-    async fn start(
-        name: &str,
-        sockets_dir: &Path,
-        data_dir: &Path,
-    ) -> Result<Self> {
+    async fn start(name: &str, sockets_dir: &Path, data_dir: &Path) -> Result<Self> {
         // Create initial app.ini
         let conf_dir = data_dir.join("custom").join("conf");
         fs::create_dir_all(&conf_dir)?;
 
         let app_ini = conf_dir.join("app.ini");
-        fs::write(&app_ini, r#"
+        fs::write(
+            &app_ini,
+            r#"
 [server]
 PROTOCOL = http+unix
 HTTP_ADDR = /run/forgejo/http.sock
@@ -289,7 +314,8 @@ INSTALL_LOCK = true
 [service]
 DISABLE_REGISTRATION = false
 REQUIRE_SIGNIN_VIEW = false
-"#)?;
+"#,
+        )?;
 
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
@@ -298,10 +324,14 @@ REQUIRE_SIGNIN_VIEW = false
             .args([
                 "run",
                 "-d",
-                "--name", name,
-                "--user", &format!("{}:{}", uid, gid),
-                "-v", &format!("{}:/var/lib/gitea", data_dir.display()),
-                "-v", &format!("{}:/run/forgejo", sockets_dir.display()),
+                "--name",
+                name,
+                "--user",
+                &format!("{}:{}", uid, gid),
+                "-v",
+                &format!("{}:/var/lib/gitea", data_dir.display()),
+                "-v",
+                &format!("{}:/run/forgejo", sockets_dir.display()),
                 FORGEJO_ROOTLESS_IMAGE,
             ])
             .output()
@@ -320,7 +350,7 @@ REQUIRE_SIGNIN_VIEW = false
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Drop for ForgejoUnixSocketContainer {
     fn drop(&mut self) {
         let _ = Command::new("docker")
@@ -341,7 +371,11 @@ fn docker_available() -> bool {
 
 fn fj_ex_bin() -> Result<PathBuf> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let target_dir = Path::new(manifest_dir).join("target");
+
+    // Check CARGO_TARGET_DIR first, then fall back to target/ under manifest dir
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(manifest_dir).join("target"));
 
     // Try debug first, then release
     let debug_bin = target_dir.join("debug").join("fj-ex");

@@ -58,7 +58,11 @@ async fn run_status(args: AuthStatusCommand) -> eyre::Result<()> {
     let mut relogged = false;
 
     if let Some(jar) = entry.cookie_jar.as_ref() {
-        let session = crate::session::UiSession::new_with_socket(&base_url, Some(jar), target.unix_socket.as_deref())?;
+        let session = crate::session::UiSession::new_with_socket(
+            &base_url,
+            Some(jar),
+            target.unix_socket.as_deref(),
+        )?;
         session_ok = session.test_session().await.unwrap_or(false);
     }
 
@@ -83,7 +87,12 @@ async fn run_status(args: AuthStatusCommand) -> eyre::Result<()> {
             ));
         }
 
-        let session = crate::session::UiSession::from_store_with_socket(&base_url, true, target.unix_socket.as_deref()).await?;
+        let session = crate::session::UiSession::from_store_with_socket(
+            &base_url,
+            true,
+            target.unix_socket.as_deref(),
+        )
+        .await?;
         session_ok = session.test_session().await?;
         relogged = true;
     }
@@ -316,7 +325,11 @@ pub async fn run_nuget_api_key(args: AuthNugetApiKeyCommand) -> eyre::Result<()>
         "write:package"
     };
 
-    let client = crate::api::ApiClient::new_with_socket(&base_url, &fj_api_token, target.unix_socket.as_deref())?;
+    let client = crate::api::ApiClient::new_with_socket(
+        &base_url,
+        &fj_api_token,
+        target.unix_socket.as_deref(),
+    )?;
     let url = client.api_v1_url(&format!("/users/{}/tokens", urlencoding::encode(&username)));
     let body = serde_json::json!({
         "name": token_name,
