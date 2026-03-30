@@ -186,9 +186,11 @@ fn wait_for_forgejo_ready(container_name: &str, timeout: Duration) -> Result<()>
                 "exec",
                 container_name,
                 "curl",
+                "--unix-socket",
+                "/run/forgejo/http.sock",
                 "--silent",
                 "--fail",
-                "http://localhost:3000/api/v1/version",
+                "http://localhost/api/v1/version",
             ])
             .output();
 
