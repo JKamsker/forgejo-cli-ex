@@ -94,6 +94,12 @@ pub fn parse_unix_socket_url(url: &str) -> Option<(PathBuf, String)> {
 
     // Percent-decode the path
     let decoded = urlencoding::decode(without_scheme).ok()?;
+
+    // Validate the decoded path is non-empty
+    if decoded.trim().is_empty() {
+        return None;
+    }
+
     let socket_path = PathBuf::from(decoded.as_ref());
 
     let base_url = "http://localhost".to_string();
@@ -323,12 +329,12 @@ pub fn resolve_target(
     if let Some(repo) = repo {
         if let Some(repo_host) = repo.host.as_deref() {
             raw_host = Some(repo_host.to_string());
-            if let Some((socket, _base)) = parse_unix_socket_url(repo_host) {
+            // Normalize first to ensure platform validation happens
+            let normalized = normalize_base_url(repo_host)?;
+            resolved_base_url = Some(normalized.clone());
+            // Then extract socket from the normalized URL
+            if let Some((socket, _base)) = parse_unix_socket_url(&normalized) {
                 resolved_unix_socket = Some(socket);
-                // Preserve the original http+unix:// URL for storage key uniqueness
-                resolved_base_url = Some(repo_host.to_string());
-            } else {
-                resolved_base_url = Some(normalize_base_url(repo_host)?);
             }
         }
     }
@@ -336,12 +342,12 @@ pub fn resolve_target(
     if resolved_base_url.is_none() {
         if let Some(host) = host {
             raw_host = Some(host.to_string());
-            if let Some((socket, _base)) = parse_unix_socket_url(host) {
+            // Normalize first to ensure platform validation happens
+            let normalized = normalize_base_url(host)?;
+            resolved_base_url = Some(normalized.clone());
+            // Then extract socket from the normalized URL
+            if let Some((socket, _base)) = parse_unix_socket_url(&normalized) {
                 resolved_unix_socket = Some(socket);
-                // Preserve the original http+unix:// URL for storage key uniqueness
-                resolved_base_url = Some(host.to_string());
-            } else {
-                resolved_base_url = Some(normalize_base_url(host)?);
             }
         }
     }
@@ -363,13 +369,12 @@ pub fn resolve_target(
     if resolved_base_url.is_none() {
         if let Some(url) = fallback_host_from_env() {
             let url_str = url.as_str();
-            if let Some((socket, _base)) = parse_unix_socket_url(url_str) {
+            // Normalize first to ensure platform validation happens
+            let normalized = normalize_base_url(url_str)?;
+            resolved_base_url = Some(normalized.clone());
+            // Then extract socket from the normalized URL
+            if let Some((socket, _base)) = parse_unix_socket_url(&normalized) {
                 resolved_unix_socket = Some(socket);
-                // Preserve the original http+unix:// URL for storage key uniqueness
-                resolved_base_url = Some(url_str.to_string());
-            } else {
-                let base = normalize_base_url(url_str)?;
-                resolved_base_url = Some(base);
             }
         }
     }
@@ -515,5 +520,11 @@ mod tests {
             normalize_host_key("http+unix:///run/forgejo/http.sock").unwrap(),
             "http+unix:///run/forgejo/http.sock"
         );
+    }
+
+    #[test]
+    fn parse_unix_socket_url_rejects_empty_path() {
+        assert_eq!(parse_unix_socket_url("http+unix://"), None);
+        assert_eq!(parse_unix_socket_url("http+unix://   "), None);
     }
 }

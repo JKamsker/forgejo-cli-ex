@@ -48,6 +48,18 @@ impl UiSession {
         unix_socket: Option<&Path>,
     ) -> eyre::Result<Self> {
         let normalized = crate::target::normalize_base_url(base_url)?;
+
+        // Derive socket from base_url if it's http+unix://
+        // This ensures base_url and unix_socket stay in sync
+        let derived_socket: Option<std::path::PathBuf>;
+        let effective_socket =
+            if let Some((socket, _)) = crate::target::parse_unix_socket_url(&normalized) {
+                derived_socket = Some(socket);
+                derived_socket.as_deref()
+            } else {
+                unix_socket
+            };
+
         let info = store::get_store_entry(&normalized).await?;
         let cookie_jar = if force_relogin {
             None
@@ -55,7 +67,7 @@ impl UiSession {
             info.entry.and_then(|e| e.cookie_jar)
         };
 
-        let session = Self::new_with_socket(&normalized, cookie_jar.as_ref(), unix_socket)?;
+        let session = Self::new_with_socket(&normalized, cookie_jar.as_ref(), effective_socket)?;
         if !force_relogin {
             if session.test_session().await.unwrap_or(false) {
                 let _ = session.persist_cookie_jar().await;
@@ -87,6 +99,18 @@ impl UiSession {
         unix_socket: Option<&Path>,
     ) -> eyre::Result<Self> {
         let base_url = crate::target::normalize_base_url(base_url)?;
+
+        // Derive socket from base_url if it's http+unix://
+        // This ensures base_url and unix_socket stay in sync
+        let derived_socket: Option<std::path::PathBuf>;
+        let effective_socket =
+            if let Some((socket, _)) = crate::target::parse_unix_socket_url(&base_url) {
+                derived_socket = Some(socket);
+                derived_socket.as_deref()
+            } else {
+                unix_socket
+            };
+
         let cookie_store = CookieStoreMutex::new(CookieStore::default());
 
         if let Some(jar) = cookie_jar {
@@ -101,7 +125,7 @@ impl UiSession {
             .cookie_provider(Arc::clone(&cookie_store));
 
         #[cfg(unix)]
-        if let Some(socket_path) = unix_socket {
+        if let Some(socket_path) = effective_socket {
             builder = builder.unix_socket(socket_path);
         }
 
