@@ -48,9 +48,17 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             let dispatch_ref = normalize_dispatch_ref(&git_ref);
             let inputs = parse_workflow_inputs(&input)?;
 
+            // Convert http+unix:// URLs to http://localhost for HTTP requests
+            // (the Unix socket transport is configured separately via builder.unix_socket)
+            let request_base = if target.base_url.starts_with("http+unix://") {
+                "http://localhost"
+            } else {
+                target.base_url.trim_end_matches('/')
+            };
+
             let url = format!(
                 "{}/api/v1/repos/{}/{}/actions/workflows/{}/dispatches",
-                target.base_url.trim_end_matches('/'),
+                request_base,
                 urlencoding::encode(owner),
                 urlencoding::encode(name),
                 urlencoding::encode(workflow)

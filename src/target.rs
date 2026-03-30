@@ -122,6 +122,15 @@ pub fn normalize_base_url(host_or_url: &str) -> eyre::Result<String> {
 
         #[cfg(unix)]
         {
+            // Validate that the URL contains a non-empty socket path
+            // This prevents malformed URLs like "http+unix://" from passing through
+            // and later falling back to TCP localhost with confusing errors
+            if parse_unix_socket_url(trimmed).is_none() {
+                return Err(eyre!(
+                    "Invalid Unix socket URL: '{}'. Expected format: http+unix:///path/to/socket.sock",
+                    trimmed
+                ));
+            }
             // Preserve the original http+unix:// URL for storage key uniqueness
             // (different sockets should have different credential stores)
             return Ok(trimmed.to_string());
@@ -526,5 +535,14 @@ mod tests {
     fn parse_unix_socket_url_rejects_empty_path() {
         assert_eq!(parse_unix_socket_url("http+unix://"), None);
         assert_eq!(parse_unix_socket_url("http+unix://   "), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn normalize_base_url_rejects_malformed_unix_socket_url() {
+        // Empty path should fail
+        assert!(normalize_base_url("http+unix://").is_err());
+        // Whitespace-only path should fail
+        assert!(normalize_base_url("http+unix://   ").is_err());
     }
 }
