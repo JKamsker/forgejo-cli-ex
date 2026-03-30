@@ -20,6 +20,21 @@ pub struct UiSession {
 
 impl UiSession {
     pub fn base_url(&self) -> &str {
+        self.request_base_url()
+    }
+
+    // Internal helper: get the base URL for HTTP requests
+    // (converts http+unix:// to http://localhost)
+    fn request_base_url(&self) -> &str {
+        if self.base_url.starts_with("http+unix://") {
+            "http://localhost"
+        } else {
+            &self.base_url
+        }
+    }
+
+    // Internal helper: get the storage URL (preserves http+unix://)
+    fn storage_base_url(&self) -> &str {
         &self.base_url
     }
 
@@ -100,7 +115,7 @@ impl UiSession {
     }
 
     pub async fn test_session(&self) -> eyre::Result<bool> {
-        let settings_url = format!("{}/user/settings", self.base_url);
+        let settings_url = format!("{}/user/settings", self.request_base_url());
         let resp = self
             .client
             .get(&settings_url)
@@ -118,16 +133,16 @@ impl UiSession {
     }
 
     pub async fn relogin_from_store(&self) -> eyre::Result<()> {
-        store::clear_cookie_jar(&self.base_url).await?;
+        store::clear_cookie_jar(self.storage_base_url()).await?;
         {
             let mut guard = self.cookie_store.lock().unwrap();
             guard.clear();
         }
 
-        let creds = store::get_ui_creds(&self.base_url).await?.ok_or_else(|| {
+        let creds = store::get_ui_creds(self.storage_base_url()).await?.ok_or_else(|| {
             eyre!(
                 "No stored UI creds for '{}'. Run `fj-ex auth login` (or legacy `fj-ex login`) first.",
-                self.base_url
+                self.storage_base_url()
             )
         })?;
         self.login_with_creds(&creds.username, &creds.password)
@@ -142,7 +157,7 @@ impl UiSession {
             guard.clear();
         }
 
-        let login_url = format!("{}/user/login", self.base_url);
+        let login_url = format!("{}/user/login", self.request_base_url());
         let login_page = self
             .client
             .get(&login_url)
@@ -258,7 +273,7 @@ impl UiSession {
 
     pub async fn persist_cookie_jar(&self) -> eyre::Result<()> {
         let jar = cookie_jar_from_store(&self.cookie_store)?;
-        store::save_cookie_jar(&self.base_url, jar).await?;
+        store::save_cookie_jar(self.storage_base_url(), jar).await?;
         Ok(())
     }
 

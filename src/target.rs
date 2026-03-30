@@ -107,9 +107,19 @@ pub fn normalize_base_url(host_or_url: &str) -> eyre::Result<String> {
     }
 
     if trimmed.starts_with("http+unix://") {
-        let (_, base_url) = parse_unix_socket_url(trimmed)
-            .expect("parse_unix_socket_url returns Some when starts_with http+unix://");
-        return Ok(base_url);
+        #[cfg(not(unix))]
+        {
+            return Err(eyre!(
+                "Unix socket URLs (http+unix://) are only supported on Unix platforms"
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            // Preserve the original http+unix:// URL for storage key uniqueness
+            // (different sockets should have different credential stores)
+            return Ok(trimmed.to_string());
+        }
     }
 
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -313,9 +323,10 @@ pub fn resolve_target(
     if let Some(repo) = repo {
         if let Some(repo_host) = repo.host.as_deref() {
             raw_host = Some(repo_host.to_string());
-            if let Some((socket, base)) = parse_unix_socket_url(repo_host) {
+            if let Some((socket, _base)) = parse_unix_socket_url(repo_host) {
                 resolved_unix_socket = Some(socket);
-                resolved_base_url = Some(base);
+                // Preserve the original http+unix:// URL for storage key uniqueness
+                resolved_base_url = Some(repo_host.to_string());
             } else {
                 resolved_base_url = Some(normalize_base_url(repo_host)?);
             }
@@ -325,9 +336,10 @@ pub fn resolve_target(
     if resolved_base_url.is_none() {
         if let Some(host) = host {
             raw_host = Some(host.to_string());
-            if let Some((socket, base)) = parse_unix_socket_url(host) {
+            if let Some((socket, _base)) = parse_unix_socket_url(host) {
                 resolved_unix_socket = Some(socket);
-                resolved_base_url = Some(base);
+                // Preserve the original http+unix:// URL for storage key uniqueness
+                resolved_base_url = Some(host.to_string());
             } else {
                 resolved_base_url = Some(normalize_base_url(host)?);
             }
@@ -351,9 +363,10 @@ pub fn resolve_target(
     if resolved_base_url.is_none() {
         if let Some(url) = fallback_host_from_env() {
             let url_str = url.as_str();
-            if let Some((socket, base)) = parse_unix_socket_url(url_str) {
+            if let Some((socket, _base)) = parse_unix_socket_url(url_str) {
                 resolved_unix_socket = Some(socket);
-                resolved_base_url = Some(base);
+                // Preserve the original http+unix:// URL for storage key uniqueness
+                resolved_base_url = Some(url_str.to_string());
             } else {
                 let base = normalize_base_url(url_str)?;
                 resolved_base_url = Some(base);
@@ -482,11 +495,18 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn normalize_base_url_handles_unix_socket() {
         assert_eq!(
             normalize_base_url("http+unix:///run/forgejo/http.sock").unwrap(),
-            "http://localhost"
+            "http+unix:///run/forgejo/http.sock"
         );
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn normalize_base_url_rejects_unix_socket_on_non_unix() {
+        assert!(normalize_base_url("http+unix:///run/forgejo/http.sock").is_err());
     }
 
     #[test]

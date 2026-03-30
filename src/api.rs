@@ -55,7 +55,16 @@ impl ApiClient {
         } else {
             format!("/{path}")
         };
-        format!("{}/api/v1{path}", self.base_url)
+
+        // Convert http+unix:// URLs to http://localhost for HTTP requests
+        // (the Unix socket transport is configured separately via builder.unix_socket)
+        let request_base = if self.base_url.starts_with("http+unix://") {
+            "http://localhost".to_string()
+        } else {
+            self.base_url.clone()
+        };
+
+        format!("{}/api/v1{path}", request_base)
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, url: &str) -> eyre::Result<T> {
