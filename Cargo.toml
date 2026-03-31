@@ -1,6 +1,6 @@
 [package]
 name = "forgejo-cli-ex"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 license = "LGPL-3.0-or-later"
 repository = "https://github.com/JKamsker/forgejo-cli-ex"
