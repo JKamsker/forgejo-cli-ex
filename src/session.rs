@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use cookie_store::{Cookie, CookieExpiration, CookieStore};
 use eyre::{eyre, Context};
@@ -20,11 +20,46 @@ pub struct UiSession {
 
 impl UiSession {
     pub fn base_url(&self) -> &str {
+        self.request_base_url()
+    }
+
+    // Internal helper: get the base URL for HTTP requests
+    // (converts http+unix:// to http://localhost)
+    fn request_base_url(&self) -> &str {
+        if self.base_url.starts_with("http+unix://") {
+            "http://localhost"
+        } else {
+            &self.base_url
+        }
+    }
+
+    // Internal helper: get the storage URL (preserves http+unix://)
+    fn storage_base_url(&self) -> &str {
         &self.base_url
     }
 
     pub async fn from_store(base_url: &str, force_relogin: bool) -> eyre::Result<Self> {
+        Self::from_store_with_socket(base_url, force_relogin, None).await
+    }
+
+    pub async fn from_store_with_socket(
+        base_url: &str,
+        force_relogin: bool,
+        unix_socket: Option<&Path>,
+    ) -> eyre::Result<Self> {
         let normalized = crate::target::normalize_base_url(base_url)?;
+
+        // Derive socket from base_url if it's http+unix://
+        // This ensures base_url and unix_socket stay in sync
+        let derived_socket: Option<std::path::PathBuf>;
+        let effective_socket =
+            if let Some((socket, _)) = crate::target::parse_unix_socket_url(&normalized) {
+                derived_socket = Some(socket);
+                derived_socket.as_deref()
+            } else {
+                unix_socket
+            };
+
         let info = store::get_store_entry(&normalized).await?;
         let cookie_jar = if force_relogin {
             None
@@ -32,7 +67,7 @@ impl UiSession {
             info.entry.and_then(|e| e.cookie_jar)
         };
 
-        let session = Self::new(&normalized, cookie_jar.as_ref())?;
+        let session = Self::new_with_socket(&normalized, cookie_jar.as_ref(), effective_socket)?;
         if !force_relogin {
             if session.test_session().await.unwrap_or(false) {
                 let _ = session.persist_cookie_jar().await;
@@ -55,7 +90,27 @@ impl UiSession {
     }
 
     pub fn new(base_url: &str, cookie_jar: Option<&store::CookieJar>) -> eyre::Result<Self> {
+        Self::new_with_socket(base_url, cookie_jar, None)
+    }
+
+    pub fn new_with_socket(
+        base_url: &str,
+        cookie_jar: Option<&store::CookieJar>,
+        unix_socket: Option<&Path>,
+    ) -> eyre::Result<Self> {
         let base_url = crate::target::normalize_base_url(base_url)?;
+
+        // Derive socket from base_url if it's http+unix://
+        // This ensures base_url and unix_socket stay in sync
+        let derived_socket: Option<std::path::PathBuf>;
+        let effective_socket =
+            if let Some((socket, _)) = crate::target::parse_unix_socket_url(&base_url) {
+                derived_socket = Some(socket);
+                derived_socket.as_deref()
+            } else {
+                unix_socket
+            };
+
         let cookie_store = CookieStoreMutex::new(CookieStore::default());
 
         if let Some(jar) = cookie_jar {
@@ -63,13 +118,18 @@ impl UiSession {
         }
 
         let cookie_store = Arc::new(cookie_store);
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .redirect(Policy::limited(10))
             .timeout(Duration::from_secs(60))
-            .cookie_provider(Arc::clone(&cookie_store))
-            .build()
-            .wrap_err("failed to build http client")?;
+            .cookie_provider(Arc::clone(&cookie_store));
+
+        #[cfg(unix)]
+        if let Some(socket_path) = effective_socket {
+            builder = builder.unix_socket(socket_path);
+        }
+
+        let client = builder.build().wrap_err("failed to build http client")?;
 
         Ok(Self {
             base_url,
@@ -79,7 +139,7 @@ impl UiSession {
     }
 
     pub async fn test_session(&self) -> eyre::Result<bool> {
-        let settings_url = format!("{}/user/settings", self.base_url);
+        let settings_url = format!("{}/user/settings", self.request_base_url());
         let resp = self
             .client
             .get(&settings_url)
@@ -97,16 +157,16 @@ impl UiSession {
     }
 
     pub async fn relogin_from_store(&self) -> eyre::Result<()> {
-        store::clear_cookie_jar(&self.base_url).await?;
+        store::clear_cookie_jar(self.storage_base_url()).await?;
         {
             let mut guard = self.cookie_store.lock().unwrap();
             guard.clear();
         }
 
-        let creds = store::get_ui_creds(&self.base_url).await?.ok_or_else(|| {
+        let creds = store::get_ui_creds(self.storage_base_url()).await?.ok_or_else(|| {
             eyre!(
                 "No stored UI creds for '{}'. Run `fj-ex auth login` (or legacy `fj-ex login`) first.",
-                self.base_url
+                self.storage_base_url()
             )
         })?;
         self.login_with_creds(&creds.username, &creds.password)
@@ -121,7 +181,7 @@ impl UiSession {
             guard.clear();
         }
 
-        let login_url = format!("{}/user/login", self.base_url);
+        let login_url = format!("{}/user/login", self.request_base_url());
         let login_page = self
             .client
             .get(&login_url)
@@ -237,7 +297,7 @@ impl UiSession {
 
     pub async fn persist_cookie_jar(&self) -> eyre::Result<()> {
         let jar = cookie_jar_from_store(&self.cookie_store)?;
-        store::save_cookie_jar(&self.base_url, jar).await?;
+        store::save_cookie_jar(self.storage_base_url(), jar).await?;
         Ok(())
     }
 

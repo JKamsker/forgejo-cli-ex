@@ -11,7 +11,8 @@ pub async fn run(args: LoginCommand) -> eyre::Result<()> {
     let (username, password) = resolve_creds(args).await?;
 
     // Validate login by actually logging in via UI.
-    let session = crate::session::UiSession::new(&base_url, None)?;
+    let session =
+        crate::session::UiSession::new_with_socket(&base_url, None, target.unix_socket.as_deref())?;
     session.login_with_creds(&username, &password).await?;
 
     // Persist plaintext creds (required by design).

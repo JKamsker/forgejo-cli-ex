@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use eyre::{eyre, Context};
@@ -81,12 +82,59 @@ pub struct ResolvedTarget {
     pub repo: Option<String>,
     pub owner: Option<String>,
     pub name: Option<String>,
+    pub unix_socket: Option<PathBuf>,
+}
+
+pub fn parse_unix_socket_url(url: &str) -> Option<(PathBuf, String)> {
+    if !url.starts_with("http+unix://") {
+        return None;
+    }
+
+    let without_scheme = url.trim_start_matches("http+unix://");
+
+    // Percent-decode the path
+    let decoded = urlencoding::decode(without_scheme).ok()?;
+
+    // Validate the decoded path is non-empty
+    if decoded.trim().is_empty() {
+        return None;
+    }
+
+    let socket_path = PathBuf::from(decoded.as_ref());
+
+    let base_url = "http://localhost".to_string();
+    Some((socket_path, base_url))
 }
 
 pub fn normalize_base_url(host_or_url: &str) -> eyre::Result<String> {
     let trimmed = host_or_url.trim();
     if trimmed.is_empty() {
         return Err(eyre!("host is required"));
+    }
+
+    if trimmed.starts_with("http+unix://") {
+        #[cfg(not(unix))]
+        {
+            return Err(eyre!(
+                "Unix socket URLs (http+unix://) are only supported on Unix platforms"
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            // Validate that the URL contains a non-empty socket path
+            // This prevents malformed URLs like "http+unix://" from passing through
+            // and later falling back to TCP localhost with confusing errors
+            if parse_unix_socket_url(trimmed).is_none() {
+                return Err(eyre!(
+                    "Invalid Unix socket URL: '{}'. Expected format: http+unix:///path/to/socket.sock",
+                    trimmed
+                ));
+            }
+            // Preserve the original http+unix:// URL for storage key uniqueness
+            // (different sockets should have different credential stores)
+            return Ok(trimmed.to_string());
+        }
     }
 
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -114,6 +162,10 @@ pub fn normalize_host_key(host_or_url: &str) -> eyre::Result<String> {
     let trimmed = host_or_url.trim();
     if trimmed.is_empty() {
         return Err(eyre!("host is required"));
+    }
+
+    if trimmed.starts_with("http+unix://") {
+        return Ok(trimmed.to_string());
     }
 
     if trimmed.starts_with("http://")
@@ -280,21 +332,37 @@ pub fn resolve_target(
     });
 
     let mut resolved_base_url: Option<String> = None;
+    let mut resolved_unix_socket: Option<PathBuf> = None;
+    let mut raw_host: Option<String> = None;
 
     if let Some(repo) = repo {
         if let Some(repo_host) = repo.host.as_deref() {
-            resolved_base_url = Some(normalize_base_url(repo_host)?);
+            raw_host = Some(repo_host.to_string());
+            // Normalize first to ensure platform validation happens
+            let normalized = normalize_base_url(repo_host)?;
+            resolved_base_url = Some(normalized.clone());
+            // Then extract socket from the normalized URL
+            if let Some((socket, _base)) = parse_unix_socket_url(&normalized) {
+                resolved_unix_socket = Some(socket);
+            }
         }
     }
 
     if resolved_base_url.is_none() {
         if let Some(host) = host {
-            resolved_base_url = Some(normalize_base_url(host)?);
+            raw_host = Some(host.to_string());
+            // Normalize first to ensure platform validation happens
+            let normalized = normalize_base_url(host)?;
+            resolved_base_url = Some(normalized.clone());
+            // Then extract socket from the normalized URL
+            if let Some((socket, _base)) = parse_unix_socket_url(&normalized) {
+                resolved_unix_socket = Some(socket);
+            }
         }
     }
 
     if resolved_base_url.is_none() || resolved_repo.is_none() {
-        if let Some((base, repo_name)) = infer_from_git(remote, host)? {
+        if let Some((base, repo_name)) = infer_from_git(remote, raw_host.as_deref())? {
             resolved_base_url.get_or_insert(base);
             if resolved_repo.is_none() {
                 resolved_repo = Some(
@@ -309,8 +377,14 @@ pub fn resolve_target(
 
     if resolved_base_url.is_none() {
         if let Some(url) = fallback_host_from_env() {
-            let base = normalize_base_url(url.as_str())?;
-            resolved_base_url = Some(base);
+            let url_str = url.as_str();
+            // Normalize first to ensure platform validation happens
+            let normalized = normalize_base_url(url_str)?;
+            resolved_base_url = Some(normalized.clone());
+            // Then extract socket from the normalized URL
+            if let Some((socket, _base)) = parse_unix_socket_url(&normalized) {
+                resolved_unix_socket = Some(socket);
+            }
         }
     }
 
@@ -325,6 +399,7 @@ pub fn resolve_target(
         owner: resolved_repo.as_ref().map(|r| r.owner.clone()),
         name: resolved_repo.as_ref().map(|r| r.name.clone()),
         base_url,
+        unix_socket: resolved_unix_socket,
     })
 }
 
@@ -398,5 +473,76 @@ mod tests {
             .unwrap();
         assert_eq!(host, "forge.example.com");
         assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
+    }
+
+    #[test]
+    fn parse_unix_socket_url_works() {
+        let result = parse_unix_socket_url("http+unix:///run/forgejo/http.sock");
+        assert!(result.is_some());
+        let (socket, base) = result.unwrap();
+        assert_eq!(socket, PathBuf::from("/run/forgejo/http.sock"));
+        assert_eq!(base, "http://localhost");
+    }
+
+    #[test]
+    fn parse_unix_socket_url_with_dynamic_path() {
+        // Test with a dynamic path to verify the parser works correctly
+        let test_path = PathBuf::from("/tmp/test/socket.sock");
+        let socket_url = format!("http+unix://{}", test_path.display());
+
+        let result = parse_unix_socket_url(&socket_url);
+        assert!(result.is_some());
+
+        let (parsed_socket, parsed_base) = result.unwrap();
+        assert_eq!(parsed_socket, test_path);
+        assert_eq!(parsed_base, "http://localhost");
+    }
+
+    #[test]
+    fn parse_unix_socket_url_with_percent_encoding() {
+        // Test percent-encoded paths
+        let result = parse_unix_socket_url("http+unix:///run/my%20socket/http.sock");
+        assert!(result.is_some());
+        let (socket, base) = result.unwrap();
+        assert_eq!(socket, PathBuf::from("/run/my socket/http.sock"));
+        assert_eq!(base, "http://localhost");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn normalize_base_url_handles_unix_socket() {
+        assert_eq!(
+            normalize_base_url("http+unix:///run/forgejo/http.sock").unwrap(),
+            "http+unix:///run/forgejo/http.sock"
+        );
+    }
+
+    #[test]
+    #[cfg(not(unix))]
+    fn normalize_base_url_rejects_unix_socket_on_non_unix() {
+        assert!(normalize_base_url("http+unix:///run/forgejo/http.sock").is_err());
+    }
+
+    #[test]
+    fn normalize_host_key_preserves_unix_socket() {
+        assert_eq!(
+            normalize_host_key("http+unix:///run/forgejo/http.sock").unwrap(),
+            "http+unix:///run/forgejo/http.sock"
+        );
+    }
+
+    #[test]
+    fn parse_unix_socket_url_rejects_empty_path() {
+        assert_eq!(parse_unix_socket_url("http+unix://"), None);
+        assert_eq!(parse_unix_socket_url("http+unix://   "), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn normalize_base_url_rejects_malformed_unix_socket_url() {
+        // Empty path should fail
+        assert!(normalize_base_url("http+unix://").is_err());
+        // Whitespace-only path should fail
+        assert!(normalize_base_url("http+unix://   ").is_err());
     }
 }

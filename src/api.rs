@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
 use eyre::{eyre, Context};
@@ -17,6 +18,14 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(base_url: &str, token: &str) -> eyre::Result<Self> {
+        Self::new_with_socket(base_url, token, None)
+    }
+
+    pub fn new_with_socket(
+        base_url: &str,
+        token: &str,
+        unix_socket: Option<&Path>,
+    ) -> eyre::Result<Self> {
         let base_url = crate::target::normalize_base_url(base_url)?;
         let base_url = base_url.trim_end_matches('/').to_string();
 
@@ -25,12 +34,17 @@ impl ApiClient {
             .wrap_err("invalid api token for Authorization header")?;
         headers.insert(AUTHORIZATION, auth_value);
 
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(60))
-            .default_headers(headers)
-            .build()
-            .wrap_err("failed to build http client")?;
+            .default_headers(headers);
+
+        #[cfg(unix)]
+        if let Some(socket_path) = unix_socket {
+            builder = builder.unix_socket(socket_path);
+        }
+
+        let client = builder.build().wrap_err("failed to build http client")?;
 
         Ok(Self { base_url, client })
     }
@@ -41,7 +55,16 @@ impl ApiClient {
         } else {
             format!("/{path}")
         };
-        format!("{}/api/v1{path}", self.base_url)
+
+        // Convert http+unix:// URLs to http://localhost for HTTP requests
+        // (the Unix socket transport is configured separately via builder.unix_socket)
+        let request_base = if self.base_url.starts_with("http+unix://") {
+            "http://localhost".to_string()
+        } else {
+            self.base_url.clone()
+        };
+
+        format!("{}/api/v1{path}", request_base)
     }
 
     pub async fn get_json<T: DeserializeOwned>(&self, url: &str) -> eyre::Result<T> {

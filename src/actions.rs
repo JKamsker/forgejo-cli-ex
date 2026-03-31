@@ -48,9 +48,17 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             let dispatch_ref = normalize_dispatch_ref(&git_ref);
             let inputs = parse_workflow_inputs(&input)?;
 
+            // Convert http+unix:// URLs to http://localhost for HTTP requests
+            // (the Unix socket transport is configured separately via builder.unix_socket)
+            let request_base = if target.base_url.starts_with("http+unix://") {
+                "http://localhost"
+            } else {
+                target.base_url.trim_end_matches('/')
+            };
+
             let url = format!(
                 "{}/api/v1/repos/{}/{}/actions/workflows/{}/dispatches",
-                target.base_url.trim_end_matches('/'),
+                request_base,
                 urlencoding::encode(owner),
                 urlencoding::encode(name),
                 urlencoding::encode(workflow)
@@ -90,15 +98,20 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     )
                 })?;
 
-            let client = reqwest::Client::builder()
+            let mut builder = reqwest::Client::builder()
                 .user_agent(concat!(
                     env!("CARGO_PKG_NAME"),
                     "/",
                     env!("CARGO_PKG_VERSION")
                 ))
-                .timeout(std::time::Duration::from_secs(60))
-                .build()
-                .wrap_err("failed to build http client")?;
+                .timeout(std::time::Duration::from_secs(60));
+
+            #[cfg(unix)]
+            if let Some(socket_path) = target.unix_socket.as_deref() {
+                builder = builder.unix_socket(socket_path);
+            }
+
+            let client = builder.build().wrap_err("failed to build http client")?;
 
             let resp = client
                 .post(&url)
@@ -134,7 +147,12 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
         }
         command => {
             let repo = require_repo_owned(&target)?;
-            let session = crate::session::UiSession::from_store(&target.base_url, false).await?;
+            let session = crate::session::UiSession::from_store_with_socket(
+                &target.base_url,
+                false,
+                target.unix_socket.as_deref(),
+            )
+            .await?;
 
             match command {
                 ActionsSubcommand::Workflows { page, limit, json } => {
@@ -1027,7 +1045,11 @@ async fn run_runners(
 ) -> eyre::Result<()> {
     let token = crate::store::get_fj_api_token_for_base_url(&target.base_url)?
         .ok_or_else(|| fj_missing_api_token_error(&target.base_url))?;
-    let client = crate::api::ApiClient::new(&target.base_url, &token)?;
+    let client = crate::api::ApiClient::new_with_socket(
+        &target.base_url,
+        &token,
+        target.unix_socket.as_deref(),
+    )?;
 
     match command {
         ActionsRunnersSubcommand::Token { scope, org, json } => {
