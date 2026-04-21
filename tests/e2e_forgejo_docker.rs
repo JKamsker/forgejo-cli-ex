@@ -12,6 +12,7 @@ use url::Url;
 
 const FORGEJO_IMAGE: &str = "codeberg.org/forgejo/forgejo:14.0.2";
 const FORGEJO_IMAGE_11_0_10: &str = "codeberg.org/forgejo/forgejo:11.0.10";
+const FORGEJO_IMAGE_15_0_0: &str = "codeberg.org/forgejo/forgejo:15.0.0";
 const ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.3.0";
 
 #[tokio::test]
@@ -24,6 +25,12 @@ async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
 #[ignore]
 async fn e2e_forgejo_11_0_10_docker() -> Result<()> {
     run_e2e(FORGEJO_IMAGE_11_0_10, "11-0-10").await
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_forgejo_15_0_0_docker() -> Result<()> {
+    run_e2e(FORGEJO_IMAGE_15_0_0, "15-0-0").await
 }
 
 async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
