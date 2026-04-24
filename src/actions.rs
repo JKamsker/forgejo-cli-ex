@@ -387,17 +387,27 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             if let Some(parent) = out_file.parent() {
                                 tokio::fs::create_dir_all(parent).await?;
                             }
-                            let file = tokio::fs::File::create(out_file).await?;
+                            let tmp = out_file.with_extension("part");
+                            let file = tokio::fs::File::create(&tmp).await?;
                             let mut writer = tokio::io::BufWriter::new(file);
-                            let bytes_written = crate::ui_actions::download_job_logs(
+                            match crate::ui_actions::download_job_logs(
                                 &session, &repo, run_index, job_index_i64, attempt, &mut writer,
                             )
-                            .await?;
-                            writer.flush().await?;
-                            if std::io::stderr().is_terminal() {
-                                eprintln!("{bytes_written} bytes written");
+                            .await
+                            {
+                                Ok(bytes_written) => {
+                                    writer.flush().await?;
+                                    tokio::fs::rename(&tmp, out_file).await?;
+                                    if std::io::stderr().is_terminal() {
+                                        eprintln!("{bytes_written} bytes written");
+                                    }
+                                    println!("{}", out_file.display());
+                                }
+                                Err(e) => {
+                                    let _ = tokio::fs::remove_file(&tmp).await;
+                                    return Err(e);
+                                }
                             }
-                            println!("{}", out_file.display());
                         } else {
                             let mut stdout = tokio::io::stdout();
                             crate::ui_actions::download_job_logs(
@@ -461,14 +471,16 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                         continue;
                                     }
                                 };
+                                let tmp = out_file.with_extension("part");
                                 match async {
-                                    let file = tokio::fs::File::create(&out_file).await?;
+                                    let file = tokio::fs::File::create(&tmp).await?;
                                     let mut writer = tokio::io::BufWriter::new(file);
                                     let bytes_written = crate::ui_actions::download_job_logs(
                                         &session, &repo, run_index, job_index, attempt, &mut writer,
                                     )
                                     .await?;
                                     writer.flush().await?;
+                                    tokio::fs::rename(&tmp, &out_file).await?;
                                     Ok::<u64, eyre::Report>(bytes_written)
                                 }
                                 .await
@@ -480,6 +492,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                         );
                                     }
                                     Err(e) => {
+                                        let _ = tokio::fs::remove_file(&tmp).await;
                                         let msg = format!("Job {job_index} ({job_name}): {e}");
                                         eprintln!("warn: {msg}");
                                         failures.push(msg);
@@ -604,17 +617,27 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         if let Some(parent) = out_file.parent() {
                             tokio::fs::create_dir_all(parent).await?;
                         }
-                        let file = tokio::fs::File::create(&out_file).await?;
+                        let tmp = out_file.with_extension("part");
+                        let file = tokio::fs::File::create(&tmp).await?;
                         let mut writer = tokio::io::BufWriter::new(file);
-                        let bytes_written = crate::ui_actions::download_artifact(
+                        match crate::ui_actions::download_artifact(
                             &session, &repo, run_index, &artifact, &mut writer,
                         )
-                        .await?;
-                        writer.flush().await?;
-                        if std::io::stderr().is_terminal() {
-                            eprintln!("{bytes_written} bytes written");
+                        .await
+                        {
+                            Ok(bytes_written) => {
+                                writer.flush().await?;
+                                tokio::fs::rename(&tmp, &out_file).await?;
+                                if std::io::stderr().is_terminal() {
+                                    eprintln!("{bytes_written} bytes written");
+                                }
+                                println!("{}", out_file.display());
+                            }
+                            Err(e) => {
+                                let _ = tokio::fs::remove_file(&tmp).await;
+                                return Err(e);
+                            }
                         }
-                        println!("{}", out_file.display());
                     }
                 },
                 ActionsSubcommand::SmokeTest(args) => {
