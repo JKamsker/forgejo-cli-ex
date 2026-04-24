@@ -188,12 +188,25 @@ fn backup_path(original: &Path) -> eyre::Result<PathBuf> {
 }
 
 pub async fn read_creds_store() -> eyre::Result<CredsStore> {
-    let store_path = ui_creds_store_paths()?.path;
+    let paths = ui_creds_store_paths()?;
+    let store_path = &paths.path;
     if !store_path.is_file() {
         return Ok(CredsStore::default());
     }
 
-    let raw = tokio::fs::read_to_string(&store_path)
+    #[cfg(unix)]
+    let _lock = {
+        let lock_path = store_path.clone();
+        let lock = tokio::task::spawn_blocking(move || {
+            unix_file_security::acquire_lock_blocking(&lock_path, 5)
+        })
+        .await
+        .wrap_err("lock task panicked")??;
+        unix_file_security::check_creds_permissions(store_path);
+        lock
+    };
+
+    let raw = tokio::fs::read_to_string(store_path)
         .await
         .wrap_err("failed to read creds store")?;
     if raw.trim().is_empty() {
@@ -203,8 +216,8 @@ pub async fn read_creds_store() -> eyre::Result<CredsStore> {
     match serde_json::from_str::<CredsStore>(&raw) {
         Ok(store) => Ok(store),
         Err(err) => {
-            let backup = backup_path(&store_path)?;
-            let _ = tokio::fs::copy(&store_path, &backup).await;
+            let backup = backup_path(store_path)?;
+            let _ = tokio::fs::copy(store_path, &backup).await;
 
             let repaired = repair_creds_store_from_raw(&raw)?;
             if !repaired.is_empty() {
@@ -212,7 +225,8 @@ pub async fn read_creds_store() -> eyre::Result<CredsStore> {
                     "warn: ui-creds.json was invalid JSON; backed up to '{}' and repaired by dropping cookie jars.",
                     backup.display()
                 );
-                write_creds_store(&repaired).await?;
+                // Use inner write to avoid re-entrant deadlock (Pitfall 1)
+                write_creds_store_inner(&repaired, &paths).await?;
                 return Ok(repaired);
             }
 
@@ -227,8 +241,9 @@ pub async fn read_creds_store() -> eyre::Result<CredsStore> {
     }
 }
 
-pub async fn write_creds_store(store: &CredsStore) -> eyre::Result<()> {
-    let paths = ui_creds_store_paths()?;
+/// Inner write: no locking. Called when lock is already held (repair path)
+/// or when locking is done by the caller.
+async fn write_creds_store_inner(store: &CredsStore, paths: &StorePaths) -> eyre::Result<()> {
     tokio::fs::create_dir_all(&paths.dir)
         .await
         .wrap_err("failed to create creds store directory")?;
@@ -237,6 +252,34 @@ pub async fn write_creds_store(store: &CredsStore) -> eyre::Result<()> {
     tokio::fs::write(&paths.path, json)
         .await
         .wrap_err("failed to write creds store")?;
+
+    #[cfg(unix)]
+    unix_file_security::enforce_permissions(&paths.path)?;
+
+    Ok(())
+}
+
+pub async fn write_creds_store(store: &CredsStore) -> eyre::Result<()> {
+    let paths = ui_creds_store_paths()?;
+
+    #[cfg(unix)]
+    {
+        let lock_path = paths.path.clone();
+        let _lock = tokio::task::spawn_blocking(move || {
+            unix_file_security::acquire_lock_blocking(&lock_path, 5)
+        })
+        .await
+        .wrap_err("lock task panicked")??;
+
+        write_creds_store_inner(store, &paths).await?;
+        // _lock dropped here, releasing flock
+    }
+
+    #[cfg(not(unix))]
+    {
+        write_creds_store_inner(store, &paths).await?;
+    }
+
     Ok(())
 }
 
@@ -473,6 +516,83 @@ pub async fn delete_store_entry(base_url: &str) -> eyre::Result<Option<StoreEntr
     Ok(removed)
 }
 
+#[cfg(unix)]
+mod unix_file_security {
+    use eyre::Context;
+    use std::os::unix::io::AsRawFd;
+    use std::path::Path;
+
+    /// RAII guard: dropping unlocks the flock.
+    #[derive(Debug)]
+    pub struct LockedFile(pub std::fs::File);
+
+    impl Drop for LockedFile {
+        fn drop(&mut self) {
+            unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        }
+    }
+
+    /// Acquire an exclusive flock on `path` (creating the file if needed with mode 0600).
+    /// Polls with LOCK_NB every 500ms. Returns error after `timeout_secs` seconds.
+    pub fn acquire_lock_blocking(path: &Path, timeout_secs: u64) -> eyre::Result<LockedFile> {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)
+            .wrap_err_with(|| format!("cannot open credential file '{}'", path.display()))?;
+
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+        loop {
+            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if ret == 0 {
+                return Ok(LockedFile(file));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(eyre::eyre!(
+                    "ui-creds.json locked by another process (waited {}s). \
+                     Retry or check for stuck fj-ex processes.",
+                    timeout_secs
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+
+    /// Warn to stderr if permissions are too open. Non-blocking.
+    pub fn check_creds_permissions(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            if mode != 0o600 {
+                eprintln!(
+                    "warn: {} has mode {:04o}, expected 0600. Run `fj-ex auth login` to fix.",
+                    path.display(),
+                    mode
+                );
+            }
+        }
+    }
+
+    /// Enforce 0600 on every write. Uses set_permissions after write to override any umask.
+    pub fn enforce_permissions(path: &Path) -> eyre::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(path, perms).wrap_err_with(|| {
+            format!(
+                "failed to set 0600 permissions on '{}'. Run `fj-ex auth login` to recreate.",
+                path.display()
+            )
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +640,130 @@ mod tests {
             get_fj_api_token_for_base_url_from_store(&keys, "https://forge.example.com:3000")
                 .unwrap();
         assert_eq!(token.as_deref(), Some("abc"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_sets_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-creds.json");
+
+        // Write a file then enforce permissions
+        std::fs::write(&path, b"{}").unwrap();
+        super::unix_file_security::enforce_permissions(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected mode 0600, got {:04o}", mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overwrite_resets_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-creds.json");
+
+        // Create with 0644
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+
+        // Enforce should reset to 0600
+        super::unix_file_security::enforce_permissions(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "expected mode 0600 after overwrite, got {:04o}",
+            mode
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_timeout_error_message() {
+        use std::os::unix::io::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-lock.json");
+        std::fs::write(&path, b"{}").unwrap();
+
+        // Hold a lock in the current thread via raw flock
+        let file = std::fs::File::open(&path).unwrap();
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        assert_eq!(ret, 0, "failed to acquire initial lock");
+
+        // Attempt acquire in another thread with short timeout
+        let path_clone = path.clone();
+        let handle = std::thread::spawn(move || {
+            super::unix_file_security::acquire_lock_blocking(&path_clone, 1)
+        });
+
+        let result = handle.join().unwrap();
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("locked by another process"),
+            "error should mention 'locked by another process', got: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("Retry or check for stuck fj-ex processes"),
+            "error should mention fix action, got: {err_msg}"
+        );
+
+        // Release lock
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_warns_on_open_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-creds.json");
+        std::fs::write(&path, b"{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        // This should print a warning — we verify it doesn't panic
+        super::unix_file_security::check_creds_permissions(&path);
+
+        // Verify with 0600 it does not warn (no way to assert no stderr, but no panic)
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        super::unix_file_security::check_creds_permissions(&path);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_writes_no_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let creds_path = dir.path().join("ui-creds.json");
+
+        let path = creds_path.clone();
+        let mut handles = vec![];
+        for i in 0..4 {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let lock = super::unix_file_security::acquire_lock_blocking(&p, 5)
+                    .expect("failed to acquire lock");
+                // Write valid JSON while holding lock
+                let content = format!("{{\"thread\": {}}}", i);
+                std::fs::write(&p, content.as_bytes()).expect("failed to write");
+                super::unix_file_security::enforce_permissions(&p)
+                    .expect("failed to set perms");
+                drop(lock);
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // File must be valid JSON after all writes
+        let contents = std::fs::read_to_string(&creds_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents)
+            .expect("credential file is not valid JSON after concurrent writes");
+        assert!(parsed.get("thread").is_some());
     }
 
     #[test]

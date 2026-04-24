@@ -13,6 +13,19 @@ use crate::cli::{
 static SAFE_FILENAME_COMPONENT_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r#"[^a-zA-Z0-9._-]+"#).expect("valid regex"));
 
+fn build_basic_client(unix_socket: Option<&std::path::Path>) -> eyre::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(60));
+
+    #[cfg(unix)]
+    if let Some(socket_path) = unix_socket {
+        builder = builder.unix_socket(socket_path);
+    }
+
+    builder.build().wrap_err("failed to build http client")
+}
+
 pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
     let target = crate::target::resolve_target(
         args.target.host.as_deref(),
@@ -98,20 +111,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     )
                 })?;
 
-            let mut builder = reqwest::Client::builder()
-                .user_agent(concat!(
-                    env!("CARGO_PKG_NAME"),
-                    "/",
-                    env!("CARGO_PKG_VERSION")
-                ))
-                .timeout(std::time::Duration::from_secs(60));
-
-            #[cfg(unix)]
-            if let Some(socket_path) = target.unix_socket.as_deref() {
-                builder = builder.unix_socket(socket_path);
-            }
-
-            let client = builder.build().wrap_err("failed to build http client")?;
+            let client = build_basic_client(target.unix_socket.as_deref())?;
 
             let resp = client
                 .post(&url)
@@ -264,10 +264,6 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         resolve_run_index(&session, &repo, run_index, latest, workflow.as_deref())
                             .await?;
 
-                    if watch && watch_interval == 0 {
-                        return Err(eyre!("--watch-interval must be >= 1"));
-                    }
-
                     let interactive = std::io::stdout().is_terminal();
                     let mut last_sig: Option<String> = None;
 
@@ -387,24 +383,27 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 .attempt_number
                             }
                         };
-                        let bytes = crate::ui_actions::download_job_logs(
-                            &session,
-                            &repo,
-                            run_index,
-                            job_index_i64,
-                            attempt,
-                        )
-                        .await?;
-
-                        if let Some(out_file) = out_file {
+                        if let Some(ref out_file) = out_file {
                             if let Some(parent) = out_file.parent() {
                                 tokio::fs::create_dir_all(parent).await?;
                             }
-                            tokio::fs::write(&out_file, &bytes).await?;
+                            let file = tokio::fs::File::create(out_file).await?;
+                            let mut writer = tokio::io::BufWriter::new(file);
+                            let bytes_written = crate::ui_actions::download_job_logs(
+                                &session, &repo, run_index, job_index_i64, attempt, &mut writer,
+                            )
+                            .await?;
+                            writer.flush().await?;
+                            if std::io::stderr().is_terminal() {
+                                eprintln!("{bytes_written} bytes written");
+                            }
                             println!("{}", out_file.display());
                         } else {
                             let mut stdout = tokio::io::stdout();
-                            stdout.write_all(&bytes).await?;
+                            crate::ui_actions::download_job_logs(
+                                &session, &repo, run_index, job_index_i64, attempt, &mut stdout,
+                            )
+                            .await?;
                             stdout.flush().await?;
                         }
                     }
@@ -462,18 +461,22 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                         continue;
                                     }
                                 };
-                                match crate::ui_actions::download_job_logs(
-                                    &session, &repo, run_index, job_index, attempt,
-                                )
+                                match async {
+                                    let file = tokio::fs::File::create(&out_file).await?;
+                                    let mut writer = tokio::io::BufWriter::new(file);
+                                    let bytes_written = crate::ui_actions::download_job_logs(
+                                        &session, &repo, run_index, job_index, attempt, &mut writer,
+                                    )
+                                    .await?;
+                                    writer.flush().await?;
+                                    Ok::<u64, eyre::Report>(bytes_written)
+                                }
                                 .await
                                 {
-                                    Ok(bytes) => {
-                                        tokio::fs::write(&out_file, &bytes).await?;
+                                    Ok(bytes_written) => {
                                         println!(
-                                            "Saved: job {} (attempt {}) -> {}",
-                                            job_index,
-                                            attempt,
-                                            out_file.display()
+                                            "Saved: job {} (attempt {}) -> {} ({} bytes)",
+                                            job_index, attempt, out_file.display(), bytes_written
                                         );
                                     }
                                     Err(e) => {
@@ -509,13 +512,11 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 "== job {} (attempt {}) :: {} ==",
                                 job_index, attempt, job_name
                             );
-                            let bytes = crate::ui_actions::download_job_logs(
-                                &session, &repo, run_index, job_index, attempt,
+                            let mut stdout = tokio::io::stdout();
+                            crate::ui_actions::download_job_logs(
+                                &session, &repo, run_index, job_index, attempt, &mut stdout,
                             )
                             .await?;
-
-                            let mut stdout = tokio::io::stdout();
-                            stdout.write_all(&bytes).await?;
                             stdout.flush().await?;
 
                             eprintln!("== end job {} ==", job_index);
@@ -600,14 +601,19 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             workflow.as_deref(),
                         )
                         .await?;
-                        let bytes = crate::ui_actions::download_artifact(
-                            &session, &repo, run_index, &artifact,
-                        )
-                        .await?;
                         if let Some(parent) = out_file.parent() {
                             tokio::fs::create_dir_all(parent).await?;
                         }
-                        tokio::fs::write(&out_file, bytes).await?;
+                        let file = tokio::fs::File::create(&out_file).await?;
+                        let mut writer = tokio::io::BufWriter::new(file);
+                        let bytes_written = crate::ui_actions::download_artifact(
+                            &session, &repo, run_index, &artifact, &mut writer,
+                        )
+                        .await?;
+                        writer.flush().await?;
+                        if std::io::stderr().is_terminal() {
+                            eprintln!("{bytes_written} bytes written");
+                        }
                         println!("{}", out_file.display());
                     }
                 },

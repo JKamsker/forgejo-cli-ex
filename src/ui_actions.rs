@@ -4,8 +4,22 @@ use std::sync::LazyLock;
 use eyre::{eyre, Context};
 use regex::Regex;
 use serde_json::Value;
+use tokio::io::AsyncWriteExt;
 
 use crate::{html, session::UiSession};
+
+/// Stream a response body to a writer in chunks, returning total bytes written.
+async fn stream_response(
+    resp: &mut reqwest::Response,
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> eyre::Result<u64> {
+    let mut bytes_written: u64 = 0;
+    while let Some(chunk) = resp.chunk().await.wrap_err("failed to read response chunk")? {
+        writer.write_all(&chunk).await.wrap_err("failed to write chunk")?;
+        bytes_written += chunk.len() as u64;
+    }
+    Ok(bytes_written)
+}
 
 /// Maximum bytes before a run-href match to search for its status tooltip.
 const STATUS_LOOKBACK_BYTES: usize = 800;
@@ -420,7 +434,8 @@ pub async fn download_job_logs(
     run_index: i64,
     job_index: i64,
     attempt_number: i64,
-) -> eyre::Result<Vec<u8>> {
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> eyre::Result<u64> {
     let repo_path = repo.trim_matches('/');
 
     // Newer Forgejo versions expose logs under an attempt URL.
@@ -428,11 +443,10 @@ pub async fn download_job_logs(
         "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/attempt/{attempt_number}/logs",
         session.base_url()
     );
-    let resp = session.get_response(&url_attempt, true).await?;
+    let mut resp = session.get_response(&url_attempt, true).await?;
     let status = resp.status();
     if status == reqwest::StatusCode::OK {
-        let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
-        return Ok(bytes.to_vec());
+        return stream_response(&mut resp, writer).await;
     }
 
     // Older Forgejo versions (e.g. 11.x) expose logs without attempt numbers.
@@ -440,11 +454,10 @@ pub async fn download_job_logs(
         "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/logs",
         session.base_url()
     );
-    let resp = session.get_response(&url_legacy, true).await?;
+    let mut resp = session.get_response(&url_legacy, true).await?;
     let legacy_status = resp.status();
     if legacy_status == reqwest::StatusCode::OK {
-        let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
-        return Ok(bytes.to_vec());
+        return stream_response(&mut resp, writer).await;
     }
 
     Err(eyre!(
@@ -500,7 +513,8 @@ pub async fn download_artifact(
     repo: &str,
     run_index: i64,
     artifact_name_or_id: &str,
-) -> eyre::Result<Vec<u8>> {
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+) -> eyre::Result<u64> {
     let repo_path = repo.trim_matches('/');
     let name_or_id = urlencoding::encode(artifact_name_or_id);
     let url = format!(
@@ -508,7 +522,7 @@ pub async fn download_artifact(
         session.base_url()
     );
 
-    let resp = session.get_response(&url, true).await?;
+    let mut resp = session.get_response(&url, true).await?;
     if resp.status() != reqwest::StatusCode::OK {
         return Err(eyre!(
             "Failed to download artifact from '{}'. HTTP {}.",
@@ -516,9 +530,41 @@ pub async fn download_artifact(
             resp.status()
         ));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .wrap_err("failed to read artifact bytes")?;
-    Ok(bytes.to_vec())
+    stream_response(&mut resp, writer).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stream_response_writes_all_chunks() {
+        let body = b"hello world streaming test";
+        let resp = http::Response::builder()
+            .status(200)
+            .body(reqwest::Body::from(body.to_vec()))
+            .unwrap();
+        let mut resp: reqwest::Response = resp.into();
+
+        let mut buf: Vec<u8> = Vec::new();
+        let bytes_written = stream_response(&mut resp, &mut buf).await.unwrap();
+
+        assert_eq!(bytes_written, body.len() as u64);
+        assert_eq!(&buf, body);
+    }
+
+    #[tokio::test]
+    async fn stream_response_empty_body_returns_zero() {
+        let resp = http::Response::builder()
+            .status(200)
+            .body(reqwest::Body::from(Vec::<u8>::new()))
+            .unwrap();
+        let mut resp: reqwest::Response = resp.into();
+
+        let mut buf: Vec<u8> = Vec::new();
+        let bytes_written = stream_response(&mut resp, &mut buf).await.unwrap();
+
+        assert_eq!(bytes_written, 0);
+        assert!(buf.is_empty());
+    }
 }

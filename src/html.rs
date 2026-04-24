@@ -1,4 +1,18 @@
+use std::sync::LazyLock;
+
 use regex::Regex;
+
+static CSRF_LOGIN_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"name="_csrf"\s+value="([^"]+)""#).expect("valid regex"));
+
+static CSRF_TOKEN_SINGLE_QUOTE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"csrfToken:\s*'([^']+)'"#).expect("valid regex"));
+
+static CSRF_TOKEN_DOUBLE_QUOTE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"csrfToken:\s*"([^"]+)""#).expect("valid regex"));
+
+static CSRF_TOKEN_HX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"hx-headers=['"][^'"]*"x-csrf-token"\s*:\s*"([^"]+)"[^'"]*['"]"#).expect("valid regex"));
 
 pub fn html_decode(s: &str) -> String {
     html_escape::decode_html_entities(s).to_string()
@@ -16,23 +30,21 @@ pub fn get_html_attribute_value(html: &str, attribute_name: &str) -> Option<Stri
 }
 
 pub fn get_csrf_from_login_html(html: &str) -> Option<String> {
-    let re = Regex::new(r#"name="_csrf"\s+value="([^"]+)""#).ok()?;
-    let caps = re.captures(html)?;
+    let caps = CSRF_LOGIN_RE.captures(html)?;
     let value = caps.get(1)?.as_str();
     Some(html_decode(value))
 }
 
 pub fn get_csrf_token_from_html(html: &str) -> Option<String> {
     // Forgejo/Gitea pages typically embed the CSRF token in `window.config`.
-    let patterns = [
-        r#"csrfToken:\s*'([^']+)'"#,
-        r#"csrfToken:\s*"([^"]+)""#,
+    let regexes: [&Regex; 3] = [
+        &CSRF_TOKEN_SINGLE_QUOTE_RE,
+        &CSRF_TOKEN_DOUBLE_QUOTE_RE,
         // Some pages also expose it via htmx headers on the <body>.
-        r#"hx-headers=['"][^'"]*"x-csrf-token"\s*:\s*"([^"]+)"[^'"]*['"]"#,
+        &CSRF_TOKEN_HX_RE,
     ];
 
-    for pattern in patterns {
-        let re = Regex::new(pattern).ok()?;
+    for re in regexes {
         if let Some(caps) = re.captures(html) {
             if let Some(value) = caps.get(1).map(|m| m.as_str()) {
                 if !value.trim().is_empty() {

@@ -87,6 +87,13 @@ fj auth login      # stored API token for Authorization: token ...
 
 This is required for automatic re-login. Downloaded logs and artifacts may contain secrets — handle accordingly.
 
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `FJ_PASS` | Password for `fj-ex auth login`. Alternative to `--password-stdin` or interactive prompt. |
+| `FJ_USER` | Username for `fj-ex auth login`. Alternative to `--username` or interactive prompt. |
+
 ## License
 
 LGPL-3.0-or-later

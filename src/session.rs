@@ -238,15 +238,6 @@ impl UiSession {
             .wrap_err("failed to read response text")
     }
 
-    pub async fn get_bytes(&self, url: &str, retry_on_logout: bool) -> eyre::Result<Vec<u8>> {
-        self.get_response(url, retry_on_logout)
-            .await?
-            .bytes()
-            .await
-            .wrap_err("failed to read response bytes")
-            .map(|b| b.to_vec())
-    }
-
     pub async fn post_json_text(
         &self,
         url: &str,

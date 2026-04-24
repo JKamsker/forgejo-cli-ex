@@ -1,3 +1,5 @@
+use tokio::io::AsyncWriteExt;
+
 use crate::cli::SmokeTestCommand;
 
 pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
@@ -79,28 +81,31 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
         job0.job_index, meta.attempt_number
     ));
 
-    let bytes = crate::ui_actions::download_job_logs(
+    let file = tokio::fs::File::create(&out_file).await?;
+    let mut writer = tokio::io::BufWriter::new(file);
+    let bytes_written = crate::ui_actions::download_job_logs(
         &session,
         &repo,
         latest_run_index,
         job0.job_index,
         meta.attempt_number,
+        &mut writer,
     )
     .await?;
-    if bytes.is_empty() {
+    writer.flush().await?;
+
+    if bytes_written == 0 {
         return Err(eyre::eyre!("Log file is empty (expected non-empty)"));
     }
-    if bytes.len() as u64 > args.opts.log_download_max_bytes {
+    if bytes_written > args.opts.log_download_max_bytes {
         return Err(eyre::eyre!(
             "Log file ({} bytes) exceeds LogDownloadMaxBytes ({}). Rerun with a larger limit.",
-            bytes.len(),
+            bytes_written,
             args.opts.log_download_max_bytes
         ));
     }
-    tokio::fs::write(&out_file, bytes).await?;
 
-    let len = tokio::fs::metadata(&out_file).await?.len();
-    println!("logBytes={len} outFile={}", out_file.display());
+    println!("logBytes={bytes_written} outFile={}", out_file.display());
 
     println!("[7] Non-destructive command checks");
     let repo_path = repo.trim_matches('/');

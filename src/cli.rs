@@ -88,11 +88,11 @@ pub struct LoginCommand {
     #[arg(long)]
     pub username: Option<String>,
 
-    /// Password to login with (unsafe: visible in process list; prefer --password-stdin)
+    /// Password to login with (falls back to FJ_PASS env var; unsafe: visible in process list; prefer --password-stdin)
     #[arg(long, conflicts_with = "password_stdin")]
     pub password: Option<String>,
 
-    /// Read password from stdin (first line; falls back to prompt if empty)
+    /// Read password from stdin (first line). Falls back to FJ_PASS env var, then interactive prompt.
     #[arg(long, conflicts_with = "password")]
     pub password_stdin: bool,
 }
