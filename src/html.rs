@@ -55,6 +55,7 @@ pub fn get_csrf_token_from_html(html: &str) -> Option<String> {
         if let Some(caps) = CSRF_TOKEN_HX_VALUE_RE.captures(&hx_value) {
             if let Some(value) = caps.get(1).map(|m| m.as_str()) {
                 if !value.trim().is_empty() {
+                    // already decoded by get_html_attribute_value
                     return Some(value.to_string());
                 }
             }

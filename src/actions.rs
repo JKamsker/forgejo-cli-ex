@@ -387,7 +387,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             if let Some(parent) = out_file.parent() {
                                 tokio::fs::create_dir_all(parent).await?;
                             }
-                            let tmp = out_file.with_extension("part");
+                            let tmp = out_file.with_file_name(format!("{}.part", out_file.file_name().unwrap().to_string_lossy()));
                             let file = tokio::fs::File::create(&tmp).await?;
                             let mut writer = tokio::io::BufWriter::new(file);
                             match crate::ui_actions::download_job_logs(
@@ -471,7 +471,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                         continue;
                                     }
                                 };
-                                let tmp = out_file.with_extension("part");
+                                let tmp = out_file.with_file_name(format!("{}.part", out_file.file_name().unwrap().to_string_lossy()));
                                 match async {
                                     let file = tokio::fs::File::create(&tmp).await?;
                                     let mut writer = tokio::io::BufWriter::new(file);
@@ -617,7 +617,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         if let Some(parent) = out_file.parent() {
                             tokio::fs::create_dir_all(parent).await?;
                         }
-                        let tmp = out_file.with_extension("part");
+                        let tmp = out_file.with_file_name(format!("{}.part", out_file.file_name().unwrap().to_string_lossy()));
                         let file = tokio::fs::File::create(&tmp).await?;
                         let mut writer = tokio::io::BufWriter::new(file);
                         match crate::ui_actions::download_artifact(
