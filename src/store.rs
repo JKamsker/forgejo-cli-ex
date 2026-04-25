@@ -262,6 +262,12 @@ async fn write_creds_store_inner(store: &CredsStore, paths: &StorePaths) -> eyre
 pub async fn write_creds_store(store: &CredsStore) -> eyre::Result<()> {
     let paths = ui_creds_store_paths()?;
 
+    // Create directory before acquiring lock — on fresh installs the lock file
+    // doesn't exist yet and acquire_lock_blocking would fail with ENOENT.
+    tokio::fs::create_dir_all(&paths.dir)
+        .await
+        .wrap_err("failed to create creds store directory")?;
+
     #[cfg(unix)]
     {
         let lock_path = paths.path.clone();
