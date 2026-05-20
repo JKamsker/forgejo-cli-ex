@@ -387,7 +387,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 .attempt_number
                             }
                         };
-                        let bytes = crate::ui_actions::download_job_logs(
+                        let resp = crate::ui_actions::open_job_logs(
                             &session,
                             &repo,
                             run_index,
@@ -400,11 +400,13 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             if let Some(parent) = out_file.parent() {
                                 tokio::fs::create_dir_all(parent).await?;
                             }
-                            tokio::fs::write(&out_file, &bytes).await?;
+                            let mut file = tokio::fs::File::create(&out_file).await?;
+                            crate::ui_actions::copy_response_body(resp, &mut file).await?;
+                            file.flush().await?;
                             println!("{}", out_file.display());
                         } else {
                             let mut stdout = tokio::io::stdout();
-                            stdout.write_all(&bytes).await?;
+                            crate::ui_actions::copy_response_body(resp, &mut stdout).await?;
                             stdout.flush().await?;
                         }
                     }
@@ -462,13 +464,16 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                         continue;
                                     }
                                 };
-                                match crate::ui_actions::download_job_logs(
+                                match crate::ui_actions::open_job_logs(
                                     &session, &repo, run_index, job_index, attempt,
                                 )
                                 .await
                                 {
-                                    Ok(bytes) => {
-                                        tokio::fs::write(&out_file, &bytes).await?;
+                                    Ok(resp) => {
+                                        let mut file = tokio::fs::File::create(&out_file).await?;
+                                        crate::ui_actions::copy_response_body(resp, &mut file)
+                                            .await?;
+                                        file.flush().await?;
                                         println!(
                                             "Saved: job {} (attempt {}) -> {}",
                                             job_index,
@@ -509,13 +514,13 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 "== job {} (attempt {}) :: {} ==",
                                 job_index, attempt, job_name
                             );
-                            let bytes = crate::ui_actions::download_job_logs(
+                            let resp = crate::ui_actions::open_job_logs(
                                 &session, &repo, run_index, job_index, attempt,
                             )
                             .await?;
 
                             let mut stdout = tokio::io::stdout();
-                            stdout.write_all(&bytes).await?;
+                            crate::ui_actions::copy_response_body(resp, &mut stdout).await?;
                             stdout.flush().await?;
 
                             eprintln!("== end job {} ==", job_index);
@@ -558,8 +563,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         let items = artifacts
                             .get("artifacts")
                             .and_then(|v| v.as_array())
-                            .cloned()
-                            .unwrap_or_default();
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
 
                         let show_header = crate::output::should_print_header(header, no_header);
                         let headers = ["Id", "Name", "Size"];
@@ -600,14 +605,15 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             workflow.as_deref(),
                         )
                         .await?;
-                        let bytes = crate::ui_actions::download_artifact(
-                            &session, &repo, run_index, &artifact,
-                        )
-                        .await?;
+                        let resp =
+                            crate::ui_actions::open_artifact(&session, &repo, run_index, &artifact)
+                                .await?;
                         if let Some(parent) = out_file.parent() {
                             tokio::fs::create_dir_all(parent).await?;
                         }
-                        tokio::fs::write(&out_file, bytes).await?;
+                        let mut file = tokio::fs::File::create(&out_file).await?;
+                        crate::ui_actions::copy_response_body(resp, &mut file).await?;
+                        file.flush().await?;
                         println!("{}", out_file.display());
                     }
                 },

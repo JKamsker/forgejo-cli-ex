@@ -4,6 +4,7 @@ use std::sync::LazyLock;
 use eyre::{eyre, Context};
 use regex::Regex;
 use serde_json::Value;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::{html, session::UiSession};
 
@@ -414,13 +415,13 @@ pub async fn get_job_view_meta(
     })
 }
 
-pub async fn download_job_logs(
+pub async fn open_job_logs(
     session: &UiSession,
     repo: &str,
     run_index: i64,
     job_index: i64,
     attempt_number: i64,
-) -> eyre::Result<Vec<u8>> {
+) -> eyre::Result<reqwest::Response> {
     let repo_path = repo.trim_matches('/');
 
     // Newer Forgejo versions expose logs under an attempt URL.
@@ -431,8 +432,7 @@ pub async fn download_job_logs(
     let resp = session.get_response(&url_attempt, true).await?;
     let status = resp.status();
     if status == reqwest::StatusCode::OK {
-        let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
-        return Ok(bytes.to_vec());
+        return Ok(resp);
     }
 
     // Older Forgejo versions (e.g. 11.x) expose logs without attempt numbers.
@@ -443,8 +443,7 @@ pub async fn download_job_logs(
     let resp = session.get_response(&url_legacy, true).await?;
     let legacy_status = resp.status();
     if legacy_status == reqwest::StatusCode::OK {
-        let bytes = resp.bytes().await.wrap_err("failed to read log bytes")?;
-        return Ok(bytes.to_vec());
+        return Ok(resp);
     }
 
     Err(eyre!(
@@ -454,6 +453,59 @@ pub async fn download_job_logs(
         url_legacy,
         legacy_status
     ))
+}
+
+pub async fn copy_response_body<W>(mut resp: reqwest::Response, writer: &mut W) -> eyre::Result<u64>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut written = 0_u64;
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .wrap_err("failed to read response body chunk")?
+    {
+        writer
+            .write_all(&chunk)
+            .await
+            .wrap_err("failed to write response body chunk")?;
+        written += chunk.len() as u64;
+    }
+
+    Ok(written)
+}
+
+pub async fn copy_response_body_with_limit<W>(
+    mut resp: reqwest::Response,
+    writer: &mut W,
+    max_bytes: u64,
+) -> eyre::Result<u64>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut written = 0_u64;
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .wrap_err("failed to read response body chunk")?
+    {
+        let next_written = written
+            .checked_add(chunk.len() as u64)
+            .ok_or_else(|| eyre!("response body is too large to count"))?;
+        if next_written > max_bytes {
+            return Err(eyre!(
+                "Response body exceeds limit ({next_written} bytes > {max_bytes} bytes)."
+            ));
+        }
+
+        writer
+            .write_all(&chunk)
+            .await
+            .wrap_err("failed to write response body chunk")?;
+        written = next_written;
+    }
+
+    Ok(written)
 }
 
 pub async fn latest_run_index(
@@ -495,12 +547,12 @@ pub async fn get_run_artifacts(
     Ok(json)
 }
 
-pub async fn download_artifact(
+pub async fn open_artifact(
     session: &UiSession,
     repo: &str,
     run_index: i64,
     artifact_name_or_id: &str,
-) -> eyre::Result<Vec<u8>> {
+) -> eyre::Result<reqwest::Response> {
     let repo_path = repo.trim_matches('/');
     let name_or_id = urlencoding::encode(artifact_name_or_id);
     let url = format!(
@@ -516,9 +568,5 @@ pub async fn download_artifact(
             resp.status()
         ));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .wrap_err("failed to read artifact bytes")?;
-    Ok(bytes.to_vec())
+    Ok(resp)
 }
