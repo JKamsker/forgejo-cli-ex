@@ -1,4 +1,5 @@
 use crate::cli::SmokeTestCommand;
+use tokio::io::AsyncWriteExt;
 
 pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
     let target = crate::target::resolve_target(
@@ -79,7 +80,7 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
         job0.job_index, meta.attempt_number
     ));
 
-    let bytes = crate::ui_actions::download_job_logs(
+    let resp = crate::ui_actions::open_job_logs(
         &session,
         &repo,
         latest_run_index,
@@ -87,17 +88,23 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
         meta.attempt_number,
     )
     .await?;
-    if bytes.is_empty() {
+    let mut file = tokio::fs::File::create(&out_file).await?;
+    let log_bytes = crate::ui_actions::copy_response_body_with_limit(
+        resp,
+        &mut file,
+        args.opts.log_download_max_bytes,
+    )
+    .await
+    .map_err(|err| {
+        eyre::eyre!(
+            "Log file exceeds LogDownloadMaxBytes ({}): {err}. Rerun with a larger limit.",
+            args.opts.log_download_max_bytes
+        )
+    })?;
+    file.flush().await?;
+    if log_bytes == 0 {
         return Err(eyre::eyre!("Log file is empty (expected non-empty)"));
     }
-    if bytes.len() as u64 > args.opts.log_download_max_bytes {
-        return Err(eyre::eyre!(
-            "Log file ({} bytes) exceeds LogDownloadMaxBytes ({}). Rerun with a larger limit.",
-            bytes.len(),
-            args.opts.log_download_max_bytes
-        ));
-    }
-    tokio::fs::write(&out_file, bytes).await?;
 
     let len = tokio::fs::metadata(&out_file).await?.len();
     println!("logBytes={len} outFile={}", out_file.display());

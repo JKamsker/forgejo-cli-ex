@@ -58,6 +58,22 @@ fj-ex token mint nuget --host forge.example.com --owner my-org --read-only
 
 ---
 
+## token list
+
+List personal access tokens for the authenticated user:
+
+```sh
+fj-ex token list --host forge.example.com
+fj-ex token list --host forge.example.com --json
+```
+
+Default behavior:
+
+- Resolves the authenticated user from the stored `fj` API token
+- Lists token id, name, last eight characters, and scopes
+
+---
+
 ## actions runs
 
 ```sh

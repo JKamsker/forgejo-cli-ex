@@ -40,6 +40,17 @@ jobs:
 
   e2e:
     needs: test
+    name: e2e (Forgejo ${{ matrix.forgejo_version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - forgejo_version: "11.0.10"
+            test_name: "e2e_forgejo_11_0_10_docker"
+          - forgejo_version: "14.0.2"
+            test_name: "e2e_forgejo_14_0_2_docker"
+          - forgejo_version: "15.0.0"
+            test_name: "e2e_forgejo_15_0_0_docker"
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -52,7 +63,7 @@ jobs:
       - name: Run ignored e2e tests (Docker + Forgejo)
         env:
           FJ_EX_E2E: "1"
-        run: cargo test --locked --test e2e_forgejo_docker -- --ignored --test-threads=1
+        run: cargo test --locked --test e2e_forgejo_docker ${{ matrix.test_name }} -- --ignored --nocapture --test-threads=1
 
       - name: Run Unix socket tests
         env:

@@ -12,6 +12,7 @@ use url::Url;
 
 const FORGEJO_IMAGE: &str = "codeberg.org/forgejo/forgejo:14.0.2";
 const FORGEJO_IMAGE_11_0_10: &str = "codeberg.org/forgejo/forgejo:11.0.10";
+const FORGEJO_IMAGE_15_0_0: &str = "codeberg.org/forgejo/forgejo:15.0.0";
 const ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.3.0";
 
 #[tokio::test]
@@ -24,6 +25,12 @@ async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
 #[ignore]
 async fn e2e_forgejo_11_0_10_docker() -> Result<()> {
     run_e2e(FORGEJO_IMAGE_11_0_10, "11-0-10").await
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_forgejo_15_0_0_docker() -> Result<()> {
+    run_e2e(FORGEJO_IMAGE_15_0_0, "15-0-0").await
 }
 
 async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
@@ -203,8 +210,33 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
         "expected nuget api key, got: {}",
         nuget_key_out.stdout
     );
+    let minted_token_name = nuget_key_json["tokenName"]
+        .as_str()
+        .ok_or_else(|| eyre!("minted token name missing"))?;
 
     // Runner registration tokens (global/repo/user)
+    let token_list_out = fj_ex_cmd(
+        &fj_ex,
+        &appdata_dir,
+        &["token", "list", "--host", &base_url, "--json"],
+        None,
+    )?;
+    let token_list_json: Value = serde_json::from_str(&token_list_out.stdout)?;
+    assert_eq!(token_list_json["baseUrl"], base_url);
+    assert_eq!(token_list_json["username"], username);
+    assert!(
+        token_list_json["tokens"].as_array().is_some_and(|tokens| {
+            tokens.iter().any(|tok| {
+                tok["name"].as_str() == Some(minted_token_name)
+                    && tok["scopes"]
+                        .as_array()
+                        .is_some_and(|scopes| scopes.iter().any(|scope| scope == "write:package"))
+            })
+        }),
+        "expected minted token in token list, got: {}",
+        token_list_out.stdout
+    );
+
     let token_repo_out = fj_ex_cmd(
         &fj_ex,
         &appdata_dir,

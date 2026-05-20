@@ -335,7 +335,7 @@ pub async fn run_nuget_api_key(args: AuthNugetApiKeyCommand) -> eyre::Result<()>
         "name": token_name,
         "scopes": [scope],
     });
-    let created: crate::api::AccessToken = client
+    let created: crate::api::CreatedAccessToken = client
         .post_json_with_basic_auth(&url, &body, &username, &creds.password)
         .await?;
 

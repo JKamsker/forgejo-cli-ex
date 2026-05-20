@@ -140,7 +140,7 @@ pub struct RegistrationToken {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct AccessToken {
+pub struct CreatedAccessToken {
     pub id: i64,
     pub name: String,
     #[serde(rename = "sha1")]
@@ -149,6 +149,21 @@ pub struct AccessToken {
     pub token_last_eight: String,
     #[serde(default)]
     pub scopes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ListedAccessToken {
+    pub id: i64,
+    pub name: String,
+    #[serde(rename = "token_last_eight")]
+    pub token_last_eight: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct AuthenticatedUser {
+    pub login: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -185,7 +200,7 @@ mod tests {
     }
 
     #[test]
-    fn access_token_deserializes() {
+    fn created_access_token_deserializes() {
         let raw = r#"
 {
   "id": 1,
@@ -195,12 +210,32 @@ mod tests {
   "scopes": ["write:package"]
 }
 "#;
-        let tok: AccessToken = serde_json::from_str(raw).unwrap();
+        let tok: CreatedAccessToken = serde_json::from_str(raw).unwrap();
         assert_eq!(tok.id, 1);
         assert_eq!(tok.name, "fj-ex-nuget");
         assert_eq!(tok.token, "abc123");
         assert_eq!(tok.token_last_eight, "bc123");
         assert_eq!(tok.scopes, vec!["write:package"]);
+    }
+
+    #[test]
+    fn listed_access_token_deserializes() {
+        let raw = r#"
+[
+  {
+    "id": 1,
+    "name": "fj-ex-nuget",
+    "token_last_eight": "bc123",
+    "scopes": ["write:package"]
+  }
+]
+"#;
+        let toks: Vec<ListedAccessToken> = serde_json::from_str(raw).unwrap();
+        assert_eq!(toks.len(), 1);
+        assert_eq!(toks[0].id, 1);
+        assert_eq!(toks[0].name, "fj-ex-nuget");
+        assert_eq!(toks[0].token_last_eight, "bc123");
+        assert_eq!(toks[0].scopes, vec!["write:package"]);
     }
 
     #[test]

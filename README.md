@@ -23,6 +23,7 @@ fj-ex auth login --host forge.example.com
 
 # Mint a NuGet API key (requires `fj auth login` + `fj-ex auth login`)
 fj-ex token mint nuget --host forge.example.com --owner my-org
+fj-ex token list --host forge.example.com
 
 # List recent runs
 fj-ex actions runs --repo owner/name --latest
@@ -46,6 +47,7 @@ fj-ex actions runners jobs  --repo owner/name --waiting
 | Group | What it does |
 |---|---|
 | `auth` | Login, logout, status, list saved sessions |
+| `token` | Mint and list personal access tokens |
 | `actions runs` | List workflow runs (filter by status, workflow, latest) |
 | `actions jobs` | List jobs for a run, optionally `--watch` |
 | `actions logs` | Download logs for a job or full run |
