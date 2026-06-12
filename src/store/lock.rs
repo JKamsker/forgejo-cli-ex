@@ -13,7 +13,8 @@ use fs2::FileExt;
 use super::StorePaths;
 
 const REQUIRED_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
-const OPTIONAL_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
+// Cookie persistence is best-effort; polling commands should skip it if the store is busy.
+const OPTIONAL_LOCK_TIMEOUT: Duration = Duration::from_millis(0);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 
 static CREDS_STORE_PROCESS_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -61,6 +62,7 @@ pub(super) fn acquire_store_lock(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&lock_path)
         .wrap_err_with(|| format!("failed to open creds store lock '{}'", lock_path.display()))?;
 

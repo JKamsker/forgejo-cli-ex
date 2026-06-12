@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 use super::{
     creds::{
@@ -6,7 +6,7 @@ use super::{
         StoreEntry,
     },
     file::{read_creds_store_with_paths, update_creds_store},
-    lock::StoreLockMode,
+    lock::{acquire_store_lock, StoreLockMode},
     StorePaths,
 };
 
@@ -170,6 +170,86 @@ fn concurrent_cookie_saves_preserve_creds_and_valid_json() {
     assert_eq!(entry.username.as_deref(), Some("alice"));
     assert_eq!(entry.password.as_deref(), Some("secret"));
     assert!(entry.cookie_jar.is_some());
+}
+
+#[test]
+fn parallel_required_and_optional_updates_keep_store_valid_json() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = Arc::new(test_store_paths(temp.path()));
+    set_ui_creds_with_paths(&paths, "https://forge.example.com", "alice", "secret").unwrap();
+
+    let mut handles = Vec::new();
+
+    for index in 0..12 {
+        let paths = Arc::clone(&paths);
+        handles.push(std::thread::spawn(move || {
+            set_ui_creds_with_paths(
+                &paths,
+                "https://forge.example.com",
+                &format!("alice-{index}"),
+                "secret",
+            )
+            .unwrap();
+        }));
+    }
+
+    for index in 0..24 {
+        let paths = Arc::clone(&paths);
+        handles.push(std::thread::spawn(move || {
+            save_cookie_jar_with_paths(
+                &paths,
+                "https://forge.example.com",
+                test_cookie_jar(&format!("session-{index}")),
+            )
+            .unwrap();
+        }));
+    }
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let raw = std::fs::read_to_string(&paths.path).unwrap();
+    serde_json::from_str::<CredsStore>(&raw).unwrap();
+
+    let store = read_creds_store_with_paths(&paths).unwrap();
+    let entry = store.get("forge.example.com").unwrap();
+    assert!(entry
+        .username
+        .as_deref()
+        .unwrap_or_default()
+        .starts_with("alice"));
+    assert_eq!(entry.password.as_deref(), Some("secret"));
+}
+
+#[test]
+fn optional_cookie_save_does_not_wait_for_busy_store_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_store_paths(temp.path());
+    set_ui_creds_with_paths(&paths, "https://forge.example.com", "alice", "secret").unwrap();
+
+    let lock = acquire_store_lock(&paths, StoreLockMode::Required)
+        .unwrap()
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    save_cookie_jar_with_paths(
+        &paths,
+        "https://forge.example.com",
+        test_cookie_jar("session-a"),
+    )
+    .unwrap();
+
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "optional cookie save waited for a busy creds lock"
+    );
+
+    drop(lock);
+
+    let store = read_creds_store_with_paths(&paths).unwrap();
+    let entry = store.get("forge.example.com").unwrap();
+    assert!(entry.cookie_jar.is_none());
 }
 
 fn test_store_paths(dir: &Path) -> StorePaths {
