@@ -1201,84 +1201,32 @@ async fn wait_for_run_success(
     repo: &str,
     run_index: i64,
 ) -> Result<()> {
-    let start = Instant::now();
-    let timeout = Duration::from_secs(240);
-
-    loop {
-        if start.elapsed() > timeout {
-            return Err(eyre!("timeout waiting for run {run_index} to complete"));
-        }
-
-        let out = fj_ex_cmd(
-            bin,
-            appdata_dir,
-            &[
-                "actions",
-                "--host",
-                base_url,
-                "--repo",
-                repo,
-                "jobs",
-                "--run-index",
-                &run_index.to_string(),
-                "--json",
-            ],
-            None,
-        );
-        let out = match out {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("warn: failed to query jobs for run {run_index} (will retry): {e}");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-
-        let json: Value = match serde_json::from_str(&out.stdout) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("warn: failed to parse jobs json for run {run_index} (will retry): {e}");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-        let Some(jobs) = json["jobs"].as_array() else {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        };
-        if jobs.is_empty() {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        }
-
-        let statuses: Vec<String> = jobs
-            .iter()
-            .filter_map(|j| {
-                j.get("status")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-
-        if statuses.iter().any(|s| s.eq_ignore_ascii_case("failure")) {
-            return Err(eyre!("run {run_index} failed: statuses={statuses:?}"));
-        }
-
-        // Allow for some in-progress states while the runner picks it up.
-        let running = ["running", "queued", "pending", "waiting"];
-        if statuses
-            .iter()
-            .all(|s| !running.iter().any(|r| s.eq_ignore_ascii_case(r)))
-        {
-            // Terminal state reached; we expect success.
-            if statuses.iter().any(|s| s.eq_ignore_ascii_case("success")) {
-                return Ok(());
-            }
-            return Err(eyre!(
-                "run {run_index} ended in non-success terminal states: {statuses:?}"
-            ));
-        }
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    let out = fj_ex_cmd(
+        bin,
+        appdata_dir,
+        &[
+            "actions",
+            "--host",
+            base_url,
+            "--repo",
+            repo,
+            "wait",
+            "--run-index",
+            &run_index.to_string(),
+            "--timeout",
+            "240s",
+            "--json",
+        ],
+        None,
+    )?;
+    let json: Value =
+        serde_json::from_str(&out.stdout).wrap_err("failed to parse actions wait json output")?;
+    if json["status"].as_str() != Some("success") {
+        return Err(eyre!(
+            "run {run_index} ended with unexpected wait status: {}",
+            out.stdout
+        ));
     }
+
+    Ok(())
 }

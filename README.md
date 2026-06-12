@@ -28,6 +28,9 @@ fj-ex token list --host forge.example.com
 # List recent runs
 fj-ex actions runs --repo owner/name --latest
 
+# Wait for CI to finish, failing the command if the run fails
+fj-ex actions wait --repo owner/name --latest --workflow ci.yml --timeout 30m
+
 # Stream job logs to stdout
 fj-ex actions logs job --repo owner/name --latest --job-index 0
 
@@ -38,6 +41,9 @@ fj-ex actions rerun  --repo owner/name --latest --failed-only
 # Runner registration token + queued jobs (requires `fj auth login`)
 fj-ex actions runners token --repo owner/name
 fj-ex actions runners jobs  --repo owner/name --waiting
+
+# Dispatch a workflow and wait for the created run
+fj-ex actions trigger --repo owner/name --workflow ci.yml --ref main --wait --timeout 30m
 ```
 
 > `--host` can be omitted — `fj-ex` infers it from the current repo's git remotes, or falls back to `$FJ_FALLBACK_HOST`.
@@ -50,6 +56,7 @@ fj-ex actions runners jobs  --repo owner/name --waiting
 | `token` | Mint and list personal access tokens |
 | `actions runs` | List workflow runs (filter by status, workflow, latest) |
 | `actions jobs` | List jobs for a run, optionally `--watch` |
+| `actions wait` | Wait for a run or job to complete, with script-friendly exit codes |
 | `actions logs` | Download logs for a job or full run |
 | `actions artifacts` | List / download artifacts |
 | `actions cancel` | Cancel a running workflow |
