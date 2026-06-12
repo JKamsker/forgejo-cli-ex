@@ -92,6 +92,38 @@ fj-ex actions jobs --repo owner/name --latest
 fj-ex actions jobs --repo owner/name --latest --watch
 ```
 
+`--watch` is a display mode for the jobs listing: it refreshes the job table until the run is
+finished. For automation, prefer `actions wait`.
+
+---
+
+## actions wait
+
+Wait for a workflow run to reach a terminal state:
+
+```sh
+fj-ex actions wait --repo owner/name --run-index 50
+fj-ex actions wait --repo owner/name --latest --workflow ci.yml --timeout 30m
+fj-ex actions wait --repo owner/name --latest --workflow ci.yml --interval 5 --json
+```
+
+Wait for one job within a run:
+
+```sh
+fj-ex actions wait --repo owner/name --run-index 50 --job-index 0
+```
+
+Exit behavior:
+
+- Exits `0` when the selected run/job reaches a non-failing terminal state.
+- Exits nonzero when the selected run/job finishes as `failure`, `canceled`/`cancelled`, or `blocked`.
+- Exits nonzero when `--timeout` is reached.
+
+Timeouts accept plain seconds or a unit suffix: `30s`, `10m`, `1h`, `1d`.
+
+`actions wait` operates at run/job level. Forgejo step state is not currently exposed as a stable
+CLI target by `fj-ex`, so there is no step-level wait flag.
+
 ---
 
 ## actions logs
@@ -141,7 +173,12 @@ Dispatch a `workflow_dispatch` event:
 
 ```sh
 fj-ex actions trigger --repo owner/name --workflow ci.yml --ref main
+fj-ex actions trigger --repo owner/name --workflow ci.yml --ref main --wait --timeout 30m
 ```
+
+With `--wait`, `fj-ex` records the latest matching run before dispatch, polls for a newer run for
+the selected workflow, then waits for that run to finish. `--interval` controls polling frequency.
+The same failure and timeout exit behavior as `actions wait` applies.
 
 ---
 

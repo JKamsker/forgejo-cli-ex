@@ -298,6 +298,37 @@ pub enum ActionsSubcommand {
         #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// Wait for a run, or one job within a run, to complete.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
+    Wait {
+        #[arg(long, help = "Run index to wait for.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Wait for the latest run.")]
+        latest: bool,
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(long, help = "Wait for a specific job index within the run (0-based).")]
+        job_index: Option<u32>,
+        #[arg(
+            long,
+            default_value_t = 2,
+            value_parser = clap::value_parser!(u64).range(1..),
+            help = "Polling interval in seconds (minimum 1)."
+        )]
+        interval: u64,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            help = "Maximum time to wait (examples: 30s, 10m, 1h). Omit for no timeout."
+        )]
+        timeout: Option<String>,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
+    },
     /// Download and print logs.
     Logs {
         #[command(subcommand)]
@@ -326,6 +357,26 @@ pub enum ActionsSubcommand {
             help = "Print the request that would be made, but do not perform it."
         )]
         dry_run: bool,
+        #[arg(
+            long,
+            conflicts_with = "dry_run",
+            help = "Wait for the triggered run to complete."
+        )]
+        wait: bool,
+        #[arg(
+            long,
+            requires = "wait",
+            value_parser = clap::value_parser!(u64).range(1..),
+            help = "Polling interval in seconds for --wait (minimum 1; default: 2)."
+        )]
+        interval: Option<u64>,
+        #[arg(
+            long,
+            requires = "wait",
+            value_name = "DURATION",
+            help = "Maximum time to wait after dispatch (examples: 30s, 10m, 1h). Omit for no timeout."
+        )]
+        timeout: Option<String>,
         #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
