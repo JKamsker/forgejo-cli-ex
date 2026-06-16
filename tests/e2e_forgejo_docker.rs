@@ -15,11 +15,13 @@ const FORGEJO_IMAGE_11_0_10: &str = "codeberg.org/forgejo/forgejo:11.0.10";
 const FORGEJO_IMAGE_15_0_0: &str = "codeberg.org/forgejo/forgejo:15.0.0";
 const GITEA_IMAGE_1_25_3: &str = "gitea/gitea:1.25.3";
 const ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.3.0";
+const GITEA_ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.6.1";
 
 #[derive(Clone, Copy)]
 struct E2eTarget {
     image: &'static str,
     label: &'static str,
+    runner_image: &'static str,
     server_bin: &'static str,
     workflow_dir: &'static str,
     use_repo_scoped_runner: bool,
@@ -28,6 +30,7 @@ struct E2eTarget {
 const FORGEJO_11_0_10: E2eTarget = E2eTarget {
     image: FORGEJO_IMAGE_11_0_10,
     label: "forgejo-11-0-10",
+    runner_image: ACT_RUNNER_IMAGE,
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
     use_repo_scoped_runner: false,
@@ -36,6 +39,7 @@ const FORGEJO_11_0_10: E2eTarget = E2eTarget {
 const FORGEJO_14_0_2: E2eTarget = E2eTarget {
     image: FORGEJO_IMAGE,
     label: "forgejo-14-0-2",
+    runner_image: ACT_RUNNER_IMAGE,
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
     use_repo_scoped_runner: false,
@@ -44,6 +48,7 @@ const FORGEJO_14_0_2: E2eTarget = E2eTarget {
 const FORGEJO_15_0_0: E2eTarget = E2eTarget {
     image: FORGEJO_IMAGE_15_0_0,
     label: "forgejo-15-0-0",
+    runner_image: ACT_RUNNER_IMAGE,
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
     use_repo_scoped_runner: false,
@@ -52,6 +57,7 @@ const FORGEJO_15_0_0: E2eTarget = E2eTarget {
 const GITEA_1_25_3: E2eTarget = E2eTarget {
     image: GITEA_IMAGE_1_25_3,
     label: "gitea-1-25-3",
+    runner_image: GITEA_ACT_RUNNER_IMAGE,
     server_bin: "gitea",
     workflow_dir: ".gitea",
     use_repo_scoped_runner: true,
@@ -138,7 +144,13 @@ async fn run_e2e(target: E2eTarget) -> Result<()> {
 
     let runner_scope = target.use_repo_scoped_runner.then_some(repo.as_str());
     stack
-        .start_runner(&runner_data_dir, &base_url, target.server_bin, runner_scope)
+        .start_runner(
+            &runner_data_dir,
+            &base_url,
+            target.runner_image,
+            target.server_bin,
+            runner_scope,
+        )
         .await?;
 
     git_push_workflow(
@@ -694,6 +706,7 @@ impl DockerStack {
         &self,
         runner_data_dir: &Path,
         base_url: &str,
+        runner_image: &str,
         server_bin: &str,
         token_scope: Option<&str>,
     ) -> Result<()> {
@@ -746,7 +759,7 @@ impl DockerStack {
             "/var/run/docker.sock:/var/run/docker.sock",
             "-v",
             &format!("{}:/data", runner_data_dir.display()),
-            ACT_RUNNER_IMAGE,
+            runner_image,
         ])
         .wrap_err("failed to start act_runner container")?;
 
