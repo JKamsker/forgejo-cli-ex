@@ -196,10 +196,8 @@ async fn run_e2e(target: E2eTarget) -> Result<()> {
         "--raw",
     ])
     .wrap_err("failed to generate api token")?;
-    if fj_api_token.trim().is_empty() {
-        return Err(eyre!("api token was empty"));
-    }
-    write_fj_keys_json(&appdata_dir, &base_url, fj_api_token.trim())?;
+    let fj_api_token = token_from_command_output(&fj_api_token, "api token")?;
+    write_fj_keys_json(&appdata_dir, &base_url, &fj_api_token)?;
 
     let runner_token = match target.runner_token_source {
         RunnerTokenSource::ServerCliGlobal => stack.generate_runner_token(target.server_bin)?,
@@ -780,12 +778,7 @@ impl DockerStack {
 
         let runner_token =
             docker_stdout(&token_args).wrap_err("failed to generate runner token")?;
-        let runner_token = runner_token.trim();
-        if runner_token.is_empty() {
-            return Err(eyre!("runner token was empty"));
-        }
-
-        Ok(runner_token.to_string())
+        token_from_command_output(&runner_token, "runner token")
     }
 }
 
@@ -857,6 +850,16 @@ fn docker_status(args: &[&str]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn token_from_command_output(output: &str, token_name: &str) -> Result<String> {
+    let token = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.chars().any(char::is_whitespace))
+        .ok_or_else(|| eyre!("{token_name} output did not contain a token line"))?;
+    Ok(token.to_string())
 }
 
 async fn wait_for_http(base_url: &str, timeout: Duration) -> Result<()> {
