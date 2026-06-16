@@ -2,8 +2,8 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use super::{
     creds::{
-        save_cookie_jar_with_paths, set_ui_creds_with_paths, CookieJar, CookieRecord, CredsStore,
-        StoreEntry,
+        get_store_entry_with_paths, save_cookie_jar_with_paths, set_ui_creds_with_paths, CookieJar,
+        CookieRecord, CredsStore, StoreEntry,
     },
     file::{read_creds_store_with_paths, update_creds_store},
     lock::{acquire_store_lock, StoreLockMode},
@@ -223,6 +223,55 @@ fn parallel_required_and_optional_updates_keep_store_valid_json() {
 }
 
 #[test]
+fn path_base_url_uses_full_url_store_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_store_paths(temp.path());
+
+    set_ui_creds_with_paths(&paths, "https://apps.example.com/gitea", "alice", "secret").unwrap();
+
+    let store = read_creds_store_with_paths(&paths).unwrap();
+    let entry = store.get("https://apps.example.com/gitea").unwrap();
+    assert_eq!(
+        entry.base_url.as_deref(),
+        Some("https://apps.example.com/gitea")
+    );
+    assert_eq!(entry.username.as_deref(), Some("alice"));
+}
+
+#[test]
+fn path_base_url_can_find_legacy_entry_by_stored_base_url() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_store_paths(temp.path());
+    std::fs::create_dir_all(&paths.dir).unwrap();
+
+    let mut legacy_store = CredsStore::default();
+    legacy_store.insert(
+        "https://apps.example.com".to_string(),
+        StoreEntry {
+            base_url: Some("https://apps.example.com/gitea/".to_string()),
+            username: Some("alice".to_string()),
+            password: Some("secret".to_string()),
+            user_pass: Some("alice:secret".to_string()),
+            ..StoreEntry::default()
+        },
+    );
+    std::fs::write(
+        &paths.path,
+        serde_json::to_vec_pretty(&legacy_store).unwrap(),
+    )
+    .unwrap();
+
+    let info = get_store_entry_with_paths(&paths, "https://apps.example.com/gitea").unwrap();
+    let entry = info.entry.unwrap();
+    assert_eq!(
+        entry.base_url.as_deref(),
+        Some("https://apps.example.com/gitea/")
+    );
+    assert_eq!(entry.username.as_deref(), Some("alice"));
+    assert_eq!(entry.password.as_deref(), Some("secret"));
+}
+
+#[test]
 fn optional_cookie_save_does_not_wait_for_busy_store_lock() {
     let temp = tempfile::tempdir().unwrap();
     let paths = test_store_paths(temp.path());
@@ -250,6 +299,46 @@ fn optional_cookie_save_does_not_wait_for_busy_store_lock() {
     let store = read_creds_store_with_paths(&paths).unwrap();
     let entry = store.get("forge.example.com").unwrap();
     assert!(entry.cookie_jar.is_none());
+}
+
+#[test]
+fn path_base_url_login_migrates_legacy_entry_and_preserves_cookie() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_store_paths(temp.path());
+    std::fs::create_dir_all(&paths.dir).unwrap();
+
+    let mut legacy_store = CredsStore::default();
+    legacy_store.insert(
+        "https://apps.example.com".to_string(),
+        StoreEntry {
+            base_url: Some("https://apps.example.com/gitea/".to_string()),
+            username: Some("alice".to_string()),
+            password: Some("secret".to_string()),
+            user_pass: Some("alice:secret".to_string()),
+            cookie_jar: Some(test_cookie_jar("session-a")),
+            ..StoreEntry::default()
+        },
+    );
+    std::fs::write(
+        &paths.path,
+        serde_json::to_vec_pretty(&legacy_store).unwrap(),
+    )
+    .unwrap();
+
+    set_ui_creds_with_paths(
+        &paths,
+        "https://apps.example.com/gitea",
+        "alice",
+        "new-secret",
+    )
+    .unwrap();
+
+    let store = read_creds_store_with_paths(&paths).unwrap();
+    assert!(!store.contains_key("https://apps.example.com"));
+    let entry = store.get("https://apps.example.com/gitea").unwrap();
+    assert_eq!(entry.username.as_deref(), Some("alice"));
+    assert_eq!(entry.password.as_deref(), Some("new-secret"));
+    assert!(entry.cookie_jar.is_some());
 }
 
 fn test_store_paths(dir: &Path) -> StorePaths {

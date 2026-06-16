@@ -5,6 +5,7 @@ use eyre::{eyre, Context};
 use regex::Regex;
 use serde_json::Value;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
+use url::Url;
 
 use crate::{html, session::UiSession};
 
@@ -46,6 +47,53 @@ fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
         idx -= 1;
     }
     idx
+}
+
+fn repo_href_path(base_url: &str, repo_path: &str) -> String {
+    let repo_path = repo_path.trim_matches('/');
+    let Some(base_path) = Url::parse(base_url)
+        .ok()
+        .map(|url| url.path().trim_matches('/').to_string())
+        .filter(|path| !path.is_empty())
+    else {
+        return repo_path.to_string();
+    };
+
+    format!("{base_path}/{repo_path}")
+}
+
+fn repo_href_matches(repo_href: &str, repo_path: &str, base_url: &str) -> bool {
+    let repo_href = repo_href.trim_matches('/');
+    repo_href == repo_path || repo_href == repo_href_path(base_url, repo_path)
+}
+
+fn next_run_href_start(html: &str, start: usize, repo_path: &str, base_url: &str) -> Option<usize> {
+    RUN_HREF_RE
+        .captures_iter(&html[start..])
+        .filter_map(|caps| {
+            let m = caps.get(0)?;
+            let repo = caps.name("repo")?.as_str();
+            repo_href_matches(repo, repo_path, base_url).then_some(start + m.start())
+        })
+        .next()
+}
+
+fn absolute_url(base_url: &str, raw_url: &str) -> String {
+    if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+        return raw_url.to_string();
+    }
+
+    let base = format!("{}/", base_url.trim_end_matches('/'));
+    Url::parse(&base)
+        .and_then(|url| url.join(raw_url))
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| {
+            if raw_url.starts_with('/') {
+                format!("{}{}", base_url.trim_end_matches('/'), raw_url)
+            } else {
+                format!("{}/{}", base_url.trim_end_matches('/'), raw_url)
+            }
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -165,8 +213,6 @@ pub async fn list_runs(
     }
     let html_s = resp.text().await.wrap_err("failed to read response html")?;
 
-    let run_href_prefix = format!("href=\"/{repo_path}/actions/runs/");
-
     let mut seen = HashSet::new();
     let mut runs = Vec::new();
     for caps in RUN_HREF_RE.captures_iter(&html_s) {
@@ -174,7 +220,7 @@ pub async fn list_runs(
             .get(0)
             .ok_or_else(|| eyre!("run regex capture missing match"))?;
         let repo_m = caps.name("repo").map(|m| m.as_str()).unwrap_or_default();
-        if repo_m != repo_path {
+        if !repo_href_matches(repo_m, repo_path, session.base_url()) {
             continue;
         }
         let idx_s = caps.name("idx").map(|m| m.as_str()).unwrap_or_default();
@@ -201,9 +247,8 @@ pub async fn list_runs(
             &html_s,
             (m.end() + RUN_BLOCK_LOOKAHEAD_BYTES).min(html_s.len()),
         );
-        let after_end = html_s[m.end()..max_after_end]
-            .find(&run_href_prefix)
-            .map(|i| m.end() + i)
+        let after_end = next_run_href_start(&html_s, m.end(), repo_path, session.base_url())
+            .map(|idx| idx.min(max_after_end))
             .unwrap_or(max_after_end);
         let after = &html_s[m.end()..after_end];
 
@@ -277,18 +322,7 @@ pub async fn get_run_view_data(
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
 
-        let actions_base =
-            if actions_url.starts_with("http://") || actions_url.starts_with("https://") {
-                actions_url
-            } else if actions_url.starts_with('/') {
-                format!("{}{}", session.base_url(), actions_url)
-            } else {
-                format!(
-                    "{}/{}",
-                    session.base_url().trim_end_matches('/'),
-                    actions_url
-                )
-            };
+        let actions_base = absolute_url(session.base_url(), &actions_url);
         let job_url = format!("{actions_base}/runs/{effective_run_index}/jobs/{job_index}");
         let body = serde_json::json!({ "logCursors": [] });
 
@@ -532,6 +566,15 @@ pub async fn get_run_artifacts(
     );
 
     let resp = session.get_response(&url, true).await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        let run_view = get_run_view_data(session, repo, run_index)
+            .await
+            .wrap_err("failed to load run view while falling back after artifacts 404")?;
+        return Ok(run_view
+            .artifacts
+            .unwrap_or_else(|| serde_json::json!({ "artifacts": [] })));
+    }
+
     if resp.status() != reqwest::StatusCode::OK {
         return Err(eyre!(
             "Failed to fetch artifacts from '{}'. HTTP {}.",
@@ -569,4 +612,52 @@ pub async fn open_artifact(
         ));
     }
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_href_path_includes_base_url_path() {
+        assert_eq!(
+            repo_href_path("https://apps.example.com/gitea", "owner/repo"),
+            "gitea/owner/repo"
+        );
+        assert_eq!(
+            repo_href_path("https://apps.example.com", "owner/repo"),
+            "owner/repo"
+        );
+    }
+
+    #[test]
+    fn repo_href_matches_root_and_subpath_links() {
+        assert!(repo_href_matches(
+            "owner/repo",
+            "owner/repo",
+            "https://apps.example.com/gitea"
+        ));
+        assert!(repo_href_matches(
+            "gitea/owner/repo",
+            "owner/repo",
+            "https://apps.example.com/gitea"
+        ));
+        assert!(!repo_href_matches(
+            "other/owner/repo",
+            "owner/repo",
+            "https://apps.example.com/gitea"
+        ));
+    }
+
+    #[test]
+    fn absolute_url_resolves_root_relative_links_against_origin() {
+        assert_eq!(
+            absolute_url("https://apps.example.com/gitea", "/gitea/-/actions"),
+            "https://apps.example.com/gitea/-/actions"
+        );
+        assert_eq!(
+            absolute_url("https://apps.example.com/gitea", "-/actions"),
+            "https://apps.example.com/gitea/-/actions"
+        );
+    }
 }

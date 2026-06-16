@@ -13,27 +13,70 @@ use url::Url;
 const FORGEJO_IMAGE: &str = "codeberg.org/forgejo/forgejo:14.0.2";
 const FORGEJO_IMAGE_11_0_10: &str = "codeberg.org/forgejo/forgejo:11.0.10";
 const FORGEJO_IMAGE_15_0_0: &str = "codeberg.org/forgejo/forgejo:15.0.0";
+const GITEA_IMAGE_1_25_3: &str = "gitea/gitea:1.25.3";
 const ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.3.0";
+
+#[derive(Clone, Copy)]
+struct E2eTarget {
+    image: &'static str,
+    label: &'static str,
+    server_bin: &'static str,
+    workflow_dir: &'static str,
+}
+
+const FORGEJO_11_0_10: E2eTarget = E2eTarget {
+    image: FORGEJO_IMAGE_11_0_10,
+    label: "forgejo-11-0-10",
+    server_bin: "forgejo",
+    workflow_dir: ".forgejo",
+};
+
+const FORGEJO_14_0_2: E2eTarget = E2eTarget {
+    image: FORGEJO_IMAGE,
+    label: "forgejo-14-0-2",
+    server_bin: "forgejo",
+    workflow_dir: ".forgejo",
+};
+
+const FORGEJO_15_0_0: E2eTarget = E2eTarget {
+    image: FORGEJO_IMAGE_15_0_0,
+    label: "forgejo-15-0-0",
+    server_bin: "forgejo",
+    workflow_dir: ".forgejo",
+};
+
+const GITEA_1_25_3: E2eTarget = E2eTarget {
+    image: GITEA_IMAGE_1_25_3,
+    label: "gitea-1-25-3",
+    server_bin: "gitea",
+    workflow_dir: ".gitea",
+};
 
 #[tokio::test]
 #[ignore]
 async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
-    run_e2e(FORGEJO_IMAGE, "14-0-2").await
+    run_e2e(FORGEJO_14_0_2).await
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_forgejo_11_0_10_docker() -> Result<()> {
-    run_e2e(FORGEJO_IMAGE_11_0_10, "11-0-10").await
+    run_e2e(FORGEJO_11_0_10).await
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_forgejo_15_0_0_docker() -> Result<()> {
-    run_e2e(FORGEJO_IMAGE_15_0_0, "15-0-0").await
+    run_e2e(FORGEJO_15_0_0).await
 }
 
-async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
+#[tokio::test]
+#[ignore]
+async fn e2e_gitea_1_25_3_docker() -> Result<()> {
+    run_e2e(GITEA_1_25_3).await
+}
+
+async fn run_e2e(target: E2eTarget) -> Result<()> {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping e2e: requires Linux (uses Docker host networking for job containers)");
         return Ok(());
@@ -53,7 +96,7 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     let username = "e2e";
     let password = "e2e-password-1234";
     let email = "e2e@example.invalid";
-    let repo_name = format!("fj-ex-e2e-{version_label}-{http_port}");
+    let repo_name = format!("fj-ex-e2e-{}-{http_port}", target.label);
     let repo = format!("{username}/{repo_name}");
 
     let temp = tempfile::tempdir().wrap_err("failed to create temp dir")?;
@@ -70,8 +113,8 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     fs::create_dir_all(&logs_dir).wrap_err("failed to create logs dir")?;
     fs::create_dir_all(&smoke_dir).wrap_err("failed to create smoke dir")?;
 
-    let test_id = format!("{}-{version_label}-{http_port}", std::process::id());
-    let forgejo_name = format!("fj-ex-e2e-forgejo-{test_id}");
+    let test_id = format!("{}-{}-{http_port}", std::process::id(), target.label);
+    let forgejo_name = format!("fj-ex-e2e-server-{test_id}");
     let runner_name = format!("fj-ex-e2e-runner-{test_id}");
 
     let _stack = DockerStack::start(
@@ -79,7 +122,8 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
         &runner_name,
         &runner_data_dir,
         &base_url,
-        forgejo_image,
+        target.image,
+        target.server_bin,
         username,
         password,
         email,
@@ -87,7 +131,15 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     .await?;
 
     api_create_repo(&base_url, username, password, &repo_name).await?;
-    git_push_workflow(&repo_dir, &base_url, username, password, &repo_name).await?;
+    git_push_workflow(
+        &repo_dir,
+        &base_url,
+        username,
+        password,
+        &repo_name,
+        target.workflow_dir,
+    )
+    .await?;
 
     let fj_ex = fj_ex_bin()?;
 
@@ -124,7 +176,7 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
         "-u",
         "git",
         &forgejo_name,
-        "forgejo",
+        target.server_bin,
         "admin",
         "user",
         "generate-access-token",
@@ -563,6 +615,7 @@ impl DockerStack {
         runner_data_dir: &Path,
         base_url: &str,
         forgejo_image: &str,
+        server_bin: &str,
         username: &str,
         password: &str,
         email: &str,
@@ -607,7 +660,7 @@ impl DockerStack {
             "-u",
             "git",
             forgejo_name,
-            "forgejo",
+            server_bin,
             "admin",
             "user",
             "create",
@@ -627,7 +680,7 @@ impl DockerStack {
             "-u",
             "git",
             forgejo_name,
-            "forgejo",
+            server_bin,
             "actions",
             "generate-runner-token",
         ])
@@ -859,8 +912,9 @@ async fn git_push_workflow(
     username: &str,
     password: &str,
     repo_name: &str,
+    workflow_dir: &str,
 ) -> Result<()> {
-    let wf_dir = repo_dir.join(".forgejo").join("workflows");
+    let wf_dir = repo_dir.join(workflow_dir).join("workflows");
     fs::create_dir_all(&wf_dir).wrap_err("failed to create workflow dir")?;
     fs::write(
         wf_dir.join("e2e.yml"),

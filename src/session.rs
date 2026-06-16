@@ -320,7 +320,8 @@ impl UiSession {
 }
 
 fn is_logged_out_url(url: &Url) -> bool {
-    url.path().starts_with("/user/login")
+    let path = url.path().trim_end_matches('/');
+    path == "/user/login" || path.ends_with("/user/login")
 }
 
 fn load_cookie_jar_into_store(

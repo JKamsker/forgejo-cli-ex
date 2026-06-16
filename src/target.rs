@@ -139,23 +139,32 @@ pub fn normalize_base_url(host_or_url: &str) -> eyre::Result<String> {
 
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         let uri = Url::parse(trimmed).wrap_err("invalid base url")?;
-        let host = uri.host_str().ok_or_else(|| eyre!("url is missing host"))?;
-        let port = uri.port();
-        let port_part = port.map(|p| format!(":{p}")).unwrap_or_default();
-        return Ok(format!("{}://{}{}", uri.scheme(), host, port_part));
+        return normalized_http_base_url(&uri);
     }
 
     let no_frag = trimmed.split('#').next().unwrap_or(trimmed);
     let no_query = no_frag.split('?').next().unwrap_or(no_frag);
-    let host_part = no_query
-        .split('/')
-        .next()
-        .unwrap_or(no_query)
-        .trim_end_matches('/');
-    if host_part.is_empty() {
+    let host_or_base = no_query.trim_end_matches('/');
+    if host_or_base.is_empty() {
         return Err(eyre!("host is required"));
     }
-    Ok(format!("https://{host_part}"))
+
+    let uri = Url::parse(&format!("https://{host_or_base}")).wrap_err("invalid base url")?;
+    normalized_http_base_url(&uri)
+}
+
+fn normalized_http_base_url(uri: &Url) -> eyre::Result<String> {
+    let host = uri.host_str().ok_or_else(|| eyre!("url is missing host"))?;
+    let port = uri.port();
+    let port_part = port.map(|p| format!(":{p}")).unwrap_or_default();
+    let mut base = format!("{}://{}{}", uri.scheme(), host, port_part);
+
+    let path = uri.path().trim_end_matches('/');
+    if !path.is_empty() && path != "/" {
+        base.push_str(path);
+    }
+
+    Ok(base)
 }
 
 pub fn normalize_host_key(host_or_url: &str) -> eyre::Result<String> {
@@ -216,6 +225,7 @@ fn remote_url_to_host_and_repo(url_s: &str) -> eyre::Result<Option<(String, Repo
     let host = url
         .host_str()
         .ok_or_else(|| eyre!("remote url missing host"))?;
+    let port_part = url.port().map(|p| format!(":{p}")).unwrap_or_default();
 
     let mut segments = url
         .path_segments()
@@ -231,8 +241,18 @@ fn remote_url_to_host_and_repo(url_s: &str) -> eyre::Result<Option<(String, Repo
     let owner = segments.pop().unwrap();
     let name = name.strip_suffix(".git").unwrap_or(name);
 
+    let mut base = if matches!(url.scheme(), "http" | "https") {
+        format!("{}://{}{}", url.scheme(), host, port_part)
+    } else {
+        format!("{host}{port_part}")
+    };
+    if !segments.is_empty() {
+        base.push('/');
+        base.push_str(&segments.join("/"));
+    }
+
     Ok(Some((
-        host.to_string(),
+        base,
         RepoName {
             owner: owner.to_string(),
             name: name.to_string(),
@@ -276,7 +296,9 @@ fn select_remote_name(
 
                 if let Ok(parsed) = remote_url_to_host_and_repo(url_s) {
                     if let Some((host, _)) = parsed {
-                        if host == hint_key {
+                        if crate::target::normalize_host_key(&host)
+                            .is_ok_and(|remote_key| remote_key == hint_key)
+                        {
                             return Ok(Some((*remote_name).to_string()));
                         }
                     }
@@ -425,10 +447,18 @@ mod tests {
     }
 
     #[test]
-    fn normalize_base_url_strips_path() {
+    fn normalize_base_url_preserves_path_prefix() {
         assert_eq!(
-            normalize_base_url("https://forge.example.com:3000/some/path").unwrap(),
-            "https://forge.example.com:3000"
+            normalize_base_url("https://forge.example.com:3000/gitea/").unwrap(),
+            "https://forge.example.com:3000/gitea"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_accepts_bare_host_with_path() {
+        assert_eq!(
+            normalize_base_url("forge.example.com:3000/gitea").unwrap(),
+            "https://forge.example.com:3000/gitea"
         );
     }
 
@@ -462,7 +492,17 @@ mod tests {
             remote_url_to_host_and_repo("https://forge.example.com/alice/widgets.git")
                 .unwrap()
                 .unwrap();
-        assert_eq!(host, "forge.example.com");
+        assert_eq!(host, "https://forge.example.com");
+        assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
+    }
+
+    #[test]
+    fn remote_url_parses_https_with_base_path() {
+        let (host, repo) =
+            remote_url_to_host_and_repo("https://forge.example.com/gitea/alice/widgets.git")
+                .unwrap()
+                .unwrap();
+        assert_eq!(host, "https://forge.example.com/gitea");
         assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
     }
 

@@ -40,17 +40,19 @@ jobs:
 
   e2e:
     needs: test
-    name: e2e (Forgejo ${{ matrix.forgejo_version }})
+    name: e2e (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - forgejo_version: "11.0.10"
+          - target: "Forgejo 11.0.10"
             test_name: "e2e_forgejo_11_0_10_docker"
-          - forgejo_version: "14.0.2"
+          - target: "Forgejo 14.0.2"
             test_name: "e2e_forgejo_14_0_2_docker"
-          - forgejo_version: "15.0.0"
+          - target: "Forgejo 15.0.0"
             test_name: "e2e_forgejo_15_0_0_docker"
+          - target: "Gitea 1.25.3"
+            test_name: "e2e_gitea_1_25_3_docker"
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -60,7 +62,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run ignored e2e tests (Docker + Forgejo)
+      - name: Run ignored e2e tests (Docker)
         env:
           FJ_EX_E2E: "1"
         run: cargo test --locked --test e2e_forgejo_docker ${{ matrix.test_name }} -- --ignored --nocapture --test-threads=1
