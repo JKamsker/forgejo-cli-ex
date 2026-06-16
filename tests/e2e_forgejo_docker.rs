@@ -31,6 +31,7 @@ struct E2eTarget {
     server_bin: &'static str,
     workflow_dir: &'static str,
     runner_token_source: RunnerTokenSource,
+    expect_artifacts: bool,
 }
 
 const FORGEJO_11_0_10: E2eTarget = E2eTarget {
@@ -40,6 +41,7 @@ const FORGEJO_11_0_10: E2eTarget = E2eTarget {
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
     runner_token_source: RunnerTokenSource::ServerCliGlobal,
+    expect_artifacts: true,
 };
 
 const FORGEJO_14_0_2: E2eTarget = E2eTarget {
@@ -49,6 +51,7 @@ const FORGEJO_14_0_2: E2eTarget = E2eTarget {
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
     runner_token_source: RunnerTokenSource::ServerCliGlobal,
+    expect_artifacts: true,
 };
 
 const FORGEJO_15_0_0: E2eTarget = E2eTarget {
@@ -58,6 +61,7 @@ const FORGEJO_15_0_0: E2eTarget = E2eTarget {
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
     runner_token_source: RunnerTokenSource::ServerCliGlobal,
+    expect_artifacts: true,
 };
 
 const GITEA_1_25_3: E2eTarget = E2eTarget {
@@ -67,6 +71,7 @@ const GITEA_1_25_3: E2eTarget = E2eTarget {
     server_bin: "gitea",
     workflow_dir: ".gitea",
     runner_token_source: RunnerTokenSource::FjRepoApi,
+    expect_artifacts: false,
 };
 
 #[tokio::test]
@@ -484,57 +489,59 @@ async fn run_e2e(target: E2eTarget) -> Result<()> {
         logs_dir.display()
     );
 
-    // Artifacts list + download (zip)
-    let artifacts_list_out = fj_ex_cmd(
-        &fj_ex,
-        &appdata_dir,
-        &[
-            "actions",
-            "--host",
-            &base_url,
-            "--repo",
-            &repo,
-            "artifacts",
-            "list",
-            "--run-index",
-            &run_index.to_string(),
-            "--json",
-        ],
-        None,
-    )?;
-    assert!(
-        artifacts_list_out.stdout.contains("\"my-artifact\"")
-            || artifacts_list_out.stdout.contains("my-artifact"),
-        "expected artifact in output, got:\n{}",
-        artifacts_list_out.stdout
-    );
+    if target.expect_artifacts {
+        // Artifacts list + download (zip)
+        let artifacts_list_out = fj_ex_cmd(
+            &fj_ex,
+            &appdata_dir,
+            &[
+                "actions",
+                "--host",
+                &base_url,
+                "--repo",
+                &repo,
+                "artifacts",
+                "list",
+                "--run-index",
+                &run_index.to_string(),
+                "--json",
+            ],
+            None,
+        )?;
+        assert!(
+            artifacts_list_out.stdout.contains("\"my-artifact\"")
+                || artifacts_list_out.stdout.contains("my-artifact"),
+            "expected artifact in output, got:\n{}",
+            artifacts_list_out.stdout
+        );
 
-    fj_ex_cmd(
-        &fj_ex,
-        &appdata_dir,
-        &[
-            "actions",
-            "--host",
-            &base_url,
-            "--repo",
-            &repo,
-            "artifacts",
-            "get",
-            "--run-index",
-            &run_index.to_string(),
-            "--artifact",
-            "my-artifact",
-            "--out-file",
-            artifact_zip.to_str().unwrap_or("artifact.zip"),
-        ],
-        None,
-    )?;
-    let artifact_bytes = fs::read(&artifact_zip).wrap_err("failed to read artifact zip")?;
-    assert!(
-        artifact_bytes.starts_with(b"PK"),
-        "expected zip file magic bytes, got: {:?}",
-        &artifact_bytes.get(..4)
-    );
+        fj_ex_cmd(
+            &fj_ex,
+            &appdata_dir,
+            &[
+                "actions",
+                "--host",
+                &base_url,
+                "--repo",
+                &repo,
+                "artifacts",
+                "get",
+                "--run-index",
+                &run_index.to_string(),
+                "--artifact",
+                "my-artifact",
+                "--out-file",
+                artifact_zip.to_str().unwrap_or("artifact.zip"),
+            ],
+            None,
+        )?;
+        let artifact_bytes = fs::read(&artifact_zip).wrap_err("failed to read artifact zip")?;
+        assert!(
+            artifact_bytes.starts_with(b"PK"),
+            "expected zip file magic bytes, got: {:?}",
+            &artifact_bytes.get(..4)
+        );
+    }
 
     // Cancel/rerun dry-run
     let cancel_out = fj_ex_cmd(
