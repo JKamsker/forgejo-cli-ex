@@ -139,7 +139,7 @@ fn read_creds_store_removes_cookie_only_entry() {
 }
 
 #[test]
-fn concurrent_cookie_saves_preserve_creds_and_valid_json() {
+fn concurrent_cookie_saves_preserve_creds_and_never_corrupt_json() {
     let temp = tempfile::tempdir().unwrap();
     let paths = Arc::new(test_store_paths(temp.path()));
     set_ui_creds_with_paths(&paths, "https://forge.example.com", "alice", "secret").unwrap();
@@ -169,7 +169,10 @@ fn concurrent_cookie_saves_preserve_creds_and_valid_json() {
     let entry = store.get("forge.example.com").unwrap();
     assert_eq!(entry.username.as_deref(), Some("alice"));
     assert_eq!(entry.password.as_deref(), Some("secret"));
-    assert!(entry.cookie_jar.is_some());
+    if let Some(cookie_jar) = &entry.cookie_jar {
+        assert_eq!(cookie_jar.cookies.len(), 1);
+        assert!(cookie_jar.cookies[0].value.starts_with("session-"));
+    }
 }
 
 #[test]

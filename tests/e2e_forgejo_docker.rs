@@ -18,13 +18,19 @@ const ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.3.0";
 const GITEA_ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.6.1";
 
 #[derive(Clone, Copy)]
+enum RunnerTokenSource {
+    ServerCliGlobal,
+    FjRepoApi,
+}
+
+#[derive(Clone, Copy)]
 struct E2eTarget {
     image: &'static str,
     label: &'static str,
     runner_image: &'static str,
     server_bin: &'static str,
     workflow_dir: &'static str,
-    use_repo_scoped_runner: bool,
+    runner_token_source: RunnerTokenSource,
 }
 
 const FORGEJO_11_0_10: E2eTarget = E2eTarget {
@@ -33,7 +39,7 @@ const FORGEJO_11_0_10: E2eTarget = E2eTarget {
     runner_image: ACT_RUNNER_IMAGE,
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
-    use_repo_scoped_runner: false,
+    runner_token_source: RunnerTokenSource::ServerCliGlobal,
 };
 
 const FORGEJO_14_0_2: E2eTarget = E2eTarget {
@@ -42,7 +48,7 @@ const FORGEJO_14_0_2: E2eTarget = E2eTarget {
     runner_image: ACT_RUNNER_IMAGE,
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
-    use_repo_scoped_runner: false,
+    runner_token_source: RunnerTokenSource::ServerCliGlobal,
 };
 
 const FORGEJO_15_0_0: E2eTarget = E2eTarget {
@@ -51,7 +57,7 @@ const FORGEJO_15_0_0: E2eTarget = E2eTarget {
     runner_image: ACT_RUNNER_IMAGE,
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
-    use_repo_scoped_runner: false,
+    runner_token_source: RunnerTokenSource::ServerCliGlobal,
 };
 
 const GITEA_1_25_3: E2eTarget = E2eTarget {
@@ -60,7 +66,7 @@ const GITEA_1_25_3: E2eTarget = E2eTarget {
     runner_image: GITEA_ACT_RUNNER_IMAGE,
     server_bin: "gitea",
     workflow_dir: ".gitea",
-    use_repo_scoped_runner: true,
+    runner_token_source: RunnerTokenSource::FjRepoApi,
 };
 
 #[tokio::test]
@@ -142,27 +148,6 @@ async fn run_e2e(target: E2eTarget) -> Result<()> {
 
     api_create_repo(&base_url, username, password, &repo_name).await?;
 
-    let runner_scope = target.use_repo_scoped_runner.then_some(repo.as_str());
-    stack
-        .start_runner(
-            &runner_data_dir,
-            &base_url,
-            target.runner_image,
-            target.server_bin,
-            runner_scope,
-        )
-        .await?;
-
-    git_push_workflow(
-        &repo_dir,
-        &base_url,
-        username,
-        password,
-        &repo_name,
-        target.workflow_dir,
-    )
-    .await?;
-
     let fj_ex = fj_ex_bin()?;
 
     // Runners (REST API) requires `fj`'s stored API token. Ensure missing-token UX is clear.
@@ -215,6 +200,31 @@ async fn run_e2e(target: E2eTarget) -> Result<()> {
         return Err(eyre!("api token was empty"));
     }
     write_fj_keys_json(&appdata_dir, &base_url, fj_api_token.trim())?;
+
+    let runner_token = match target.runner_token_source {
+        RunnerTokenSource::ServerCliGlobal => stack.generate_runner_token(target.server_bin)?,
+        RunnerTokenSource::FjRepoApi => {
+            repo_runner_token_via_fj(&fj_ex, &appdata_dir, &base_url, &repo)?
+        }
+    };
+    stack
+        .start_runner(
+            &runner_data_dir,
+            &base_url,
+            target.runner_image,
+            &runner_token,
+        )
+        .await?;
+
+    git_push_workflow(
+        &repo_dir,
+        &base_url,
+        username,
+        password,
+        &repo_name,
+        target.workflow_dir,
+    )
+    .await?;
 
     // Login (non-interactive)
     fj_ex_cmd(
@@ -707,29 +717,16 @@ impl DockerStack {
         runner_data_dir: &Path,
         base_url: &str,
         runner_image: &str,
-        server_bin: &str,
-        token_scope: Option<&str>,
+        runner_token: &str,
     ) -> Result<()> {
-        let mut token_args = vec![
-            "exec",
-            "-u",
-            "git",
-            self.forgejo_name.as_str(),
-            server_bin,
-            "actions",
-            "generate-runner-token",
-        ];
-        if let Some(scope) = token_scope {
-            token_args.push("--scope");
-            token_args.push(scope);
-        }
-
-        let runner_token =
-            docker_stdout(&token_args).wrap_err("failed to generate runner token")?;
         let runner_token = runner_token.trim();
         if runner_token.is_empty() {
             return Err(eyre!("runner token was empty"));
         }
+
+        let runner_token_path = runner_data_dir.join("registration-token");
+        fs::write(&runner_token_path, runner_token)
+            .wrap_err("failed to write runner token file")?;
 
         let runner_config_path = runner_data_dir.join("config.yml");
         fs::write(
@@ -748,7 +745,7 @@ impl DockerStack {
             "-e",
             &format!("GITEA_INSTANCE_URL={base_url}"),
             "-e",
-            &format!("GITEA_RUNNER_REGISTRATION_TOKEN={runner_token}"),
+            "GITEA_RUNNER_REGISTRATION_TOKEN_FILE=/data/registration-token",
             "-e",
             &format!("GITEA_RUNNER_NAME={}", self.runner_name),
             "-e",
@@ -768,6 +765,27 @@ impl DockerStack {
             .wrap_err("runner did not register")?;
 
         Ok(())
+    }
+
+    fn generate_runner_token(&self, server_bin: &str) -> Result<String> {
+        let token_args = [
+            "exec",
+            "-u",
+            "git",
+            self.forgejo_name.as_str(),
+            server_bin,
+            "actions",
+            "generate-runner-token",
+        ];
+
+        let runner_token =
+            docker_stdout(&token_args).wrap_err("failed to generate runner token")?;
+        let runner_token = runner_token.trim();
+        if runner_token.is_empty() {
+            return Err(eyre!("runner token was empty"));
+        }
+
+        Ok(runner_token.to_string())
     }
 }
 
@@ -1129,6 +1147,32 @@ fn fj_ex_cmd(
     stdin: Option<Vec<u8>>,
 ) -> Result<FjOut> {
     fj_ex_cmd_with_expectation(bin, appdata_dir, args, stdin, true)
+}
+
+fn repo_runner_token_via_fj(
+    bin: &Path,
+    appdata_dir: &Path,
+    base_url: &str,
+    repo: &str,
+) -> Result<String> {
+    let out = fj_ex_cmd(
+        bin,
+        appdata_dir,
+        &[
+            "actions", "--host", base_url, "--repo", repo, "runners", "token", "--json",
+        ],
+        None,
+    )?;
+    let json: Value =
+        serde_json::from_str(&out.stdout).wrap_err("failed to parse runner token json")?;
+    let token = json["token"]
+        .as_str()
+        .ok_or_else(|| eyre!("runner token json was missing token"))?
+        .trim();
+    if token.is_empty() {
+        return Err(eyre!("runner token json contained an empty token"));
+    }
+    Ok(token.to_string())
 }
 
 fn fj_ex_cmd_expect_failure(
