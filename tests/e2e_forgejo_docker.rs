@@ -22,6 +22,7 @@ struct E2eTarget {
     label: &'static str,
     server_bin: &'static str,
     workflow_dir: &'static str,
+    use_repo_scoped_runner: bool,
 }
 
 const FORGEJO_11_0_10: E2eTarget = E2eTarget {
@@ -29,6 +30,7 @@ const FORGEJO_11_0_10: E2eTarget = E2eTarget {
     label: "forgejo-11-0-10",
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
+    use_repo_scoped_runner: false,
 };
 
 const FORGEJO_14_0_2: E2eTarget = E2eTarget {
@@ -36,6 +38,7 @@ const FORGEJO_14_0_2: E2eTarget = E2eTarget {
     label: "forgejo-14-0-2",
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
+    use_repo_scoped_runner: false,
 };
 
 const FORGEJO_15_0_0: E2eTarget = E2eTarget {
@@ -43,6 +46,7 @@ const FORGEJO_15_0_0: E2eTarget = E2eTarget {
     label: "forgejo-15-0-0",
     server_bin: "forgejo",
     workflow_dir: ".forgejo",
+    use_repo_scoped_runner: false,
 };
 
 const GITEA_1_25_3: E2eTarget = E2eTarget {
@@ -50,6 +54,7 @@ const GITEA_1_25_3: E2eTarget = E2eTarget {
     label: "gitea-1-25-3",
     server_bin: "gitea",
     workflow_dir: ".gitea",
+    use_repo_scoped_runner: true,
 };
 
 #[tokio::test]
@@ -117,10 +122,9 @@ async fn run_e2e(target: E2eTarget) -> Result<()> {
     let forgejo_name = format!("fj-ex-e2e-server-{test_id}");
     let runner_name = format!("fj-ex-e2e-runner-{test_id}");
 
-    let _stack = DockerStack::start(
+    let stack = DockerStack::start(
         &forgejo_name,
         &runner_name,
-        &runner_data_dir,
         &base_url,
         target.image,
         target.server_bin,
@@ -131,6 +135,12 @@ async fn run_e2e(target: E2eTarget) -> Result<()> {
     .await?;
 
     api_create_repo(&base_url, username, password, &repo_name).await?;
+
+    let runner_scope = target.use_repo_scoped_runner.then_some(repo.as_str());
+    stack
+        .start_runner(&runner_data_dir, &base_url, target.server_bin, runner_scope)
+        .await?;
+
     git_push_workflow(
         &repo_dir,
         &base_url,
@@ -612,7 +622,6 @@ impl DockerStack {
     async fn start(
         forgejo_name: &str,
         runner_name: &str,
-        runner_data_dir: &Path,
         base_url: &str,
         forgejo_image: &str,
         server_bin: &str,
@@ -675,16 +684,35 @@ impl DockerStack {
         ])
         .wrap_err("failed to create forgejo admin user")?;
 
-        let runner_token = docker_stdout(&[
+        Ok(Self {
+            forgejo_name: forgejo_name.to_string(),
+            runner_name: runner_name.to_string(),
+        })
+    }
+
+    async fn start_runner(
+        &self,
+        runner_data_dir: &Path,
+        base_url: &str,
+        server_bin: &str,
+        token_scope: Option<&str>,
+    ) -> Result<()> {
+        let mut token_args = vec![
             "exec",
             "-u",
             "git",
-            forgejo_name,
+            self.forgejo_name.as_str(),
             server_bin,
             "actions",
             "generate-runner-token",
-        ])
-        .wrap_err("failed to generate runner token")?;
+        ];
+        if let Some(scope) = token_scope {
+            token_args.push("--scope");
+            token_args.push(scope);
+        }
+
+        let runner_token =
+            docker_stdout(&token_args).wrap_err("failed to generate runner token")?;
         let runner_token = runner_token.trim();
         if runner_token.is_empty() {
             return Err(eyre!("runner token was empty"));
@@ -701,7 +729,7 @@ impl DockerStack {
             "run",
             "-d",
             "--name",
-            runner_name,
+            self.runner_name.as_str(),
             "--network",
             "host",
             "-e",
@@ -709,7 +737,7 @@ impl DockerStack {
             "-e",
             &format!("GITEA_RUNNER_REGISTRATION_TOKEN={runner_token}"),
             "-e",
-            &format!("GITEA_RUNNER_NAME={runner_name}"),
+            &format!("GITEA_RUNNER_NAME={}", self.runner_name),
             "-e",
             "GITEA_RUNNER_LABELS=ubuntu-latest:docker://node:20-bookworm",
             "-e",
@@ -722,14 +750,11 @@ impl DockerStack {
         ])
         .wrap_err("failed to start act_runner container")?;
 
-        wait_for_runner(runner_name, Duration::from_secs(90))
+        wait_for_runner(&self.runner_name, Duration::from_secs(90))
             .await
             .wrap_err("runner did not register")?;
 
-        Ok(Self {
-            forgejo_name: forgejo_name.to_string(),
-            runner_name: runner_name.to_string(),
-        })
+        Ok(())
     }
 }
 
