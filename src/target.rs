@@ -167,6 +167,13 @@ fn normalized_http_base_url(uri: &Url) -> eyre::Result<String> {
     Ok(base)
 }
 
+pub(crate) fn normalized_base_url_has_path(normalized: &str) -> bool {
+    url::Url::parse(normalized).is_ok_and(|url| {
+        let path = url.path().trim_end_matches('/');
+        !path.is_empty() && path != "/"
+    })
+}
+
 pub fn normalize_host_key(host_or_url: &str) -> eyre::Result<String> {
     let trimmed = host_or_url.trim();
     if trimmed.is_empty() {
@@ -260,6 +267,40 @@ fn remote_url_to_host_and_repo(url_s: &str) -> eyre::Result<Option<(String, Repo
     )))
 }
 
+fn remote_host_matches_hint(remote_host: &str, host_hint: &str) -> bool {
+    if let Ok(hint_base) = normalize_base_url(host_hint) {
+        if normalized_base_url_has_path(&hint_base) {
+            return normalize_base_url(remote_host)
+                .is_ok_and(|remote_base| remote_base == hint_base);
+        }
+    }
+
+    normalize_host_key(remote_host).is_ok_and(|remote_key| {
+        normalize_host_key(host_hint).is_ok_and(|hint_key| remote_key == hint_key)
+    })
+}
+
+fn select_remote_by_host_hint(
+    repo: &git2::Repository,
+    remote_names: &[&str],
+    host_hint: &str,
+) -> eyre::Result<Option<String>> {
+    for remote_name in remote_names {
+        let remote = repo.find_remote(remote_name)?;
+        let Some(url_s) = remote.url() else {
+            continue;
+        };
+
+        if let Some((host, _)) = remote_url_to_host_and_repo(url_s)? {
+            if remote_host_matches_hint(&host, host_hint) {
+                return Ok(Some((*remote_name).to_string()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 fn select_remote_name(
     repo: &git2::Repository,
     preferred: Option<&str>,
@@ -276,6 +317,12 @@ fn select_remote_name(
         return Ok(Some(remote_names[0].to_string()));
     }
 
+    if let Some(host_hint) = host_hint {
+        if let Some(remote_name) = select_remote_by_host_hint(repo, &remote_names, host_hint)? {
+            return Ok(Some(remote_name));
+        }
+    }
+
     if let Ok(head) = repo.head() {
         if let Some(branch_name) = head.name() {
             if let Ok(remote_name) = repo.branch_upstream_remote(branch_name) {
@@ -286,28 +333,7 @@ fn select_remote_name(
         }
     }
 
-    if let Some(host_hint) = host_hint {
-        if let Ok(hint_key) = normalize_host_key(host_hint) {
-            for remote_name in &remote_names {
-                let remote = repo.find_remote(remote_name)?;
-                let Some(url_s) = remote.url() else {
-                    continue;
-                };
-
-                if let Ok(parsed) = remote_url_to_host_and_repo(url_s) {
-                    if let Some((host, _)) = parsed {
-                        if crate::target::normalize_host_key(&host)
-                            .is_ok_and(|remote_key| remote_key == hint_key)
-                        {
-                            return Ok(Some((*remote_name).to_string()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if remote_names.iter().any(|n| *n == "origin") {
+    if remote_names.contains(&"origin") {
         return Ok(Some("origin".to_string()));
     }
 
@@ -513,6 +539,21 @@ mod tests {
             .unwrap();
         assert_eq!(host, "forge.example.com");
         assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
+    }
+
+    #[test]
+    fn select_remote_name_preserves_host_hint_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        repo.remote("aaa", "https://forge.example.com/other/bob/wrong.git")
+            .unwrap();
+        repo.remote("zzz", "https://forge.example.com/gitea/alice/widgets.git")
+            .unwrap();
+
+        let selected =
+            select_remote_name(&repo, None, Some("https://forge.example.com/gitea")).unwrap();
+
+        assert_eq!(selected.as_deref(), Some("zzz"));
     }
 
     #[test]

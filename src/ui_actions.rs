@@ -23,7 +23,7 @@ static RUN_HREF_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static STATUS_TOOLTIP_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r#"data-tooltip-content="(?P<status>Success|Failure|Running|Waiting|Canceled|Cancelled|Skipped|Blocked)""#,
+        r#"data-tooltip-content="(?P<status>Success|Failure|Running|Waiting|Cancelling|Canceled|Cancelled|Skipped|Blocked)""#,
     )
     .expect("STATUS_TOOLTIP_RE regex must be valid")
 });

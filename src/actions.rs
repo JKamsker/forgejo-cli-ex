@@ -13,6 +13,9 @@ use crate::cli::{
 
 static SAFE_FILENAME_COMPONENT_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r#"[^a-zA-Z0-9._-]+"#).expect("valid regex"));
+const IN_PROGRESS_JOB_STATUSES: &[&str] =
+    &["running", "queued", "pending", "waiting", "cancelling"];
+const FAILING_JOB_STATUSES: &[&str] = &["failure", "canceled", "cancelled", "blocked"];
 
 #[derive(Debug)]
 struct WaitResult {
@@ -82,8 +85,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 None
             };
 
+            let wait_workflow_filter = workflow_filter_for_wait(workflow);
             let previous_latest_run = if let Some(session) = wait_session.as_ref() {
-                latest_run_index_optional(session, &repo, Some(workflow)).await?
+                latest_run_index_optional(session, &repo, wait_workflow_filter).await?
             } else {
                 None
             };
@@ -197,7 +201,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 let run_index = wait_for_new_run_index(
                     session,
                     &repo,
-                    Some(workflow),
+                    wait_workflow_filter,
                     previous_latest_run,
                     wait_interval,
                     wait_timeout,
@@ -1058,12 +1062,9 @@ fn is_wait_target_done(jobs: &[crate::ui_actions::JobInfo], job_index: Option<i6
 }
 
 fn is_job_done(job: &crate::ui_actions::JobInfo) -> bool {
-    let in_progress = ["running", "queued", "pending", "waiting"];
-    job.status.as_deref().is_some_and(|status| {
-        !in_progress
-            .iter()
-            .any(|in_progress| status.eq_ignore_ascii_case(in_progress))
-    })
+    job.status
+        .as_deref()
+        .is_some_and(|status| !is_in_progress_status(status))
 }
 
 fn wait_target_status(jobs: &[crate::ui_actions::JobInfo], job_index: Option<i64>) -> String {
@@ -1075,15 +1076,11 @@ fn wait_target_status(jobs: &[crate::ui_actions::JobInfo], job_index: Option<i64
             .unwrap_or_else(|| "missing".to_string());
     }
 
-    let failing = ["failure", "canceled", "cancelled", "blocked"];
     for job in jobs {
         let Some(status) = job.status.as_deref() else {
             return "unknown".to_string();
         };
-        if failing
-            .iter()
-            .any(|failing| status.eq_ignore_ascii_case(failing))
-        {
+        if is_failing_status(status) {
             return normalize_run_status(status);
         }
     }
@@ -1105,12 +1102,7 @@ fn wait_terminal_error(
             return Some(eyre!("run {run_index} completed without job {job_index}"));
         };
 
-        let failing = ["failure", "canceled", "cancelled", "blocked"];
-        if job.status.as_deref().is_some_and(|status| {
-            failing
-                .iter()
-                .any(|failing| status.eq_ignore_ascii_case(failing))
-        }) {
+        if job.status.as_deref().is_some_and(is_failing_status) {
             let status = job.status.as_deref().unwrap_or("unknown");
             return Some(eyre!(
                 "run {run_index} job {job_index} finished with status {status}"
@@ -1328,13 +1320,21 @@ fn resolve_runner_scope(
 }
 
 pub(crate) fn fj_missing_api_token_error(base_url: &str) -> eyre::Report {
-    let host_key = crate::target::normalize_host_key(base_url).unwrap_or_else(|_| base_url.into());
+    let token_key = crate::target::normalize_base_url(base_url)
+        .map(|normalized| {
+            if crate::target::normalized_base_url_has_path(&normalized) {
+                normalized
+            } else {
+                crate::target::normalize_host_key(&normalized).unwrap_or(normalized)
+            }
+        })
+        .unwrap_or_else(|_| base_url.into());
     let path = crate::store::keys_store_paths()
         .map(|p| p.path.display().to_string())
         .unwrap_or_else(|_| "%APPDATA%/Cyborus/forgejo-cli/data/keys.json".to_string());
 
     eyre!(
-        "No Forgejo API token found for host '{host_key}'. Authenticate via `fj`:\n  fj --host {host_key} auth login\n  fj --host {host_key} auth add-key <USER>  # reads token from stdin if omitted\nToken store:\n  %APPDATA%/Cyborus/forgejo-cli/data/keys.json (Windows)\n  ~/.local/share/Cyborus/forgejo-cli/data/keys.json (Linux)\nReading: {path}"
+        "No Forgejo API token found for host '{token_key}'. Authenticate via `fj`:\n  fj --host {token_key} auth login\n  fj --host {token_key} auth add-key <USER>  # reads token from stdin if omitted\nToken store:\n  %APPDATA%/Cyborus/forgejo-cli/data/keys.json (Windows)\n  ~/.local/share/Cyborus/forgejo-cli/data/keys.json (Linux)\nReading: {path}"
     )
 }
 
@@ -1613,7 +1613,14 @@ fn parse_duration(raw: &str) -> eyre::Result<Duration> {
 fn normalize_run_status_filter(raw: &str) -> eyre::Result<String> {
     let normalized = normalize_run_status(raw);
     let allowed = [
-        "success", "failure", "running", "waiting", "canceled", "skipped", "blocked",
+        "success",
+        "failure",
+        "running",
+        "waiting",
+        "cancelling",
+        "canceled",
+        "skipped",
+        "blocked",
     ];
     if !allowed.contains(&normalized.as_str()) {
         return Err(eyre!(
@@ -1633,13 +1640,31 @@ fn normalize_run_status(raw: &str) -> String {
     s
 }
 
+fn workflow_filter_for_wait(workflow: &str) -> Option<&str> {
+    let workflow = workflow.trim();
+    if workflow.chars().all(|ch| ch.is_ascii_digit()) {
+        None
+    } else {
+        Some(workflow)
+    }
+}
+
+fn is_in_progress_status(status: &str) -> bool {
+    IN_PROGRESS_JOB_STATUSES
+        .iter()
+        .any(|in_progress| status.eq_ignore_ascii_case(in_progress))
+}
+
+fn is_failing_status(status: &str) -> bool {
+    FAILING_JOB_STATUSES
+        .iter()
+        .any(|failing| status.eq_ignore_ascii_case(failing))
+}
+
 fn is_run_done_from_jobs(jobs: &[crate::ui_actions::JobInfo]) -> bool {
-    let in_progress = ["running", "queued", "pending", "waiting"];
-    !jobs.iter().any(|j| {
-        j.status.as_deref().map_or(true, |status| {
-            in_progress.iter().any(|s| status.eq_ignore_ascii_case(s))
-        })
-    })
+    !jobs
+        .iter()
+        .any(|j| j.status.as_deref().is_none_or(is_in_progress_status))
 }
 
 fn run_terminal_error_from_jobs(
@@ -1650,13 +1675,12 @@ fn run_terminal_error_from_jobs(
         return Some(eyre!("run {run_index} returned no jobs"));
     }
 
-    let failing = ["failure", "canceled", "cancelled", "blocked"];
     let mut failures: Vec<String> = Vec::new();
     for j in jobs {
         let Some(status) = j.status.as_deref() else {
             continue;
         };
-        if failing.iter().any(|s| status.eq_ignore_ascii_case(s)) {
+        if is_failing_status(status) {
             failures.push(format!("job {}: {}", j.job_index, status));
         }
     }
@@ -1726,10 +1750,24 @@ mod tests {
     }
 
     #[test]
+    fn wait_target_done_treats_cancelling_as_in_progress() {
+        let jobs = vec![job(0, Some("success")), job(1, Some("cancelling"))];
+
+        assert!(!is_wait_target_done(&jobs, None));
+        assert!(!is_wait_target_done(&jobs, Some(1)));
+    }
+
+    #[test]
     fn wait_terminal_error_reports_failed_run_or_job() {
         let jobs = vec![job(0, Some("success")), job(1, Some("failure"))];
         assert!(wait_terminal_error(&jobs, 10, None).is_some());
         assert!(wait_terminal_error(&jobs, 10, Some(1)).is_some());
         assert!(wait_terminal_error(&jobs, 10, Some(0)).is_none());
+    }
+
+    #[test]
+    fn workflow_filter_for_wait_omits_numeric_dispatch_ids() {
+        assert_eq!(workflow_filter_for_wait("12345"), None);
+        assert_eq!(workflow_filter_for_wait("ci.yml"), Some("ci.yml"));
     }
 }
