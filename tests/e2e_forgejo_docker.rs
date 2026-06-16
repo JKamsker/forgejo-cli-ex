@@ -32,6 +32,7 @@ struct E2eTarget {
     workflow_dir: &'static str,
     runner_token_source: RunnerTokenSource,
     expect_artifacts: bool,
+    expect_runner_jobs: bool,
 }
 
 const FORGEJO_11_0_10: E2eTarget = E2eTarget {
@@ -42,6 +43,7 @@ const FORGEJO_11_0_10: E2eTarget = E2eTarget {
     workflow_dir: ".forgejo",
     runner_token_source: RunnerTokenSource::ServerCliGlobal,
     expect_artifacts: true,
+    expect_runner_jobs: true,
 };
 
 const FORGEJO_14_0_2: E2eTarget = E2eTarget {
@@ -52,6 +54,7 @@ const FORGEJO_14_0_2: E2eTarget = E2eTarget {
     workflow_dir: ".forgejo",
     runner_token_source: RunnerTokenSource::ServerCliGlobal,
     expect_artifacts: true,
+    expect_runner_jobs: true,
 };
 
 const FORGEJO_15_0_0: E2eTarget = E2eTarget {
@@ -62,6 +65,7 @@ const FORGEJO_15_0_0: E2eTarget = E2eTarget {
     workflow_dir: ".forgejo",
     runner_token_source: RunnerTokenSource::ServerCliGlobal,
     expect_artifacts: true,
+    expect_runner_jobs: true,
 };
 
 const GITEA_1_25_3: E2eTarget = E2eTarget {
@@ -72,6 +76,7 @@ const GITEA_1_25_3: E2eTarget = E2eTarget {
     workflow_dir: ".gitea",
     runner_token_source: RunnerTokenSource::FjRepoApi,
     expect_artifacts: false,
+    expect_runner_jobs: false,
 };
 
 #[tokio::test]
@@ -599,35 +604,37 @@ async fn run_e2e(target: E2eTarget) -> Result<()> {
     )?;
     assert!(smoke_out.stdout.lines().any(|l| l.trim() == "OK"));
 
-    // Trigger a workflow with a mismatched runs-on label to ensure runner jobs can be listed/filtered.
-    let _trigger_waiting_out = fj_ex_cmd(
-        &fj_ex,
-        &appdata_dir,
-        &[
-            "actions",
-            "--host",
-            &base_url,
-            "--repo",
-            &repo,
-            "trigger",
-            "--workflow",
-            "e2e-waiting.yml",
-            "--ref",
-            "main",
-            "--json",
-        ],
-        None,
-    )?;
-    let waiting_jobs_json =
-        wait_for_waiting_runner_jobs(&fj_ex, &appdata_dir, &base_url, &repo, "missing-label")
-            .await?;
-    assert_eq!(waiting_jobs_json["baseUrl"], base_url);
-    assert_eq!(waiting_jobs_json["scope"], "repo");
-    assert_eq!(waiting_jobs_json["repo"], repo);
-    assert_eq!(waiting_jobs_json["waitingOnly"], true);
-    assert!(waiting_jobs_json["jobs"]
-        .as_array()
-        .is_some_and(|a| !a.is_empty()));
+    if target.expect_runner_jobs {
+        // Trigger a workflow with a mismatched runs-on label to ensure runner jobs can be listed/filtered.
+        let _trigger_waiting_out = fj_ex_cmd(
+            &fj_ex,
+            &appdata_dir,
+            &[
+                "actions",
+                "--host",
+                &base_url,
+                "--repo",
+                &repo,
+                "trigger",
+                "--workflow",
+                "e2e-waiting.yml",
+                "--ref",
+                "main",
+                "--json",
+            ],
+            None,
+        )?;
+        let waiting_jobs_json =
+            wait_for_waiting_runner_jobs(&fj_ex, &appdata_dir, &base_url, &repo, "missing-label")
+                .await?;
+        assert_eq!(waiting_jobs_json["baseUrl"], base_url);
+        assert_eq!(waiting_jobs_json["scope"], "repo");
+        assert_eq!(waiting_jobs_json["repo"], repo);
+        assert_eq!(waiting_jobs_json["waitingOnly"], true);
+        assert!(waiting_jobs_json["jobs"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()));
+    }
 
     // Logout should remove the entry.
     fj_ex_cmd(
