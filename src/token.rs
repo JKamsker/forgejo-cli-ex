@@ -27,7 +27,15 @@ async fn run_list(args: TokenListCommand) -> eyre::Result<()> {
         args.page,
         args.limit
     ));
-    let tokens: Vec<crate::api::ListedAccessToken> = client.get_json(&url).await?;
+    let ui_creds = crate::store::get_ui_creds(&target.base_url).await?;
+    let tokens: Vec<crate::api::ListedAccessToken> =
+        if let Some(creds) = ui_creds.filter(|creds| creds.username == me.login) {
+            client
+                .get_json_with_basic_auth(&url, &creds.username, &creds.password)
+                .await?
+        } else {
+            client.get_json(&url).await?
+        };
 
     if args.json {
         let payload = serde_json::json!({

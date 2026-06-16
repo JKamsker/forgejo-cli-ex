@@ -13,27 +13,97 @@ use url::Url;
 const FORGEJO_IMAGE: &str = "codeberg.org/forgejo/forgejo:14.0.2";
 const FORGEJO_IMAGE_11_0_10: &str = "codeberg.org/forgejo/forgejo:11.0.10";
 const FORGEJO_IMAGE_15_0_0: &str = "codeberg.org/forgejo/forgejo:15.0.0";
+const GITEA_IMAGE_1_25_3: &str = "gitea/gitea:1.25.3";
 const ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.3.0";
+const GITEA_ACT_RUNNER_IMAGE: &str = "gitea/act_runner:0.6.1";
+
+#[derive(Clone, Copy)]
+enum RunnerTokenSource {
+    ServerCliGlobal,
+    FjRepoApi,
+}
+
+#[derive(Clone, Copy)]
+struct E2eTarget {
+    image: &'static str,
+    label: &'static str,
+    runner_image: &'static str,
+    server_bin: &'static str,
+    workflow_dir: &'static str,
+    runner_token_source: RunnerTokenSource,
+    expect_artifacts: bool,
+    expect_runner_jobs: bool,
+}
+
+const FORGEJO_11_0_10: E2eTarget = E2eTarget {
+    image: FORGEJO_IMAGE_11_0_10,
+    label: "forgejo-11-0-10",
+    runner_image: ACT_RUNNER_IMAGE,
+    server_bin: "forgejo",
+    workflow_dir: ".forgejo",
+    runner_token_source: RunnerTokenSource::ServerCliGlobal,
+    expect_artifacts: true,
+    expect_runner_jobs: true,
+};
+
+const FORGEJO_14_0_2: E2eTarget = E2eTarget {
+    image: FORGEJO_IMAGE,
+    label: "forgejo-14-0-2",
+    runner_image: ACT_RUNNER_IMAGE,
+    server_bin: "forgejo",
+    workflow_dir: ".forgejo",
+    runner_token_source: RunnerTokenSource::ServerCliGlobal,
+    expect_artifacts: true,
+    expect_runner_jobs: true,
+};
+
+const FORGEJO_15_0_0: E2eTarget = E2eTarget {
+    image: FORGEJO_IMAGE_15_0_0,
+    label: "forgejo-15-0-0",
+    runner_image: ACT_RUNNER_IMAGE,
+    server_bin: "forgejo",
+    workflow_dir: ".forgejo",
+    runner_token_source: RunnerTokenSource::ServerCliGlobal,
+    expect_artifacts: true,
+    expect_runner_jobs: true,
+};
+
+const GITEA_1_25_3: E2eTarget = E2eTarget {
+    image: GITEA_IMAGE_1_25_3,
+    label: "gitea-1-25-3",
+    runner_image: GITEA_ACT_RUNNER_IMAGE,
+    server_bin: "gitea",
+    workflow_dir: ".gitea",
+    runner_token_source: RunnerTokenSource::FjRepoApi,
+    expect_artifacts: false,
+    expect_runner_jobs: false,
+};
 
 #[tokio::test]
 #[ignore]
 async fn e2e_forgejo_14_0_2_docker() -> Result<()> {
-    run_e2e(FORGEJO_IMAGE, "14-0-2").await
+    run_e2e(FORGEJO_14_0_2).await
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_forgejo_11_0_10_docker() -> Result<()> {
-    run_e2e(FORGEJO_IMAGE_11_0_10, "11-0-10").await
+    run_e2e(FORGEJO_11_0_10).await
 }
 
 #[tokio::test]
 #[ignore]
 async fn e2e_forgejo_15_0_0_docker() -> Result<()> {
-    run_e2e(FORGEJO_IMAGE_15_0_0, "15-0-0").await
+    run_e2e(FORGEJO_15_0_0).await
 }
 
-async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
+#[tokio::test]
+#[ignore]
+async fn e2e_gitea_1_25_3_docker() -> Result<()> {
+    run_e2e(GITEA_1_25_3).await
+}
+
+async fn run_e2e(target: E2eTarget) -> Result<()> {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping e2e: requires Linux (uses Docker host networking for job containers)");
         return Ok(());
@@ -53,7 +123,7 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     let username = "e2e";
     let password = "e2e-password-1234";
     let email = "e2e@example.invalid";
-    let repo_name = format!("fj-ex-e2e-{version_label}-{http_port}");
+    let repo_name = format!("fj-ex-e2e-{}-{http_port}", target.label);
     let repo = format!("{username}/{repo_name}");
 
     let temp = tempfile::tempdir().wrap_err("failed to create temp dir")?;
@@ -70,16 +140,16 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     fs::create_dir_all(&logs_dir).wrap_err("failed to create logs dir")?;
     fs::create_dir_all(&smoke_dir).wrap_err("failed to create smoke dir")?;
 
-    let test_id = format!("{}-{version_label}-{http_port}", std::process::id());
-    let forgejo_name = format!("fj-ex-e2e-forgejo-{test_id}");
+    let test_id = format!("{}-{}-{http_port}", std::process::id(), target.label);
+    let forgejo_name = format!("fj-ex-e2e-server-{test_id}");
     let runner_name = format!("fj-ex-e2e-runner-{test_id}");
 
-    let _stack = DockerStack::start(
+    let stack = DockerStack::start(
         &forgejo_name,
         &runner_name,
-        &runner_data_dir,
         &base_url,
-        forgejo_image,
+        target.image,
+        target.server_bin,
         username,
         password,
         email,
@@ -87,7 +157,6 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     .await?;
 
     api_create_repo(&base_url, username, password, &repo_name).await?;
-    git_push_workflow(&repo_dir, &base_url, username, password, &repo_name).await?;
 
     let fj_ex = fj_ex_bin()?;
 
@@ -124,7 +193,7 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
         "-u",
         "git",
         &forgejo_name,
-        "forgejo",
+        target.server_bin,
         "admin",
         "user",
         "generate-access-token",
@@ -137,10 +206,33 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
         "--raw",
     ])
     .wrap_err("failed to generate api token")?;
-    if fj_api_token.trim().is_empty() {
-        return Err(eyre!("api token was empty"));
-    }
-    write_fj_keys_json(&appdata_dir, &base_url, fj_api_token.trim())?;
+    let fj_api_token = token_from_command_output(&fj_api_token, "api token")?;
+    write_fj_keys_json(&appdata_dir, &base_url, &fj_api_token)?;
+
+    let runner_token = match target.runner_token_source {
+        RunnerTokenSource::ServerCliGlobal => stack.generate_runner_token(target.server_bin)?,
+        RunnerTokenSource::FjRepoApi => {
+            repo_runner_token_via_fj(&fj_ex, &appdata_dir, &base_url, &repo)?
+        }
+    };
+    stack
+        .start_runner(
+            &runner_data_dir,
+            &base_url,
+            target.runner_image,
+            &runner_token,
+        )
+        .await?;
+
+    git_push_workflow(
+        &repo_dir,
+        &base_url,
+        username,
+        password,
+        &repo_name,
+        target.workflow_dir,
+    )
+    .await?;
 
     // Login (non-interactive)
     fj_ex_cmd(
@@ -402,57 +494,59 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
         logs_dir.display()
     );
 
-    // Artifacts list + download (zip)
-    let artifacts_list_out = fj_ex_cmd(
-        &fj_ex,
-        &appdata_dir,
-        &[
-            "actions",
-            "--host",
-            &base_url,
-            "--repo",
-            &repo,
-            "artifacts",
-            "list",
-            "--run-index",
-            &run_index.to_string(),
-            "--json",
-        ],
-        None,
-    )?;
-    assert!(
-        artifacts_list_out.stdout.contains("\"my-artifact\"")
-            || artifacts_list_out.stdout.contains("my-artifact"),
-        "expected artifact in output, got:\n{}",
-        artifacts_list_out.stdout
-    );
+    if target.expect_artifacts {
+        // Artifacts list + download (zip)
+        let artifacts_list_out = fj_ex_cmd(
+            &fj_ex,
+            &appdata_dir,
+            &[
+                "actions",
+                "--host",
+                &base_url,
+                "--repo",
+                &repo,
+                "artifacts",
+                "list",
+                "--run-index",
+                &run_index.to_string(),
+                "--json",
+            ],
+            None,
+        )?;
+        assert!(
+            artifacts_list_out.stdout.contains("\"my-artifact\"")
+                || artifacts_list_out.stdout.contains("my-artifact"),
+            "expected artifact in output, got:\n{}",
+            artifacts_list_out.stdout
+        );
 
-    fj_ex_cmd(
-        &fj_ex,
-        &appdata_dir,
-        &[
-            "actions",
-            "--host",
-            &base_url,
-            "--repo",
-            &repo,
-            "artifacts",
-            "get",
-            "--run-index",
-            &run_index.to_string(),
-            "--artifact",
-            "my-artifact",
-            "--out-file",
-            artifact_zip.to_str().unwrap_or("artifact.zip"),
-        ],
-        None,
-    )?;
-    let artifact_bytes = fs::read(&artifact_zip).wrap_err("failed to read artifact zip")?;
-    assert!(
-        artifact_bytes.starts_with(b"PK"),
-        "expected zip file magic bytes, got: {:?}",
-        &artifact_bytes.get(..4)
-    );
+        fj_ex_cmd(
+            &fj_ex,
+            &appdata_dir,
+            &[
+                "actions",
+                "--host",
+                &base_url,
+                "--repo",
+                &repo,
+                "artifacts",
+                "get",
+                "--run-index",
+                &run_index.to_string(),
+                "--artifact",
+                "my-artifact",
+                "--out-file",
+                artifact_zip.to_str().unwrap_or("artifact.zip"),
+            ],
+            None,
+        )?;
+        let artifact_bytes = fs::read(&artifact_zip).wrap_err("failed to read artifact zip")?;
+        assert!(
+            artifact_bytes.starts_with(b"PK"),
+            "expected zip file magic bytes, got: {:?}",
+            &artifact_bytes.get(..4)
+        );
+    }
 
     // Cancel/rerun dry-run
     let cancel_out = fj_ex_cmd(
@@ -510,35 +604,37 @@ async fn run_e2e(forgejo_image: &str, version_label: &str) -> Result<()> {
     )?;
     assert!(smoke_out.stdout.lines().any(|l| l.trim() == "OK"));
 
-    // Trigger a workflow with a mismatched runs-on label to ensure runner jobs can be listed/filtered.
-    let _trigger_waiting_out = fj_ex_cmd(
-        &fj_ex,
-        &appdata_dir,
-        &[
-            "actions",
-            "--host",
-            &base_url,
-            "--repo",
-            &repo,
-            "trigger",
-            "--workflow",
-            "e2e-waiting.yml",
-            "--ref",
-            "main",
-            "--json",
-        ],
-        None,
-    )?;
-    let waiting_jobs_json =
-        wait_for_waiting_runner_jobs(&fj_ex, &appdata_dir, &base_url, &repo, "missing-label")
-            .await?;
-    assert_eq!(waiting_jobs_json["baseUrl"], base_url);
-    assert_eq!(waiting_jobs_json["scope"], "repo");
-    assert_eq!(waiting_jobs_json["repo"], repo);
-    assert_eq!(waiting_jobs_json["waitingOnly"], true);
-    assert!(waiting_jobs_json["jobs"]
-        .as_array()
-        .is_some_and(|a| !a.is_empty()));
+    if target.expect_runner_jobs {
+        // Trigger a workflow with a mismatched runs-on label to ensure runner jobs can be listed/filtered.
+        let _trigger_waiting_out = fj_ex_cmd(
+            &fj_ex,
+            &appdata_dir,
+            &[
+                "actions",
+                "--host",
+                &base_url,
+                "--repo",
+                &repo,
+                "trigger",
+                "--workflow",
+                "e2e-waiting.yml",
+                "--ref",
+                "main",
+                "--json",
+            ],
+            None,
+        )?;
+        let waiting_jobs_json =
+            wait_for_waiting_runner_jobs(&fj_ex, &appdata_dir, &base_url, &repo, "missing-label")
+                .await?;
+        assert_eq!(waiting_jobs_json["baseUrl"], base_url);
+        assert_eq!(waiting_jobs_json["scope"], "repo");
+        assert_eq!(waiting_jobs_json["repo"], repo);
+        assert_eq!(waiting_jobs_json["waitingOnly"], true);
+        assert!(waiting_jobs_json["jobs"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()));
+    }
 
     // Logout should remove the entry.
     fj_ex_cmd(
@@ -560,9 +656,9 @@ impl DockerStack {
     async fn start(
         forgejo_name: &str,
         runner_name: &str,
-        runner_data_dir: &Path,
         base_url: &str,
         forgejo_image: &str,
+        server_bin: &str,
         username: &str,
         password: &str,
         email: &str,
@@ -607,7 +703,7 @@ impl DockerStack {
             "-u",
             "git",
             forgejo_name,
-            "forgejo",
+            server_bin,
             "admin",
             "user",
             "create",
@@ -622,20 +718,27 @@ impl DockerStack {
         ])
         .wrap_err("failed to create forgejo admin user")?;
 
-        let runner_token = docker_stdout(&[
-            "exec",
-            "-u",
-            "git",
-            forgejo_name,
-            "forgejo",
-            "actions",
-            "generate-runner-token",
-        ])
-        .wrap_err("failed to generate runner token")?;
+        Ok(Self {
+            forgejo_name: forgejo_name.to_string(),
+            runner_name: runner_name.to_string(),
+        })
+    }
+
+    async fn start_runner(
+        &self,
+        runner_data_dir: &Path,
+        base_url: &str,
+        runner_image: &str,
+        runner_token: &str,
+    ) -> Result<()> {
         let runner_token = runner_token.trim();
         if runner_token.is_empty() {
             return Err(eyre!("runner token was empty"));
         }
+
+        let runner_token_path = runner_data_dir.join("registration-token");
+        fs::write(&runner_token_path, runner_token)
+            .wrap_err("failed to write runner token file")?;
 
         let runner_config_path = runner_data_dir.join("config.yml");
         fs::write(
@@ -648,15 +751,15 @@ impl DockerStack {
             "run",
             "-d",
             "--name",
-            runner_name,
+            self.runner_name.as_str(),
             "--network",
             "host",
             "-e",
             &format!("GITEA_INSTANCE_URL={base_url}"),
             "-e",
-            &format!("GITEA_RUNNER_REGISTRATION_TOKEN={runner_token}"),
+            "GITEA_RUNNER_REGISTRATION_TOKEN_FILE=/data/registration-token",
             "-e",
-            &format!("GITEA_RUNNER_NAME={runner_name}"),
+            &format!("GITEA_RUNNER_NAME={}", self.runner_name),
             "-e",
             "GITEA_RUNNER_LABELS=ubuntu-latest:docker://node:20-bookworm",
             "-e",
@@ -665,18 +768,31 @@ impl DockerStack {
             "/var/run/docker.sock:/var/run/docker.sock",
             "-v",
             &format!("{}:/data", runner_data_dir.display()),
-            ACT_RUNNER_IMAGE,
+            runner_image,
         ])
         .wrap_err("failed to start act_runner container")?;
 
-        wait_for_runner(runner_name, Duration::from_secs(90))
+        wait_for_runner(&self.runner_name, Duration::from_secs(90))
             .await
             .wrap_err("runner did not register")?;
 
-        Ok(Self {
-            forgejo_name: forgejo_name.to_string(),
-            runner_name: runner_name.to_string(),
-        })
+        Ok(())
+    }
+
+    fn generate_runner_token(&self, server_bin: &str) -> Result<String> {
+        let token_args = [
+            "exec",
+            "-u",
+            "git",
+            self.forgejo_name.as_str(),
+            server_bin,
+            "actions",
+            "generate-runner-token",
+        ];
+
+        let runner_token =
+            docker_stdout(&token_args).wrap_err("failed to generate runner token")?;
+        token_from_command_output(&runner_token, "runner token")
     }
 }
 
@@ -748,6 +864,16 @@ fn docker_status(args: &[&str]) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn token_from_command_output(output: &str, token_name: &str) -> Result<String> {
+    let token = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.chars().any(char::is_whitespace))
+        .ok_or_else(|| eyre!("{token_name} output did not contain a token line"))?;
+    Ok(token.to_string())
 }
 
 async fn wait_for_http(base_url: &str, timeout: Duration) -> Result<()> {
@@ -859,8 +985,9 @@ async fn git_push_workflow(
     username: &str,
     password: &str,
     repo_name: &str,
+    workflow_dir: &str,
 ) -> Result<()> {
-    let wf_dir = repo_dir.join(".forgejo").join("workflows");
+    let wf_dir = repo_dir.join(workflow_dir).join("workflows");
     fs::create_dir_all(&wf_dir).wrap_err("failed to create workflow dir")?;
     fs::write(
         wf_dir.join("e2e.yml"),
@@ -1039,6 +1166,32 @@ fn fj_ex_cmd(
     fj_ex_cmd_with_expectation(bin, appdata_dir, args, stdin, true)
 }
 
+fn repo_runner_token_via_fj(
+    bin: &Path,
+    appdata_dir: &Path,
+    base_url: &str,
+    repo: &str,
+) -> Result<String> {
+    let out = fj_ex_cmd(
+        bin,
+        appdata_dir,
+        &[
+            "actions", "--host", base_url, "--repo", repo, "runners", "token", "--json",
+        ],
+        None,
+    )?;
+    let json: Value =
+        serde_json::from_str(&out.stdout).wrap_err("failed to parse runner token json")?;
+    let token = json["token"]
+        .as_str()
+        .ok_or_else(|| eyre!("runner token json was missing token"))?
+        .trim();
+    if token.is_empty() {
+        return Err(eyre!("runner token json contained an empty token"));
+    }
+    Ok(token.to_string())
+}
+
 fn fj_ex_cmd_expect_failure(
     bin: &Path,
     appdata_dir: &Path,
@@ -1201,84 +1354,32 @@ async fn wait_for_run_success(
     repo: &str,
     run_index: i64,
 ) -> Result<()> {
-    let start = Instant::now();
-    let timeout = Duration::from_secs(240);
-
-    loop {
-        if start.elapsed() > timeout {
-            return Err(eyre!("timeout waiting for run {run_index} to complete"));
-        }
-
-        let out = fj_ex_cmd(
-            bin,
-            appdata_dir,
-            &[
-                "actions",
-                "--host",
-                base_url,
-                "--repo",
-                repo,
-                "jobs",
-                "--run-index",
-                &run_index.to_string(),
-                "--json",
-            ],
-            None,
-        );
-        let out = match out {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("warn: failed to query jobs for run {run_index} (will retry): {e}");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-
-        let json: Value = match serde_json::from_str(&out.stdout) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("warn: failed to parse jobs json for run {run_index} (will retry): {e}");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            }
-        };
-        let Some(jobs) = json["jobs"].as_array() else {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        };
-        if jobs.is_empty() {
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        }
-
-        let statuses: Vec<String> = jobs
-            .iter()
-            .filter_map(|j| {
-                j.get("status")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-
-        if statuses.iter().any(|s| s.eq_ignore_ascii_case("failure")) {
-            return Err(eyre!("run {run_index} failed: statuses={statuses:?}"));
-        }
-
-        // Allow for some in-progress states while the runner picks it up.
-        let running = ["running", "queued", "pending", "waiting"];
-        if statuses
-            .iter()
-            .all(|s| !running.iter().any(|r| s.eq_ignore_ascii_case(r)))
-        {
-            // Terminal state reached; we expect success.
-            if statuses.iter().any(|s| s.eq_ignore_ascii_case("success")) {
-                return Ok(());
-            }
-            return Err(eyre!(
-                "run {run_index} ended in non-success terminal states: {statuses:?}"
-            ));
-        }
-
-        tokio::time::sleep(Duration::from_secs(2)).await;
+    let out = fj_ex_cmd(
+        bin,
+        appdata_dir,
+        &[
+            "actions",
+            "--host",
+            base_url,
+            "--repo",
+            repo,
+            "wait",
+            "--run-index",
+            &run_index.to_string(),
+            "--timeout",
+            "240s",
+            "--json",
+        ],
+        None,
+    )?;
+    let json: Value =
+        serde_json::from_str(&out.stdout).wrap_err("failed to parse actions wait json output")?;
+    if json["status"].as_str() != Some("success") {
+        return Err(eyre!(
+            "run {run_index} ended with unexpected wait status: {}",
+            out.stdout
+        ));
     }
+
+    Ok(())
 }

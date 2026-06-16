@@ -1,6 +1,7 @@
 use std::io::IsTerminal;
 use std::num::NonZeroU64;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use eyre::{eyre, Context};
 use tokio::io::AsyncWriteExt;
@@ -12,6 +13,16 @@ use crate::cli::{
 
 static SAFE_FILENAME_COMPONENT_RE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r#"[^a-zA-Z0-9._-]+"#).expect("valid regex"));
+const IN_PROGRESS_JOB_STATUSES: &[&str] =
+    &["running", "queued", "pending", "waiting", "cancelling"];
+const FAILING_JOB_STATUSES: &[&str] = &["failure", "canceled", "cancelled", "blocked"];
+
+#[derive(Debug)]
+struct WaitResult {
+    run_index: i64,
+    run_url: String,
+    jobs: Vec<crate::ui_actions::JobInfo>,
+}
 
 pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
     let target = crate::target::resolve_target(
@@ -29,6 +40,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             git_ref,
             input,
             dry_run,
+            wait,
+            interval,
+            timeout,
             json,
         } => {
             let repo = require_repo_owned(&target)?;
@@ -44,9 +58,39 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             if workflow.is_empty() {
                 return Err(eyre!("--workflow cannot be empty"));
             }
+            if !wait {
+                if interval.is_some() {
+                    return Err(eyre!("--interval requires --wait"));
+                }
+                if timeout.is_some() {
+                    return Err(eyre!("--timeout requires --wait"));
+                }
+            }
 
             let dispatch_ref = normalize_dispatch_ref(&git_ref);
             let inputs = parse_workflow_inputs(&input)?;
+            let wait_timeout = parse_optional_duration(timeout.as_deref())?;
+            let wait_interval = Duration::from_secs(interval.unwrap_or(2));
+
+            let wait_session = if wait {
+                Some(
+                    crate::session::UiSession::from_store_with_socket(
+                        &target.base_url,
+                        false,
+                        target.unix_socket.as_deref(),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+
+            let wait_workflow_filter = workflow_filter_for_wait(workflow);
+            let previous_latest_run = if let Some(session) = wait_session.as_ref() {
+                latest_run_index_optional(session, &repo, wait_workflow_filter).await?
+            } else {
+                None
+            };
 
             // Convert http+unix:// URLs to http://localhost for HTTP requests
             // (the Unix socket transport is configured separately via builder.unix_socket)
@@ -131,18 +175,63 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             }
 
             if json {
-                let payload = serde_json::json!({
-                    "baseUrl": target.base_url,
-                    "repo": repo,
-                    "workflow": workflow,
-                    "dryRun": false,
-                    "url": url,
-                    "body": body,
-                    "triggered": true,
-                });
-                println!("{}", serde_json::to_string_pretty(&payload)?);
+                if wait {
+                    // The final wait result is printed below as a single JSON document.
+                } else {
+                    let payload = serde_json::json!({
+                        "baseUrl": target.base_url,
+                        "repo": repo,
+                        "workflow": workflow,
+                        "dryRun": false,
+                        "url": url,
+                        "body": body,
+                        "triggered": true,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                }
             } else {
                 println!("Triggered workflow '{workflow}' on '{dispatch_ref}'.");
+            }
+
+            if wait {
+                let session = wait_session
+                    .as_ref()
+                    .expect("wait session must exist when --wait is set");
+                let wait_started_at = Instant::now();
+                let run_index = wait_for_new_run_index(
+                    session,
+                    &repo,
+                    wait_workflow_filter,
+                    previous_latest_run,
+                    wait_interval,
+                    wait_timeout,
+                )
+                .await?;
+                let remaining_timeout = remaining_timeout(wait_timeout, wait_started_at)?;
+                let result = wait_for_run_completion(
+                    session,
+                    &repo,
+                    run_index,
+                    None,
+                    wait_interval,
+                    remaining_timeout,
+                )
+                .await?;
+                print_wait_result(
+                    &target.base_url,
+                    &repo,
+                    &result,
+                    None,
+                    json,
+                    Some(serde_json::json!({
+                        "workflow": workflow,
+                        "ref": dispatch_ref,
+                        "triggered": true,
+                    })),
+                )?;
+                if let Some(err) = wait_terminal_error(&result.jobs, run_index, None) {
+                    return Err(err);
+                }
             }
         }
         command => {
@@ -354,6 +443,31 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         }
 
                         tokio::time::sleep(std::time::Duration::from_secs(watch_interval)).await;
+                    }
+                }
+                ActionsSubcommand::Wait {
+                    run_index,
+                    latest,
+                    workflow,
+                    job_index,
+                    interval,
+                    timeout,
+                    json,
+                } => {
+                    let run_index =
+                        resolve_run_index(&session, &repo, run_index, latest, workflow.as_deref())
+                            .await?;
+                    let timeout = parse_optional_duration(timeout.as_deref())?;
+                    let interval = Duration::from_secs(interval);
+                    let job_index = job_index.map(i64::from);
+
+                    let result = wait_for_run_completion(
+                        &session, &repo, run_index, job_index, interval, timeout,
+                    )
+                    .await?;
+                    print_wait_result(&target.base_url, &repo, &result, job_index, json, None)?;
+                    if let Some(err) = wait_terminal_error(&result.jobs, run_index, job_index) {
+                        return Err(err);
                     }
                 }
                 ActionsSubcommand::Logs { command } => match command {
@@ -800,6 +914,227 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
     Ok(())
 }
 
+async fn latest_run_index_optional(
+    session: &crate::session::UiSession,
+    repo: &str,
+    workflow: Option<&str>,
+) -> eyre::Result<Option<i64>> {
+    let runs = crate::ui_actions::list_runs(session, repo, workflow, 1, 1).await?;
+    Ok(runs.first().map(|run| run.run_index))
+}
+
+async fn wait_for_new_run_index(
+    session: &crate::session::UiSession,
+    repo: &str,
+    workflow: Option<&str>,
+    previous_latest_run: Option<i64>,
+    interval: Duration,
+    timeout: Option<Duration>,
+) -> eyre::Result<i64> {
+    let started_at = Instant::now();
+
+    loop {
+        let runs = crate::ui_actions::list_runs(session, repo, workflow, 1, 20).await?;
+        if let Some(run) = runs
+            .iter()
+            .filter(|run| previous_latest_run.map_or(true, |previous| run.run_index > previous))
+            .max_by_key(|run| run.run_index)
+        {
+            return Ok(run.run_index);
+        }
+
+        if has_timed_out(started_at, timeout) {
+            let workflow_msg = workflow
+                .map(|workflow| format!(" for workflow '{workflow}'"))
+                .unwrap_or_default();
+            return Err(eyre!(
+                "timeout waiting for a new action run{workflow_msg} to appear"
+            ));
+        }
+
+        tokio::time::sleep(interval).await;
+    }
+}
+
+async fn wait_for_run_completion(
+    session: &crate::session::UiSession,
+    repo: &str,
+    run_index: i64,
+    job_index: Option<i64>,
+    interval: Duration,
+    timeout: Option<Duration>,
+) -> eyre::Result<WaitResult> {
+    let started_at = Instant::now();
+
+    loop {
+        let view = crate::ui_actions::get_run_view_data(session, repo, run_index)
+            .await
+            .wrap_err("failed to load run view")?;
+        let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+
+        if is_wait_target_done(&jobs, job_index) {
+            let repo_path = repo.trim_matches('/');
+            return Ok(WaitResult {
+                run_index,
+                run_url: format!(
+                    "{}/{repo_path}/actions/runs/{run_index}",
+                    session.base_url()
+                ),
+                jobs,
+            });
+        }
+
+        if has_timed_out(started_at, timeout) {
+            let target = job_index
+                .map(|job_index| format!("run {run_index} job {job_index}"))
+                .unwrap_or_else(|| format!("run {run_index}"));
+            return Err(eyre!("timeout waiting for {target} to complete"));
+        }
+
+        tokio::time::sleep(interval).await;
+    }
+}
+
+fn print_wait_result(
+    target_base_url: &str,
+    repo: &str,
+    result: &WaitResult,
+    job_index: Option<i64>,
+    json: bool,
+    trigger: Option<serde_json::Value>,
+) -> eyre::Result<()> {
+    let status = wait_target_status(&result.jobs, job_index);
+
+    if json {
+        let mut payload = serde_json::json!({
+            "baseUrl": target_base_url,
+            "repo": repo,
+            "runIndex": result.run_index,
+            "runUrl": result.run_url,
+            "jobIndex": job_index,
+            "status": status,
+            "jobs": result.jobs.iter().map(|job| serde_json::json!({
+                "runIndex": job.run_index,
+                "jobIndex": job.job_index,
+                "id": job.id,
+                "name": job.name,
+                "status": job.status,
+                "canRerun": job.can_rerun,
+                "duration": job.duration,
+            })).collect::<Vec<_>>(),
+        });
+        if let Some(trigger) = trigger {
+            payload["trigger"] = trigger;
+        }
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    if let Some(job_index) = job_index {
+        println!(
+            "Run #{} job #{} completed with status '{}'.",
+            result.run_index, job_index, status
+        );
+    } else {
+        println!(
+            "Run #{} completed with status '{}'.",
+            result.run_index, status
+        );
+    }
+    println!("{}", result.run_url);
+
+    Ok(())
+}
+
+fn is_wait_target_done(jobs: &[crate::ui_actions::JobInfo], job_index: Option<i64>) -> bool {
+    if jobs.is_empty() {
+        return false;
+    }
+
+    if let Some(job_index) = job_index {
+        if let Some(job) = jobs.iter().find(|job| job.job_index == job_index) {
+            return is_job_done(job);
+        }
+        return is_run_done_from_jobs(jobs);
+    }
+
+    is_run_done_from_jobs(jobs)
+}
+
+fn is_job_done(job: &crate::ui_actions::JobInfo) -> bool {
+    job.status
+        .as_deref()
+        .is_some_and(|status| !is_in_progress_status(status))
+}
+
+fn wait_target_status(jobs: &[crate::ui_actions::JobInfo], job_index: Option<i64>) -> String {
+    if let Some(job_index) = job_index {
+        return jobs
+            .iter()
+            .find(|job| job.job_index == job_index)
+            .and_then(|job| job.status.clone())
+            .unwrap_or_else(|| "missing".to_string());
+    }
+
+    for job in jobs {
+        let Some(status) = job.status.as_deref() else {
+            return "unknown".to_string();
+        };
+        if is_failing_status(status) {
+            return normalize_run_status(status);
+        }
+    }
+
+    "success".to_string()
+}
+
+fn wait_terminal_error(
+    jobs: &[crate::ui_actions::JobInfo],
+    run_index: i64,
+    job_index: Option<i64>,
+) -> Option<eyre::Report> {
+    if let Some(job_index) = job_index {
+        if jobs.is_empty() {
+            return Some(eyre!("run {run_index} returned no jobs"));
+        }
+
+        let Some(job) = jobs.iter().find(|job| job.job_index == job_index) else {
+            return Some(eyre!("run {run_index} completed without job {job_index}"));
+        };
+
+        if job.status.as_deref().is_some_and(is_failing_status) {
+            let status = job.status.as_deref().unwrap_or("unknown");
+            return Some(eyre!(
+                "run {run_index} job {job_index} finished with status {status}"
+            ));
+        }
+
+        return None;
+    }
+
+    run_terminal_error_from_jobs(run_index, jobs)
+}
+
+fn has_timed_out(started_at: Instant, timeout: Option<Duration>) -> bool {
+    timeout.is_some_and(|timeout| started_at.elapsed() >= timeout)
+}
+
+fn remaining_timeout(
+    timeout: Option<Duration>,
+    started_at: Instant,
+) -> eyre::Result<Option<Duration>> {
+    let Some(timeout) = timeout else {
+        return Ok(None);
+    };
+    let elapsed = started_at.elapsed();
+    if elapsed >= timeout {
+        return Err(eyre!(
+            "timeout waiting for triggered action run to complete"
+        ));
+    }
+    Ok(Some(timeout - elapsed))
+}
+
 async fn rerun_failed_jobs(
     session: &crate::session::UiSession,
     target_base_url: &str,
@@ -985,13 +1320,21 @@ fn resolve_runner_scope(
 }
 
 pub(crate) fn fj_missing_api_token_error(base_url: &str) -> eyre::Report {
-    let host_key = crate::target::normalize_host_key(base_url).unwrap_or_else(|_| base_url.into());
+    let token_key = crate::target::normalize_base_url(base_url)
+        .map(|normalized| {
+            if crate::target::normalized_base_url_has_path(&normalized) {
+                normalized
+            } else {
+                crate::target::normalize_host_key(&normalized).unwrap_or(normalized)
+            }
+        })
+        .unwrap_or_else(|_| base_url.into());
     let path = crate::store::keys_store_paths()
         .map(|p| p.path.display().to_string())
         .unwrap_or_else(|_| "%APPDATA%/Cyborus/forgejo-cli/data/keys.json".to_string());
 
     eyre!(
-        "No Forgejo API token found for host '{host_key}'. Authenticate via `fj`:\n  fj --host {host_key} auth login\n  fj --host {host_key} auth add-key <USER>  # reads token from stdin if omitted\nToken store:\n  %APPDATA%/Cyborus/forgejo-cli/data/keys.json (Windows)\n  ~/.local/share/Cyborus/forgejo-cli/data/keys.json (Linux)\nReading: {path}"
+        "No Forgejo API token found for host '{token_key}'. Authenticate via `fj`:\n  fj --host {token_key} auth login\n  fj --host {token_key} auth add-key <USER>  # reads token from stdin if omitted\nToken store:\n  %APPDATA%/Cyborus/forgejo-cli/data/keys.json (Windows)\n  ~/.local/share/Cyborus/forgejo-cli/data/keys.json (Linux)\nReading: {path}"
     )
 }
 
@@ -1217,10 +1560,67 @@ fn parse_workflow_inputs(
     Ok(out)
 }
 
+fn parse_optional_duration(raw: Option<&str>) -> eyre::Result<Option<Duration>> {
+    raw.map(parse_duration).transpose()
+}
+
+fn parse_duration(raw: &str) -> eyre::Result<Duration> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(eyre!("duration cannot be empty"));
+    }
+
+    let number_len = raw
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if number_len == 0 {
+        return Err(eyre!(
+            "invalid duration '{raw}'. Expected a number followed by s, m, h, or d."
+        ));
+    }
+
+    let amount: u64 = raw[..number_len]
+        .parse()
+        .wrap_err_with(|| format!("invalid duration '{raw}'"))?;
+    if amount == 0 {
+        return Err(eyre!("duration must be greater than zero"));
+    }
+
+    let unit = raw[number_len..].trim().to_ascii_lowercase();
+    let seconds_per_unit = match unit.as_str() {
+        "" | "s" | "sec" | "secs" | "second" | "seconds" => 1,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 60 * 60,
+        "d" | "day" | "days" => 24 * 60 * 60,
+        _ => {
+            return Err(eyre!(
+                "invalid duration unit '{}' in '{}'. Allowed units: s, m, h, d.",
+                unit,
+                raw
+            ))
+        }
+    };
+
+    let seconds = amount
+        .checked_mul(seconds_per_unit)
+        .ok_or_else(|| eyre!("duration '{raw}' is too large"))?;
+    Ok(Duration::from_secs(seconds))
+}
+
 fn normalize_run_status_filter(raw: &str) -> eyre::Result<String> {
     let normalized = normalize_run_status(raw);
     let allowed = [
-        "success", "failure", "running", "waiting", "canceled", "skipped", "blocked",
+        "success",
+        "failure",
+        "running",
+        "waiting",
+        "cancelling",
+        "canceled",
+        "skipped",
+        "blocked",
     ];
     if !allowed.contains(&normalized.as_str()) {
         return Err(eyre!(
@@ -1240,13 +1640,31 @@ fn normalize_run_status(raw: &str) -> String {
     s
 }
 
+fn workflow_filter_for_wait(workflow: &str) -> Option<&str> {
+    let workflow = workflow.trim();
+    if workflow.chars().all(|ch| ch.is_ascii_digit()) {
+        None
+    } else {
+        Some(workflow)
+    }
+}
+
+fn is_in_progress_status(status: &str) -> bool {
+    IN_PROGRESS_JOB_STATUSES
+        .iter()
+        .any(|in_progress| status.eq_ignore_ascii_case(in_progress))
+}
+
+fn is_failing_status(status: &str) -> bool {
+    FAILING_JOB_STATUSES
+        .iter()
+        .any(|failing| status.eq_ignore_ascii_case(failing))
+}
+
 fn is_run_done_from_jobs(jobs: &[crate::ui_actions::JobInfo]) -> bool {
-    let in_progress = ["running", "queued", "pending", "waiting"];
-    !jobs.iter().any(|j| {
-        j.status.as_deref().map_or(true, |status| {
-            in_progress.iter().any(|s| status.eq_ignore_ascii_case(s))
-        })
-    })
+    !jobs
+        .iter()
+        .any(|j| j.status.as_deref().is_none_or(is_in_progress_status))
 }
 
 fn run_terminal_error_from_jobs(
@@ -1257,13 +1675,12 @@ fn run_terminal_error_from_jobs(
         return Some(eyre!("run {run_index} returned no jobs"));
     }
 
-    let failing = ["failure", "canceled", "cancelled", "blocked"];
     let mut failures: Vec<String> = Vec::new();
     for j in jobs {
         let Some(status) = j.status.as_deref() else {
             continue;
         };
-        if failing.iter().any(|s| status.eq_ignore_ascii_case(s)) {
+        if is_failing_status(status) {
             failures.push(format!("job {}: {}", j.job_index, status));
         }
     }
@@ -1287,4 +1704,70 @@ fn safe_filename_component(job_name: &str, job_index: i64) -> String {
         safe = format!("job-{job_index}");
     }
     safe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(job_index: i64, status: Option<&str>) -> crate::ui_actions::JobInfo {
+        crate::ui_actions::JobInfo {
+            run_index: 10,
+            job_index,
+            id: Some(job_index + 100),
+            name: Some(format!("job-{job_index}")),
+            status: status.map(str::to_string),
+            can_rerun: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn parse_duration_accepts_seconds_minutes_hours_and_days() {
+        assert_eq!(parse_duration("30").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("30s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("10m").unwrap(), Duration::from_secs(600));
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7_200));
+        assert_eq!(parse_duration("1d").unwrap(), Duration::from_secs(86_400));
+    }
+
+    #[test]
+    fn parse_duration_rejects_empty_zero_and_unknown_units() {
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("0s").is_err());
+        assert!(parse_duration("1w").is_err());
+        assert!(parse_duration("1.5m").is_err());
+    }
+
+    #[test]
+    fn wait_target_done_requires_terminal_statuses() {
+        let running = vec![job(0, Some("success")), job(1, Some("running"))];
+        assert!(!is_wait_target_done(&running, None));
+
+        let done = vec![job(0, Some("success")), job(1, Some("skipped"))];
+        assert!(is_wait_target_done(&done, None));
+        assert!(is_wait_target_done(&done, Some(0)));
+    }
+
+    #[test]
+    fn wait_target_done_treats_cancelling_as_in_progress() {
+        let jobs = vec![job(0, Some("success")), job(1, Some("cancelling"))];
+
+        assert!(!is_wait_target_done(&jobs, None));
+        assert!(!is_wait_target_done(&jobs, Some(1)));
+    }
+
+    #[test]
+    fn wait_terminal_error_reports_failed_run_or_job() {
+        let jobs = vec![job(0, Some("success")), job(1, Some("failure"))];
+        assert!(wait_terminal_error(&jobs, 10, None).is_some());
+        assert!(wait_terminal_error(&jobs, 10, Some(1)).is_some());
+        assert!(wait_terminal_error(&jobs, 10, Some(0)).is_none());
+    }
+
+    #[test]
+    fn workflow_filter_for_wait_omits_numeric_dispatch_ids() {
+        assert_eq!(workflow_filter_for_wait("12345"), None);
+        assert_eq!(workflow_filter_for_wait("ci.yml"), Some("ci.yml"));
+    }
 }
