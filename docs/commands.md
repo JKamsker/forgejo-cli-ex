@@ -10,6 +10,7 @@ See the main [README](../README.md) for install and quickstart.
 ```sh
 fj-ex auth login --host forge.example.com                      # interactive
 fj-ex auth login --host forge.example.com --username my-user --password-stdin
+fj-ex auth login --host forge.example.com --username my-user --password-stdin --otp-stdin
 fj-ex auth status --host forge.example.com
 fj-ex auth list
 fj-ex auth show   --host forge.example.com
@@ -23,10 +24,18 @@ Password via stdin (preferred over `--password`):
 echo "my-password" | fj-ex auth login --host forge.example.com --username my-user --password-stdin
 ```
 
+Two-factor passcodes are requested only when Forgejo redirects to the 2FA form. For scripts, use
+`--otp-stdin`, `--otp`, or `FJ_OTP`; passcodes are not stored.
+
+```sh
+printf "my-password\n123456\n" | fj-ex auth login --host forge.example.com --username my-user --password-stdin --otp-stdin
+```
+
 Environment variable fallbacks:
 
 - `FJ_USER`
 - `FJ_PASS`
+- `FJ_OTP`
 
 Legacy alias: `fj-ex login --host forge.example.com`
 

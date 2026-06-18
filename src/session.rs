@@ -1,13 +1,12 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
-use cookie_store::{Cookie, CookieExpiration, CookieStore};
+use cookie_store::CookieStore;
 use eyre::{eyre, Context};
 use reqwest::redirect::Policy;
 use reqwest_cookie_store::CookieStoreMutex;
-use time::OffsetDateTime;
 use url::Url;
 
-use crate::{html, store};
+use crate::{html, session_cookies, store};
 
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
@@ -16,6 +15,12 @@ pub struct UiSession {
     base_url: String,
     cookie_store: Arc<CookieStoreMutex>,
     client: reqwest::Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginResult {
+    LoggedIn,
+    TwoFactorRequired,
 }
 
 impl UiSession {
@@ -85,7 +90,7 @@ impl UiSession {
         session
             .login_with_creds(&creds.username, &creds.password)
             .await?;
-        session.persist_cookie_jar().await?;
+        session.persist_cookie_jar_required().await?;
         Ok(session)
     }
 
@@ -114,20 +119,25 @@ impl UiSession {
         let cookie_store = CookieStoreMutex::new(CookieStore::default());
 
         if let Some(jar) = cookie_jar {
-            load_cookie_jar_into_store(&cookie_store, jar)?;
+            session_cookies::load_cookie_jar_into_store(&cookie_store, jar)?;
         }
 
         let cookie_store = Arc::new(cookie_store);
-        let mut builder = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .redirect(Policy::limited(10))
             .timeout(Duration::from_secs(60))
             .cookie_provider(Arc::clone(&cookie_store));
 
         #[cfg(unix)]
-        if let Some(socket_path) = effective_socket {
-            builder = builder.unix_socket(socket_path);
-        }
+        let builder = if let Some(socket_path) = effective_socket {
+            builder.unix_socket(socket_path)
+        } else {
+            builder
+        };
+
+        #[cfg(not(unix))]
+        let _ = effective_socket;
 
         let client = builder.build().wrap_err("failed to build http client")?;
 
@@ -147,7 +157,7 @@ impl UiSession {
             .await
             .wrap_err("failed to probe session")?;
 
-        if is_logged_out_url(resp.url()) {
+        if is_auth_challenge_url(resp.url()) {
             return Ok(false);
         }
         if resp.status().as_u16() >= 400 {
@@ -171,11 +181,31 @@ impl UiSession {
         })?;
         self.login_with_creds(&creds.username, &creds.password)
             .await?;
-        self.persist_cookie_jar().await?;
+        self.persist_cookie_jar_required().await?;
         Ok(())
     }
 
     pub async fn login_with_creds(&self, username: &str, password: &str) -> eyre::Result<()> {
+        match self
+            .login_with_creds_and_otp(username, password, None)
+            .await?
+        {
+            LoginResult::LoggedIn => Ok(()),
+            LoginResult::TwoFactorRequired => Err(eyre!(
+                "Two-factor authentication is required for '{}' on '{}'. Run `fj-ex auth login --host {}` to refresh the stored UI cookies.",
+                username,
+                self.storage_base_url(),
+                self.storage_base_url()
+            )),
+        }
+    }
+
+    pub async fn login_with_creds_and_otp(
+        &self,
+        username: &str,
+        password: &str,
+        otp: Option<&str>,
+    ) -> eyre::Result<LoginResult> {
         {
             let mut guard = self.cookie_store.lock().unwrap();
             guard.clear();
@@ -211,23 +241,99 @@ impl UiSession {
             form.push(("_csrf", csrf));
         }
 
-        self.client
+        let login_resp = self
+            .client
             .post(&login_url)
             .form(&form)
             .send()
             .await
             .wrap_err("failed to post login form")?;
 
+        if is_two_factor_url(login_resp.url()) {
+            let Some(passcode) = otp else {
+                return Ok(LoginResult::TwoFactorRequired);
+            };
+
+            self.submit_two_factor_code(passcode).await?;
+            return Ok(LoginResult::LoggedIn);
+        }
+
         let ok = self.test_session().await?;
         if !ok {
             return Err(eyre!(
-                "Login failed for '{}' on '{}' (landed on /user/login while validating).",
+                "Login failed for '{}' on '{}' (session validation returned to the login flow).",
                 username,
                 self.base_url
             ));
         }
 
+        Ok(LoginResult::LoggedIn)
+    }
+
+    pub async fn submit_two_factor_code(&self, passcode: &str) -> eyre::Result<()> {
+        let passcode = passcode.trim();
+        if passcode.is_empty() {
+            return Err(eyre!("Two-factor passcode must not be empty."));
+        }
+
+        let two_factor_url = format!("{}/user/two_factor", self.request_base_url());
+        let csrf = self.load_two_factor_csrf(&two_factor_url).await?;
+
+        let mut form = vec![("passcode", passcode.to_string())];
+        if let Some(csrf) = csrf {
+            form.push(("_csrf", csrf));
+        }
+
+        let resp = self
+            .client
+            .post(&two_factor_url)
+            .form(&form)
+            .send()
+            .await
+            .wrap_err("failed to post two-factor form")?;
+
+        if is_two_factor_url(resp.url()) {
+            return Err(eyre!(
+                "Two-factor passcode was rejected for '{}'.",
+                self.base_url
+            ));
+        }
+        if is_login_url(resp.url()) {
+            return Err(eyre!(
+                "Login failed for '{}' after two-factor validation.",
+                self.base_url
+            ));
+        }
+
+        let ok = self.test_session().await?;
+        if !ok {
+            return Err(eyre!(
+                "Login failed for '{}' after two-factor validation.",
+                self.base_url
+            ));
+        }
+
         Ok(())
+    }
+
+    async fn load_two_factor_csrf(&self, two_factor_url: &str) -> eyre::Result<Option<String>> {
+        let resp = self
+            .client
+            .get(two_factor_url)
+            .send()
+            .await
+            .wrap_err("failed to load two-factor page")?;
+
+        if resp.status() != reqwest::StatusCode::OK {
+            return Ok(None);
+        }
+
+        let html = resp
+            .text()
+            .await
+            .wrap_err("failed to read two-factor html")?;
+
+        Ok(html::get_csrf_from_login_html(&html))
     }
 
     pub async fn get_text(&self, url: &str, retry_on_logout: bool) -> eyre::Result<String> {
@@ -296,8 +402,14 @@ impl UiSession {
     }
 
     pub async fn persist_cookie_jar(&self) -> eyre::Result<()> {
-        let jar = cookie_jar_from_store(&self.cookie_store)?;
+        let jar = session_cookies::cookie_jar_from_store(&self.cookie_store)?;
         store::save_cookie_jar(self.storage_base_url(), jar).await?;
+        Ok(())
+    }
+
+    pub async fn persist_cookie_jar_required(&self) -> eyre::Result<()> {
+        let jar = session_cookies::cookie_jar_from_store(&self.cookie_store)?;
+        store::save_cookie_jar_required(self.storage_base_url(), jar).await?;
         Ok(())
     }
 
@@ -307,10 +419,10 @@ impl UiSession {
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> eyre::Result<reqwest::Response> {
         let resp = build().send().await.wrap_err("request failed")?;
-        if retry_on_logout && is_logged_out_url(resp.url()) {
+        if retry_on_logout && is_auth_challenge_url(resp.url()) {
             self.relogin_from_store().await?;
             let resp = build().send().await.wrap_err("request failed")?;
-            self.persist_cookie_jar().await?;
+            self.persist_cookie_jar_required().await?;
             return Ok(resp);
         }
 
@@ -319,106 +431,16 @@ impl UiSession {
     }
 }
 
-fn is_logged_out_url(url: &Url) -> bool {
+fn is_auth_challenge_url(url: &Url) -> bool {
+    is_login_url(url) || is_two_factor_url(url)
+}
+
+fn is_login_url(url: &Url) -> bool {
     url.path().starts_with("/user/login")
 }
 
-fn load_cookie_jar_into_store(
-    cookie_store: &CookieStoreMutex,
-    jar: &store::CookieJar,
-) -> eyre::Result<()> {
-    let mut guard = cookie_store.lock().unwrap();
-
-    for record in &jar.cookies {
-        let domain = record.domain.trim().trim_start_matches('.');
-        if domain.is_empty() {
-            continue;
-        }
-
-        let request_url = match Url::parse(&format!("https://{domain}/")) {
-            Ok(u) => u,
-            Err(_) => continue,
-        };
-
-        let mut builder =
-            cookie_store::RawCookie::build((record.name.clone(), record.value.clone()))
-                .domain(domain.to_string())
-                .path(record.path.clone())
-                .secure(record.secure)
-                .http_only(record.http_only);
-
-        if let Some(same_site) = record.same_site.as_deref() {
-            let same_site = match same_site.to_ascii_lowercase().as_str() {
-                "lax" => Some(cookie::SameSite::Lax),
-                "strict" => Some(cookie::SameSite::Strict),
-                "none" => Some(cookie::SameSite::None),
-                _ => None,
-            };
-            if let Some(same_site) = same_site {
-                builder = builder.same_site(same_site);
-            }
-        }
-
-        if let Some(expires) = record.expires_utc.as_deref() {
-            if let Ok(dt) =
-                time::OffsetDateTime::parse(expires, &time::format_description::well_known::Rfc3339)
-            {
-                builder = builder.expires(dt);
-            }
-        }
-
-        let raw_cookie = builder.build();
-        let cookie = Cookie::try_from_raw_cookie(&raw_cookie, &request_url)
-            .wrap_err("failed to reconstruct cookie")?
-            .into_owned();
-        let _ = guard.insert(cookie, &request_url);
-    }
-
-    Ok(())
-}
-
-fn cookie_jar_from_store(cookie_store: &CookieStoreMutex) -> eyre::Result<store::CookieJar> {
-    let guard = cookie_store.lock().unwrap();
-    let now = OffsetDateTime::now_utc();
-
-    let mut cookies = Vec::new();
-    for c in guard.iter_any() {
-        if c.is_expired() {
-            continue;
-        }
-
-        let domain = c.domain.as_cow().map(|s| s.to_string()).unwrap_or_default();
-        if domain.is_empty() {
-            continue;
-        }
-
-        let expires_utc = match c.expires {
-            CookieExpiration::AtUtc(dt) => Some(
-                dt.format(&time::format_description::well_known::Rfc3339)
-                    .unwrap_or_default(),
-            ),
-            CookieExpiration::SessionEnd => None,
-        };
-
-        cookies.push(store::CookieRecord {
-            name: c.name().to_string(),
-            value: c.value().to_string(),
-            domain,
-            path: c.path.to_string(),
-            expires_utc,
-            secure: c.secure().unwrap_or(false),
-            http_only: c.http_only().unwrap_or(false),
-            same_site: c.same_site().map(|s| s.to_string()),
-        });
-    }
-
-    Ok(store::CookieJar {
-        saved_utc: Some(
-            now.format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default(),
-        ),
-        cookies,
-    })
+fn is_two_factor_url(url: &Url) -> bool {
+    url.path().starts_with("/user/two_factor")
 }
 
 #[cfg(test)]
@@ -426,32 +448,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cookie_records_roundtrip_into_cookie_store() {
-        let jar = store::CookieJar {
-            saved_utc: Some("2020-01-01T00:00:00Z".to_string()),
-            cookies: vec![store::CookieRecord {
-                name: "a".to_string(),
-                value: "b".to_string(),
-                domain: "forge.example.com".to_string(),
-                path: "/".to_string(),
-                expires_utc: None,
-                secure: true,
-                http_only: true,
-                same_site: Some("Lax".to_string()),
-            }],
-        };
+    fn login_and_two_factor_urls_are_auth_challenges() {
+        let login = Url::parse("https://forge.example.com/user/login").unwrap();
+        let two_factor = Url::parse("https://forge.example.com/user/two_factor").unwrap();
+        let settings = Url::parse("https://forge.example.com/user/settings").unwrap();
 
-        let cookie_store = CookieStoreMutex::new(CookieStore::default());
-        load_cookie_jar_into_store(&cookie_store, &jar).unwrap();
-
-        let out = cookie_jar_from_store(&cookie_store).unwrap();
-        assert_eq!(out.cookies.len(), 1);
-        assert_eq!(out.cookies[0].name, "a");
-        assert_eq!(out.cookies[0].value, "b");
-        assert_eq!(out.cookies[0].domain, "forge.example.com");
-        assert_eq!(out.cookies[0].path, "/");
-        assert!(out.cookies[0].secure);
-        assert!(out.cookies[0].http_only);
-        assert_eq!(out.cookies[0].same_site.as_deref(), Some("Lax"));
+        assert!(is_auth_challenge_url(&login));
+        assert!(is_auth_challenge_url(&two_factor));
+        assert!(!is_auth_challenge_url(&settings));
     }
 }

@@ -21,6 +21,9 @@ fj-ex --help
 # Login (interactive)
 fj-ex auth login --host forge.example.com
 
+# Login with 2FA in scripts (stdin lines are password, then passcode)
+printf "my-password\n123456\n" | fj-ex auth login --host forge.example.com --username my-user --password-stdin --otp-stdin
+
 # Mint a NuGet API key (requires `fj auth login` + `fj-ex auth login`)
 fj-ex token mint nuget --host forge.example.com --owner my-org
 fj-ex token list --host forge.example.com
@@ -88,6 +91,8 @@ fj auth login      # stored API token for Authorization: token ...
 ```
 
 This is required for automatic re-login. Downloaded logs and artifacts may contain secrets — handle accordingly.
+
+If your account uses two-factor authentication, `fj-ex auth login` prompts for the current passcode after the password step. For noninteractive use, pass `--otp`, `--otp-stdin`, or set `FJ_OTP`. The passcode is not stored; only the resulting UI cookies are stored so later commands can reuse the session until Forgejo expires it.
 
 ## License
 

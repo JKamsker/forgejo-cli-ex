@@ -131,6 +131,16 @@ pub struct LoginCommand {
     /// Read password from stdin (first line; falls back to prompt if empty)
     #[arg(long, conflicts_with = "password")]
     pub password_stdin: bool,
+
+    /// Two-factor passcode (unsafe: visible in process list; prefer --otp-stdin or prompt)
+    #[arg(long, conflicts_with = "otp_stdin")]
+    pub otp: Option<String>,
+
+    /// Read two-factor passcode from stdin.
+    ///
+    /// When used with --password-stdin, the password is the first line and the passcode is the second.
+    #[arg(long, conflicts_with = "otp")]
+    pub otp_stdin: bool,
 }
 
 #[derive(Args, Debug, Clone)]

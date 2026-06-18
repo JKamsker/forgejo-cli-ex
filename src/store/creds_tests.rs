@@ -2,8 +2,8 @@ use std::{path::Path, sync::Arc, time::Duration};
 
 use super::{
     creds::{
-        save_cookie_jar_with_paths, set_ui_creds_with_paths, CookieJar, CookieRecord, CredsStore,
-        StoreEntry,
+        save_cookie_jar_required_with_paths, save_cookie_jar_with_paths, set_ui_creds_with_paths,
+        CookieJar, CookieRecord, CredsStore, StoreEntry,
     },
     file::{read_creds_store_with_paths, update_creds_store},
     lock::{acquire_store_lock, StoreLockMode},
@@ -52,6 +52,26 @@ fn save_cookie_jar_preserves_existing_creds() {
             .unwrap_or_default(),
         1
     );
+}
+
+#[test]
+fn required_cookie_save_preserves_existing_creds() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_store_paths(temp.path());
+
+    set_ui_creds_with_paths(&paths, "https://forge.example.com", "alice", "secret").unwrap();
+    save_cookie_jar_required_with_paths(
+        &paths,
+        "https://forge.example.com",
+        test_cookie_jar("session-a"),
+    )
+    .unwrap();
+
+    let store = read_creds_store_with_paths(&paths).unwrap();
+    let entry = store.get("forge.example.com").unwrap();
+    assert_eq!(entry.username.as_deref(), Some("alice"));
+    assert_eq!(entry.password.as_deref(), Some("secret"));
+    assert!(entry.cookie_jar.is_some());
 }
 
 #[test]
@@ -139,7 +159,7 @@ fn read_creds_store_removes_cookie_only_entry() {
 }
 
 #[test]
-fn concurrent_cookie_saves_preserve_creds_and_valid_json() {
+fn concurrent_optional_cookie_saves_preserve_creds_and_valid_json() {
     let temp = tempfile::tempdir().unwrap();
     let paths = Arc::new(test_store_paths(temp.path()));
     set_ui_creds_with_paths(&paths, "https://forge.example.com", "alice", "secret").unwrap();
@@ -169,7 +189,9 @@ fn concurrent_cookie_saves_preserve_creds_and_valid_json() {
     let entry = store.get("forge.example.com").unwrap();
     assert_eq!(entry.username.as_deref(), Some("alice"));
     assert_eq!(entry.password.as_deref(), Some("secret"));
-    assert!(entry.cookie_jar.is_some());
+    if let Some(jar) = entry.cookie_jar.as_ref() {
+        assert_eq!(jar.cookies.len(), 1);
+    }
 }
 
 #[test]
@@ -266,6 +288,7 @@ fn test_cookie_jar(value: &str) -> CookieJar {
             name: "i_like_forgejo".to_string(),
             value: value.to_string(),
             domain: "forge.example.com".to_string(),
+            host_only: true,
             path: "/".to_string(),
             expires_utc: None,
             secure: true,

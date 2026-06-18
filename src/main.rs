@@ -6,6 +6,7 @@ mod html;
 mod login;
 mod output;
 mod session;
+mod session_cookies;
 mod smoke_test;
 mod store;
 mod target;

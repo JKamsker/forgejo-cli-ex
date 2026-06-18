@@ -44,6 +44,9 @@ pub struct CookieRecord {
     pub value: String,
     pub domain: String,
 
+    #[serde(rename = "hostOnly", default)]
+    pub host_only: bool,
+
     #[serde(default = "default_cookie_path")]
     pub path: String,
 
@@ -198,18 +201,42 @@ pub(super) fn clear_cookie_jar_with_paths(paths: &StorePaths, base_url: &str) ->
 
 pub async fn save_cookie_jar(base_url: &str, cookie_jar: CookieJar) -> eyre::Result<()> {
     let paths = ui_creds_store_paths()?;
-    save_cookie_jar_with_paths(&paths, base_url, cookie_jar)
+    save_cookie_jar_with_paths_and_mode(&paths, base_url, cookie_jar, StoreLockMode::Optional)
 }
 
+pub async fn save_cookie_jar_required(base_url: &str, cookie_jar: CookieJar) -> eyre::Result<()> {
+    let paths = ui_creds_store_paths()?;
+    save_cookie_jar_with_paths_and_mode(&paths, base_url, cookie_jar, StoreLockMode::Required)
+}
+
+#[cfg(test)]
 pub(super) fn save_cookie_jar_with_paths(
     paths: &StorePaths,
     base_url: &str,
     cookie_jar: CookieJar,
 ) -> eyre::Result<()> {
+    save_cookie_jar_with_paths_and_mode(paths, base_url, cookie_jar, StoreLockMode::Optional)
+}
+
+#[cfg(test)]
+pub(super) fn save_cookie_jar_required_with_paths(
+    paths: &StorePaths,
+    base_url: &str,
+    cookie_jar: CookieJar,
+) -> eyre::Result<()> {
+    save_cookie_jar_with_paths_and_mode(paths, base_url, cookie_jar, StoreLockMode::Required)
+}
+
+fn save_cookie_jar_with_paths_and_mode(
+    paths: &StorePaths,
+    base_url: &str,
+    cookie_jar: CookieJar,
+    lock_mode: StoreLockMode,
+) -> eyre::Result<()> {
     let normalized = crate::target::normalize_base_url(base_url)?;
     let host_key = crate::target::normalize_host_key(&normalized)?;
 
-    file::update_creds_store(paths, StoreLockMode::Optional, |store| {
+    file::update_creds_store(paths, lock_mode, |store| {
         let Some(mut entry) = take_store_entry(store, &normalized, &host_key) else {
             return Ok(((), false));
         };

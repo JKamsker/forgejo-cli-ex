@@ -15,11 +15,20 @@ pub fn get_html_attribute_value(html: &str, attribute_name: &str) -> Option<Stri
     Some(html_decode(value))
 }
 
+pub fn get_input_value_by_name(html: &str, input_name: &str) -> Option<String> {
+    let input_re = Regex::new(r#"(?is)<input\b[^>]*>"#).ok()?;
+    for input in input_re.find_iter(html) {
+        let input = input.as_str();
+        if get_html_attribute_value(input, "name").as_deref() == Some(input_name) {
+            return get_html_attribute_value(input, "value");
+        }
+    }
+
+    None
+}
+
 pub fn get_csrf_from_login_html(html: &str) -> Option<String> {
-    let re = Regex::new(r#"name="_csrf"\s+value="([^"]+)""#).ok()?;
-    let caps = re.captures(html)?;
-    let value = caps.get(1)?.as_str();
-    Some(html_decode(value))
+    get_input_value_by_name(html, "_csrf")
 }
 
 pub fn get_csrf_token_from_html(html: &str) -> Option<String> {
@@ -52,6 +61,12 @@ mod tests {
     #[test]
     fn csrf_is_extracted_and_decoded() {
         let html = r#"<input type="hidden" name="_csrf" value="abc&amp;123">"#;
+        assert_eq!(get_csrf_from_login_html(html).as_deref(), Some("abc&123"));
+    }
+
+    #[test]
+    fn csrf_is_extracted_when_value_precedes_name() {
+        let html = r#"<input value="abc&amp;123" type="hidden" name="_csrf">"#;
         assert_eq!(get_csrf_from_login_html(html).as_deref(), Some("abc&123"));
     }
 
