@@ -377,6 +377,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         job_index,
                         attempt,
                         out_file,
+                        follow,
+                        follow_interval,
                     } => {
                         let run_index = resolve_run_index(
                             &session,
@@ -387,40 +389,80 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         )
                         .await?;
                         let job_index_i64 = job_index as i64;
-                        let attempt = match attempt {
-                            Some(a) => a.get() as i64,
-                            None => {
-                                crate::ui_actions::get_job_view_meta(
-                                    &session,
-                                    &repo,
-                                    run_index,
-                                    job_index_i64,
-                                )
-                                .await?
-                                .attempt_number
-                            }
-                        };
-                        let resp = crate::ui_actions::open_job_logs(
-                            &session,
-                            &repo,
-                            run_index,
-                            job_index_i64,
-                            attempt,
-                        )
-                        .await?;
+                        let mut previous = Vec::new();
+                        loop {
+                            let attempt = match attempt {
+                                Some(a) => a.get() as i64,
+                                None => {
+                                    crate::ui_actions::get_job_view_meta(
+                                        &session,
+                                        &repo,
+                                        run_index,
+                                        job_index_i64,
+                                    )
+                                    .await?
+                                    .attempt_number
+                                }
+                            };
+                            let resp = crate::ui_actions::open_job_logs(
+                                &session,
+                                &repo,
+                                run_index,
+                                job_index_i64,
+                                attempt,
+                            )
+                            .await?;
 
-                        if let Some(out_file) = out_file {
-                            if let Some(parent) = out_file.parent() {
-                                tokio::fs::create_dir_all(parent).await?;
+                            if !follow {
+                                if let Some(out_file) = out_file.as_ref() {
+                                    if let Some(parent) = out_file.parent() {
+                                        tokio::fs::create_dir_all(parent).await?;
+                                    }
+                                    let mut file = tokio::fs::File::create(out_file).await?;
+                                    crate::ui_actions::copy_response_body(resp, &mut file).await?;
+                                    file.flush().await?;
+                                    println!("{}", out_file.display());
+                                } else {
+                                    let mut stdout = tokio::io::stdout();
+                                    crate::ui_actions::copy_response_body(resp, &mut stdout)
+                                        .await?;
+                                    stdout.flush().await?;
+                                }
+                                break;
                             }
-                            let mut file = tokio::fs::File::create(&out_file).await?;
-                            crate::ui_actions::copy_response_body(resp, &mut file).await?;
-                            file.flush().await?;
-                            println!("{}", out_file.display());
-                        } else {
-                            let mut stdout = tokio::io::stdout();
-                            crate::ui_actions::copy_response_body(resp, &mut stdout).await?;
-                            stdout.flush().await?;
+
+                            let current = resp
+                                .bytes()
+                                .await
+                                .wrap_err("failed to read job log response")?
+                                .to_vec();
+                            let (delta, reset) = log_delta(&previous, &current);
+                            if reset {
+                                eprintln!("== job log was replaced; replaying current snapshot ==");
+                            }
+                            if !delta.is_empty() {
+                                let mut stdout = tokio::io::stdout();
+                                stdout.write_all(delta).await?;
+                                stdout.flush().await?;
+                            }
+                            previous = current;
+
+                            let run_status =
+                                crate::ui_actions::list_runs(&session, &repo, None, 1, 50)
+                                    .await?
+                                    .into_iter()
+                                    .find(|run| run.run_index == run_index)
+                                    .and_then(|run| run.status);
+                            if run_status_is_terminal(run_status.as_deref()).is_some() {
+                                if let Some(err) =
+                                    run_terminal_error(run_index, run_status.as_deref(), &[])
+                                {
+                                    return Err(err);
+                                }
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(follow_interval))
+                                .await;
                         }
                     }
                     ActionsLogsSubcommand::Run {
@@ -1293,6 +1335,12 @@ fn run_terminal_error(
         ));
     }
 
+    // A terminal success from the Actions list is authoritative even when the
+    // per-job run-page payload has not caught up yet.
+    if matches!(run_status.as_deref(), Some("success" | "skipped")) {
+        return None;
+    }
+
     if jobs.is_empty() {
         return Some(eyre!("run {run_index} returned no jobs"));
     }
@@ -1320,13 +1368,26 @@ fn run_terminal_error(
 
 #[cfg(test)]
 mod tests {
-    use super::run_status_is_terminal;
+    use super::{log_delta, run_status_is_terminal};
 
     #[test]
     fn terminal_run_status_overrides_a_stale_job_snapshot() {
         assert_eq!(run_status_is_terminal(Some("Failure")), Some(true));
         assert_eq!(run_status_is_terminal(Some("running")), Some(false));
         assert_eq!(run_status_is_terminal(None), None);
+    }
+
+    #[test]
+    fn follow_log_only_emits_new_bytes_and_detects_replacement() {
+        assert_eq!(log_delta(b"one", b"one two"), (b" two".as_slice(), false));
+        assert_eq!(log_delta(b"one", b"other"), (b"other".as_slice(), true));
+    }
+}
+
+fn log_delta<'a>(previous: &[u8], current: &'a [u8]) -> (&'a [u8], bool) {
+    match current.strip_prefix(previous) {
+        Some(delta) => (delta, false),
+        None => (current, true),
     }
 }
 

@@ -99,6 +99,7 @@ fj-ex actions runs --repo owner/name --workflow ci.yml
 ```sh
 fj-ex actions jobs --repo owner/name --latest
 fj-ex actions jobs --repo owner/name --latest --watch
+fj-ex actions jobs --repo owner/name --run-index 50 --watch --json
 ```
 
 ---
@@ -110,6 +111,7 @@ Download a single job's log to stdout:
 ```sh
 fj-ex actions logs job --repo owner/name --latest --job-index 0
 fj-ex actions logs job --repo owner/name --run-index 50 --job-index 0
+fj-ex actions logs job --repo owner/name --run-index 50 --job-index 0 --follow --follow-interval 5
 ```
 
 Download all logs for a run to files:

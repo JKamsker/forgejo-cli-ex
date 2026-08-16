@@ -31,8 +31,8 @@ fj-ex token list --host forge.example.com
 # List recent runs
 fj-ex actions runs --repo owner/name --latest
 
-# Stream job logs to stdout
-fj-ex actions logs job --repo owner/name --latest --job-index 0
+# Follow a running job without reprinting its prior log bytes
+fj-ex actions logs job --repo owner/name --latest --job-index 0 --follow
 
 # Cancel / rerun (preview first with --dry-run)
 fj-ex actions cancel --repo owner/name --run-index 50 --dry-run
@@ -53,7 +53,7 @@ fj-ex actions runners jobs  --repo owner/name --waiting
 | `token` | Mint and list personal access tokens |
 | `actions runs` | List workflow runs (filter by status, workflow, latest) |
 | `actions jobs` | List jobs for a run, optionally `--watch` |
-| `actions logs` | Download logs for a job or full run |
+| `actions logs` | Download complete job/run logs; `logs job --follow` prints only newly appended bytes |
 | `actions artifacts` | List / download artifacts |
 | `actions cancel` | Cancel a running workflow |
 | `actions rerun` | Rerun a workflow (optionally `--failed-only`) |
@@ -62,6 +62,15 @@ fj-ex actions runners jobs  --repo owner/name --waiting
 | `smoke-test` | Non-destructive end-to-end validation |
 
 Full command reference with all flags: [docs/commands.md](docs/commands.md)
+
+## CI observation contract
+
+Use `actions runs` or `actions jobs --watch --json` to decide whether a run has
+finished. The JSON job snapshot includes `runStatus` and `observedAtUnixMs`;
+`runStatus` from the Actions list is authoritative when the run page still has
+stale job data. Use `actions logs job --follow` only for progress, and download
+the complete job or run log after a terminal failure to diagnose it. Logs never
+decide the terminal state.
 
 ## Target resolution
 
