@@ -271,6 +271,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
 
                     let interactive = std::io::stdout().is_terminal();
                     let mut last_sig: Option<String> = None;
+                    let mut terminal_status: Option<String> = None;
+                    let mut terminal_observations = 0_u8;
 
                     loop {
                         // The job state embedded in a run page can lag behind the Actions
@@ -296,8 +298,11 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         let changed = last_sig.as_deref() != Some(sig.as_str());
                         last_sig = Some(sig);
 
-                        let done = run_status_is_terminal(run_status.as_deref())
-                            .unwrap_or_else(|| is_run_done_from_jobs(&jobs));
+                        let done = observe_terminal_run_status(
+                            &mut terminal_status,
+                            &mut terminal_observations,
+                            run_status.as_deref(),
+                        ) || (run_status.is_none() && is_run_done_from_jobs(&jobs));
 
                         // For watch, only print intermediate updates when interactive. Always print final.
                         let should_print = !watch || done || (interactive && changed);
@@ -390,6 +395,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         .await?;
                         let job_index_i64 = job_index as i64;
                         let mut previous = Vec::new();
+                        let mut terminal_status: Option<String> = None;
+                        let mut terminal_observations = 0_u8;
                         loop {
                             let attempt = match attempt {
                                 Some(a) => a.get() as i64,
@@ -453,7 +460,11 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                     .into_iter()
                                     .find(|run| run.run_index == run_index)
                                     .and_then(|run| run.status);
-                            if run_status_is_terminal(run_status.as_deref()).is_some() {
+                            if observe_terminal_run_status(
+                                &mut terminal_status,
+                                &mut terminal_observations,
+                                run_status.as_deref(),
+                            ) {
                                 if let Some(err) =
                                     run_terminal_error(run_index, run_status.as_deref(), &[])
                                 {
@@ -1310,6 +1321,30 @@ fn run_status_is_terminal(status: Option<&str>) -> Option<bool> {
     ))
 }
 
+/// Forgejo can briefly return a previous terminal run status while a rerun
+/// attempt is being scheduled. Require the same terminal status twice before
+/// using it to stop a watch or log follow operation.
+fn observe_terminal_run_status(
+    previous: &mut Option<String>,
+    observations: &mut u8,
+    status: Option<&str>,
+) -> bool {
+    let Some(status) = status.filter(|status| run_status_is_terminal(Some(status)) == Some(true))
+    else {
+        *previous = None;
+        *observations = 0;
+        return false;
+    };
+    let status = normalize_run_status(status);
+    if previous.as_deref() == Some(status.as_str()) {
+        *observations = observations.saturating_add(1);
+    } else {
+        *previous = Some(status);
+        *observations = 1;
+    }
+    *observations >= 2
+}
+
 fn is_run_done_from_jobs(jobs: &[crate::ui_actions::JobInfo]) -> bool {
     let in_progress = ["running", "queued", "pending", "waiting"];
     !jobs.iter().any(|j| {
@@ -1368,7 +1403,7 @@ fn run_terminal_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{log_delta, run_status_is_terminal};
+    use super::{log_delta, observe_terminal_run_status, run_status_is_terminal};
 
     #[test]
     fn terminal_run_status_overrides_a_stale_job_snapshot() {
@@ -1381,6 +1416,32 @@ mod tests {
     fn follow_log_only_emits_new_bytes_and_detects_replacement() {
         assert_eq!(log_delta(b"one", b"one two"), (b" two".as_slice(), false));
         assert_eq!(log_delta(b"one", b"other"), (b"other".as_slice(), true));
+    }
+
+    #[test]
+    fn terminal_status_must_be_stable_across_two_observations() {
+        let mut previous = None;
+        let mut observations = 0;
+        assert!(!observe_terminal_run_status(
+            &mut previous,
+            &mut observations,
+            Some("Failure"),
+        ));
+        assert!(!observe_terminal_run_status(
+            &mut previous,
+            &mut observations,
+            Some("Running"),
+        ));
+        assert!(!observe_terminal_run_status(
+            &mut previous,
+            &mut observations,
+            Some("Failure"),
+        ));
+        assert!(observe_terminal_run_status(
+            &mut previous,
+            &mut observations,
+            Some("Failure"),
+        ));
     }
 }
 

@@ -68,7 +68,8 @@ Full command reference with all flags: [docs/commands.md](docs/commands.md)
 Use `actions runs` or `actions jobs --watch --json` to decide whether a run has
 finished. The JSON job snapshot includes `runStatus` and `observedAtUnixMs`;
 `runStatus` from the Actions list is authoritative when the run page still has
-stale job data. Use `actions logs job --follow` only for progress, and download
+stale job data. A terminal status must be observed twice because Forgejo can
+briefly report a previous terminal state while scheduling a rerun attempt. Use `actions logs job --follow` only for progress, and download
 the complete job or run log after a terminal failure to diagnose it. Logs never
 decide the terminal state.
 
