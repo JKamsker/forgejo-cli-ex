@@ -620,21 +620,19 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 .await?;
 
                         if json {
+                            let items = artifact_items(&artifacts);
                             let payload = serde_json::json!({
                                 "baseUrl": target.base_url,
                                 "repo": repo,
                                 "runIndex": run_index,
-                                "artifacts": artifacts,
+                                "artifactCount": items.len(),
+                                "artifacts": items,
                             });
                             println!("{}", serde_json::to_string_pretty(&payload)?);
                             return Ok(());
                         }
 
-                        let items = artifacts
-                            .get("artifacts")
-                            .and_then(|v| v.as_array())
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]);
+                        let items = artifact_items(&artifacts);
 
                         let show_header = crate::output::should_print_header(header, no_header);
                         let headers = ["Id", "Name", "Size"];
@@ -1407,7 +1405,7 @@ fn run_terminal_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{log_delta, observe_terminal_run_status, run_status_is_terminal};
+    use super::{artifact_items, log_delta, observe_terminal_run_status, run_status_is_terminal};
 
     #[test]
     fn terminal_run_status_overrides_a_stale_job_snapshot() {
@@ -1447,6 +1445,13 @@ mod tests {
             Some("Failure"),
         ));
     }
+
+    #[test]
+    fn artifact_response_is_normalized_to_its_item_list() {
+        let response = serde_json::json!({"artifacts": [{"name": "apk"}]});
+        assert_eq!(artifact_items(&response).len(), 1);
+        assert!(artifact_items(&serde_json::json!({})).is_empty());
+    }
 }
 
 fn log_delta<'a>(previous: &[u8], current: &'a [u8]) -> (&'a [u8], bool) {
@@ -1454,6 +1459,14 @@ fn log_delta<'a>(previous: &[u8], current: &'a [u8]) -> (&'a [u8], bool) {
         Some(delta) => (delta, false),
         None => (current, true),
     }
+}
+
+fn artifact_items(artifacts: &serde_json::Value) -> &[serde_json::Value] {
+    artifacts
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 fn safe_filename_component(job_name: &str, job_index: i64) -> String {
