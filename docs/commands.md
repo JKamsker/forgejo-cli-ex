@@ -100,6 +100,7 @@ fj-ex actions runs --repo owner/name --workflow ci.yml
 fj-ex actions jobs --repo owner/name --latest
 fj-ex actions jobs --repo owner/name --latest --watch
 fj-ex actions jobs --repo owner/name --run-index 50 --watch --json
+fj-ex actions jobs --repo owner/name --run-index 50 --watch --json-lines
 ```
 
 ---

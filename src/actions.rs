@@ -260,6 +260,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     header,
                     no_header,
                     json,
+                    json_lines,
                 } => {
                     let run_index =
                         resolve_run_index(&session, &repo, run_index, latest, workflow.as_deref())
@@ -305,7 +306,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         ) || (run_status.is_none() && is_run_done_from_jobs(&jobs));
 
                         // For watch, only print intermediate updates when interactive. Always print final.
-                        let should_print = !watch || done || (interactive && changed);
+                        let should_print = !watch || done || json_lines || (interactive && changed);
 
                         if should_print {
                             if interactive && watch && !json {
@@ -314,15 +315,18 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 let _ = std::io::stdout().flush();
                             }
 
-                            if json {
-                                // In watch+json mode, only print the final JSON snapshot.
-                                if !watch || done {
+                            if json || json_lines {
+                                // The default JSON mode prints a final snapshot. JSON lines is
+                                // deliberately opt-in because it is intended for streaming parsers.
+                                if !watch || done || json_lines {
                                     let payload = serde_json::json!({
                                         "baseUrl": target.base_url,
                                         "repo": repo,
                                         "runIndex": run_index,
                                         "runStatus": run_status,
                                         "observedAtUnixMs": observed_at_unix_ms(),
+                                        "terminalObservations": terminal_observations,
+                                        "complete": done,
                                         "jobs": jobs.iter().map(|j| serde_json::json!({
                                             "runIndex": j.run_index,
                                             "jobIndex": j.job_index,

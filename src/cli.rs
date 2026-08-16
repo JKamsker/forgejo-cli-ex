@@ -307,6 +307,13 @@ pub enum ActionsSubcommand {
         no_header: bool,
         #[arg(long, help = "Print JSON output.")]
         json: bool,
+        #[arg(
+            long,
+            conflicts_with = "json",
+            requires = "watch",
+            help = "Emit one JSON snapshot per polling interval while watching."
+        )]
+        json_lines: bool,
     },
     /// Download and print logs.
     Logs {
