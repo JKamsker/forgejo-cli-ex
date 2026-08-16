@@ -1,6 +1,7 @@
 use std::io::IsTerminal;
 use std::num::NonZeroU64;
 use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use eyre::{eyre, Context};
 use tokio::io::AsyncWriteExt;
@@ -272,6 +273,13 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     let mut last_sig: Option<String> = None;
 
                     loop {
+                        // The job state embedded in a run page can lag behind the Actions
+                        // list. The list is the authoritative source for a terminal run.
+                        let run_status = crate::ui_actions::list_runs(&session, &repo, None, 1, 50)
+                            .await?
+                            .into_iter()
+                            .find(|run| run.run_index == run_index)
+                            .and_then(|run| run.status);
                         let view = crate::ui_actions::get_run_view_data(&session, &repo, run_index)
                             .await
                             .wrap_err("failed to load run view")?;
@@ -288,7 +296,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         let changed = last_sig.as_deref() != Some(sig.as_str());
                         last_sig = Some(sig);
 
-                        let done = is_run_done_from_jobs(&jobs);
+                        let done = run_status_is_terminal(run_status.as_deref())
+                            .unwrap_or_else(|| is_run_done_from_jobs(&jobs));
 
                         // For watch, only print intermediate updates when interactive. Always print final.
                         let should_print = !watch || done || (interactive && changed);
@@ -307,6 +316,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                         "baseUrl": target.base_url,
                                         "repo": repo,
                                         "runIndex": run_index,
+                                        "runStatus": run_status,
+                                        "observedAtUnixMs": observed_at_unix_ms(),
                                         "jobs": jobs.iter().map(|j| serde_json::json!({
                                             "runIndex": j.run_index,
                                             "jobIndex": j.job_index,
@@ -342,7 +353,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         }
 
                         if done {
-                            if let Some(err) = run_terminal_error_from_jobs(run_index, &jobs) {
+                            if let Some(err) =
+                                run_terminal_error(run_index, run_status.as_deref(), &jobs)
+                            {
                                 return Err(err);
                             }
                             return Ok(());
@@ -1240,6 +1253,21 @@ fn normalize_run_status(raw: &str) -> String {
     s
 }
 
+fn observed_at_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn run_status_is_terminal(status: Option<&str>) -> Option<bool> {
+    let status = status?;
+    Some(matches!(
+        normalize_run_status(status).as_str(),
+        "success" | "failure" | "canceled" | "skipped" | "blocked"
+    ))
+}
+
 fn is_run_done_from_jobs(jobs: &[crate::ui_actions::JobInfo]) -> bool {
     let in_progress = ["running", "queued", "pending", "waiting"];
     !jobs.iter().any(|j| {
@@ -1249,10 +1277,22 @@ fn is_run_done_from_jobs(jobs: &[crate::ui_actions::JobInfo]) -> bool {
     })
 }
 
-fn run_terminal_error_from_jobs(
+fn run_terminal_error(
     run_index: i64,
+    run_status: Option<&str>,
     jobs: &[crate::ui_actions::JobInfo],
 ) -> Option<eyre::Report> {
+    let run_status = run_status.map(normalize_run_status);
+    if matches!(
+        run_status.as_deref(),
+        Some("failure" | "canceled" | "blocked")
+    ) {
+        return Some(eyre!(
+            "run {run_index} finished with status {}; job snapshot may be stale",
+            run_status.unwrap_or_default()
+        ));
+    }
+
     if jobs.is_empty() {
         return Some(eyre!("run {run_index} returned no jobs"));
     }
@@ -1275,6 +1315,18 @@ fn run_terminal_error_from_jobs(
             "run {run_index} finished with failures:\n - {}",
             failures.join("\n - ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_status_is_terminal;
+
+    #[test]
+    fn terminal_run_status_overrides_a_stale_job_snapshot() {
+        assert_eq!(run_status_is_terminal(Some("Failure")), Some(true));
+        assert_eq!(run_status_is_terminal(Some("running")), Some(false));
+        assert_eq!(run_status_is_terminal(None), None);
     }
 }
 
