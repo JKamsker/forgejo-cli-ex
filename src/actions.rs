@@ -1,6 +1,7 @@
 use std::io::IsTerminal;
 use std::num::NonZeroU64;
 use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use eyre::{eyre, Context};
 use tokio::io::AsyncWriteExt;
@@ -259,6 +260,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     header,
                     no_header,
                     json,
+                    json_lines,
                 } => {
                     let run_index =
                         resolve_run_index(&session, &repo, run_index, latest, workflow.as_deref())
@@ -270,8 +272,17 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
 
                     let interactive = std::io::stdout().is_terminal();
                     let mut last_sig: Option<String> = None;
+                    let mut terminal_status: Option<String> = None;
+                    let mut terminal_observations = 0_u8;
 
                     loop {
+                        // The job state embedded in a run page can lag behind the Actions
+                        // list. The list is the authoritative source for a terminal run.
+                        let run_status = crate::ui_actions::list_runs(&session, &repo, None, 1, 50)
+                            .await?
+                            .into_iter()
+                            .find(|run| run.run_index == run_index)
+                            .and_then(|run| run.status);
                         let view = crate::ui_actions::get_run_view_data(&session, &repo, run_index)
                             .await
                             .wrap_err("failed to load run view")?;
@@ -288,10 +299,23 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         let changed = last_sig.as_deref() != Some(sig.as_str());
                         last_sig = Some(sig);
 
-                        let done = is_run_done_from_jobs(&jobs);
+                        let done = observe_terminal_run_status(
+                            &mut terminal_status,
+                            &mut terminal_observations,
+                            run_status.as_deref(),
+                        ) || (run_status.is_none() && is_run_done_from_jobs(&jobs));
 
-                        // For watch, only print intermediate updates when interactive. Always print final.
-                        let should_print = !watch || done || (interactive && changed);
+                        // For watch, only print intermediate updates when interactive. JSON
+                        // Lines is also a streaming interface, but it emits only state deltas
+                        // rather than an identical full snapshot on every polling interval.
+                        // Always retain the final terminal snapshot.
+                        let should_print = should_print_jobs_snapshot(
+                            watch,
+                            done,
+                            interactive,
+                            json_lines,
+                            changed,
+                        );
 
                         if should_print {
                             if interactive && watch && !json {
@@ -300,13 +324,19 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 let _ = std::io::stdout().flush();
                             }
 
-                            if json {
-                                // In watch+json mode, only print the final JSON snapshot.
-                                if !watch || done {
+                            if json || json_lines {
+                                // The default JSON mode prints a final snapshot. JSON lines is
+                                // deliberately opt-in for streaming parsers and emits only
+                                // initial, changed, and terminal observations.
+                                if !watch || done || (json_lines && changed) {
                                     let payload = serde_json::json!({
                                         "baseUrl": target.base_url,
                                         "repo": repo,
                                         "runIndex": run_index,
+                                        "runStatus": run_status,
+                                        "observedAtUnixMs": observed_at_unix_ms(),
+                                        "terminalObservations": terminal_observations,
+                                        "complete": done,
                                         "jobs": jobs.iter().map(|j| serde_json::json!({
                                             "runIndex": j.run_index,
                                             "jobIndex": j.job_index,
@@ -342,7 +372,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         }
 
                         if done {
-                            if let Some(err) = run_terminal_error_from_jobs(run_index, &jobs) {
+                            if let Some(err) =
+                                run_terminal_error(run_index, run_status.as_deref(), &jobs)
+                            {
                                 return Err(err);
                             }
                             return Ok(());
@@ -364,6 +396,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         job_index,
                         attempt,
                         out_file,
+                        follow,
+                        follow_interval,
                     } => {
                         let run_index = resolve_run_index(
                             &session,
@@ -374,40 +408,86 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         )
                         .await?;
                         let job_index_i64 = job_index as i64;
-                        let attempt = match attempt {
-                            Some(a) => a.get() as i64,
-                            None => {
-                                crate::ui_actions::get_job_view_meta(
-                                    &session,
-                                    &repo,
-                                    run_index,
-                                    job_index_i64,
-                                )
-                                .await?
-                                .attempt_number
-                            }
-                        };
-                        let resp = crate::ui_actions::open_job_logs(
-                            &session,
-                            &repo,
-                            run_index,
-                            job_index_i64,
-                            attempt,
-                        )
-                        .await?;
+                        let mut previous = Vec::new();
+                        let mut terminal_status: Option<String> = None;
+                        let mut terminal_observations = 0_u8;
+                        loop {
+                            let attempt = match attempt {
+                                Some(a) => a.get() as i64,
+                                None => {
+                                    crate::ui_actions::get_job_view_meta(
+                                        &session,
+                                        &repo,
+                                        run_index,
+                                        job_index_i64,
+                                    )
+                                    .await?
+                                    .attempt_number
+                                }
+                            };
+                            let resp = crate::ui_actions::open_job_logs(
+                                &session,
+                                &repo,
+                                run_index,
+                                job_index_i64,
+                                attempt,
+                            )
+                            .await?;
 
-                        if let Some(out_file) = out_file {
-                            if let Some(parent) = out_file.parent() {
-                                tokio::fs::create_dir_all(parent).await?;
+                            if !follow {
+                                if let Some(out_file) = out_file.as_ref() {
+                                    if let Some(parent) = out_file.parent() {
+                                        tokio::fs::create_dir_all(parent).await?;
+                                    }
+                                    let mut file = tokio::fs::File::create(out_file).await?;
+                                    crate::ui_actions::copy_response_body(resp, &mut file).await?;
+                                    file.flush().await?;
+                                    println!("{}", out_file.display());
+                                } else {
+                                    let mut stdout = tokio::io::stdout();
+                                    crate::ui_actions::copy_response_body(resp, &mut stdout)
+                                        .await?;
+                                    stdout.flush().await?;
+                                }
+                                break;
                             }
-                            let mut file = tokio::fs::File::create(&out_file).await?;
-                            crate::ui_actions::copy_response_body(resp, &mut file).await?;
-                            file.flush().await?;
-                            println!("{}", out_file.display());
-                        } else {
-                            let mut stdout = tokio::io::stdout();
-                            crate::ui_actions::copy_response_body(resp, &mut stdout).await?;
-                            stdout.flush().await?;
+
+                            let current = resp
+                                .bytes()
+                                .await
+                                .wrap_err("failed to read job log response")?
+                                .to_vec();
+                            let (delta, reset) = log_delta(&previous, &current);
+                            if reset {
+                                eprintln!("== job log was replaced; replaying current snapshot ==");
+                            }
+                            if !delta.is_empty() {
+                                let mut stdout = tokio::io::stdout();
+                                stdout.write_all(delta).await?;
+                                stdout.flush().await?;
+                            }
+                            previous = current;
+
+                            let run_status =
+                                crate::ui_actions::list_runs(&session, &repo, None, 1, 50)
+                                    .await?
+                                    .into_iter()
+                                    .find(|run| run.run_index == run_index)
+                                    .and_then(|run| run.status);
+                            if observe_terminal_run_status(
+                                &mut terminal_status,
+                                &mut terminal_observations,
+                                run_status.as_deref(),
+                            ) {
+                                if let Some(err) =
+                                    run_terminal_error(run_index, run_status.as_deref(), &[])
+                                {
+                                    return Err(err);
+                                }
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(follow_interval))
+                                .await;
                         }
                     }
                     ActionsLogsSubcommand::Run {
@@ -550,21 +630,19 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 .await?;
 
                         if json {
+                            let items = artifact_items(&artifacts);
                             let payload = serde_json::json!({
                                 "baseUrl": target.base_url,
                                 "repo": repo,
                                 "runIndex": run_index,
-                                "artifacts": artifacts,
+                                "artifactCount": items.len(),
+                                "artifacts": items,
                             });
                             println!("{}", serde_json::to_string_pretty(&payload)?);
                             return Ok(());
                         }
 
-                        let items = artifacts
-                            .get("artifacts")
-                            .and_then(|v| v.as_array())
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]);
+                        let items = artifact_items(&artifacts);
 
                         let show_header = crate::output::should_print_header(header, no_header);
                         let headers = ["Id", "Name", "Size"];
@@ -1240,6 +1318,55 @@ fn normalize_run_status(raw: &str) -> String {
     s
 }
 
+fn observed_at_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn run_status_is_terminal(status: Option<&str>) -> Option<bool> {
+    let status = status?;
+    Some(matches!(
+        normalize_run_status(status).as_str(),
+        "success" | "failure" | "canceled" | "skipped" | "blocked"
+    ))
+}
+
+/// Forgejo can briefly return a previous terminal run status while a rerun
+/// attempt is being scheduled. Require the same terminal status twice before
+/// using it to stop a watch or log follow operation.
+fn observe_terminal_run_status(
+    previous: &mut Option<String>,
+    observations: &mut u8,
+    status: Option<&str>,
+) -> bool {
+    let Some(status) = status.filter(|status| run_status_is_terminal(Some(status)) == Some(true))
+    else {
+        *previous = None;
+        *observations = 0;
+        return false;
+    };
+    let status = normalize_run_status(status);
+    if previous.as_deref() == Some(status.as_str()) {
+        *observations = observations.saturating_add(1);
+    } else {
+        *previous = Some(status);
+        *observations = 1;
+    }
+    *observations >= 2
+}
+
+fn should_print_jobs_snapshot(
+    watch: bool,
+    done: bool,
+    interactive: bool,
+    json_lines: bool,
+    changed: bool,
+) -> bool {
+    !watch || done || (interactive && changed) || (json_lines && changed)
+}
+
 fn is_run_done_from_jobs(jobs: &[crate::ui_actions::JobInfo]) -> bool {
     let in_progress = ["running", "queued", "pending", "waiting"];
     !jobs.iter().any(|j| {
@@ -1249,10 +1376,28 @@ fn is_run_done_from_jobs(jobs: &[crate::ui_actions::JobInfo]) -> bool {
     })
 }
 
-fn run_terminal_error_from_jobs(
+fn run_terminal_error(
     run_index: i64,
+    run_status: Option<&str>,
     jobs: &[crate::ui_actions::JobInfo],
 ) -> Option<eyre::Report> {
+    let run_status = run_status.map(normalize_run_status);
+    if matches!(
+        run_status.as_deref(),
+        Some("failure" | "canceled" | "blocked")
+    ) {
+        return Some(eyre!(
+            "run {run_index} finished with status {}; job snapshot may be stale",
+            run_status.unwrap_or_default()
+        ));
+    }
+
+    // A terminal success from the Actions list is authoritative even when the
+    // per-job run-page payload has not caught up yet.
+    if matches!(run_status.as_deref(), Some("success" | "skipped")) {
+        return None;
+    }
+
     if jobs.is_empty() {
         return Some(eyre!("run {run_index} returned no jobs"));
     }
@@ -1276,6 +1421,86 @@ fn run_terminal_error_from_jobs(
             failures.join("\n - ")
         ))
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        artifact_items, log_delta, observe_terminal_run_status, run_status_is_terminal,
+        should_print_jobs_snapshot,
+    };
+
+    #[test]
+    fn terminal_run_status_overrides_a_stale_job_snapshot() {
+        assert_eq!(run_status_is_terminal(Some("Failure")), Some(true));
+        assert_eq!(run_status_is_terminal(Some("running")), Some(false));
+        assert_eq!(run_status_is_terminal(None), None);
+    }
+
+    #[test]
+    fn follow_log_only_emits_new_bytes_and_detects_replacement() {
+        assert_eq!(log_delta(b"one", b"one two"), (b" two".as_slice(), false));
+        assert_eq!(log_delta(b"one", b"other"), (b"other".as_slice(), true));
+    }
+
+    #[test]
+    fn terminal_status_must_be_stable_across_two_observations() {
+        let mut previous = None;
+        let mut observations = 0;
+        assert!(!observe_terminal_run_status(
+            &mut previous,
+            &mut observations,
+            Some("Failure"),
+        ));
+        assert!(!observe_terminal_run_status(
+            &mut previous,
+            &mut observations,
+            Some("Running"),
+        ));
+        assert!(!observe_terminal_run_status(
+            &mut previous,
+            &mut observations,
+            Some("Failure"),
+        ));
+        assert!(observe_terminal_run_status(
+            &mut previous,
+            &mut observations,
+            Some("Failure"),
+        ));
+    }
+
+    #[test]
+    fn artifact_response_is_normalized_to_its_item_list() {
+        let response = serde_json::json!({"artifacts": [{"name": "apk"}]});
+        assert_eq!(artifact_items(&response).len(), 1);
+        assert!(artifact_items(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn json_lines_watch_emits_only_state_changes_and_completion() {
+        assert!(should_print_jobs_snapshot(true, false, false, true, true));
+        assert!(!should_print_jobs_snapshot(true, false, false, true, false));
+        assert!(should_print_jobs_snapshot(true, true, false, true, false));
+        assert!(!should_print_jobs_snapshot(true, false, false, false, true));
+        assert!(should_print_jobs_snapshot(
+            false, false, false, false, false
+        ));
+    }
+}
+
+fn log_delta<'a>(previous: &[u8], current: &'a [u8]) -> (&'a [u8], bool) {
+    match current.strip_prefix(previous) {
+        Some(delta) => (delta, false),
+        None => (current, true),
+    }
+}
+
+fn artifact_items(artifacts: &serde_json::Value) -> &[serde_json::Value] {
+    artifacts
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 fn safe_filename_component(job_name: &str, job_index: i64) -> String {

@@ -307,6 +307,13 @@ pub enum ActionsSubcommand {
         no_header: bool,
         #[arg(long, help = "Print JSON output.")]
         json: bool,
+        #[arg(
+            long,
+            conflicts_with = "json",
+            requires = "watch",
+            help = "Emit JSON snapshots for initial, changed, and terminal states while watching."
+        )]
+        json_lines: bool,
     },
     /// Download and print logs.
     Logs {
@@ -439,6 +446,20 @@ pub enum ActionsLogsSubcommand {
         attempt: Option<NonZeroU32>,
         #[arg(long, help = "Write logs to this file (otherwise stdout).")]
         out_file: Option<std::path::PathBuf>,
+        #[arg(
+            long,
+            conflicts_with = "out_file",
+            help = "Poll the job log and print only newly available bytes until the run reaches a terminal state."
+        )]
+        follow: bool,
+        #[arg(
+            long,
+            default_value_t = 5,
+            value_parser = clap::value_parser!(u64).range(1..),
+            requires = "follow",
+            help = "Polling interval in seconds for --follow (minimum 1)."
+        )]
+        follow_interval: u64,
     },
 }
 
