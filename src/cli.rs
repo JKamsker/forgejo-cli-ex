@@ -311,7 +311,7 @@ pub enum ActionsSubcommand {
             long,
             conflicts_with = "json",
             requires = "watch",
-            help = "Emit one JSON snapshot per polling interval while watching."
+            help = "Emit JSON snapshots for initial, changed, and terminal states while watching."
         )]
         json_lines: bool,
     },

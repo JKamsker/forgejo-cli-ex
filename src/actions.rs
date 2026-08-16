@@ -305,8 +305,17 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             run_status.as_deref(),
                         ) || (run_status.is_none() && is_run_done_from_jobs(&jobs));
 
-                        // For watch, only print intermediate updates when interactive. Always print final.
-                        let should_print = !watch || done || json_lines || (interactive && changed);
+                        // For watch, only print intermediate updates when interactive. JSON
+                        // Lines is also a streaming interface, but it emits only state deltas
+                        // rather than an identical full snapshot on every polling interval.
+                        // Always retain the final terminal snapshot.
+                        let should_print = should_print_jobs_snapshot(
+                            watch,
+                            done,
+                            interactive,
+                            json_lines,
+                            changed,
+                        );
 
                         if should_print {
                             if interactive && watch && !json {
@@ -317,8 +326,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
 
                             if json || json_lines {
                                 // The default JSON mode prints a final snapshot. JSON lines is
-                                // deliberately opt-in because it is intended for streaming parsers.
-                                if !watch || done || json_lines {
+                                // deliberately opt-in for streaming parsers and emits only
+                                // initial, changed, and terminal observations.
+                                if !watch || done || (json_lines && changed) {
                                     let payload = serde_json::json!({
                                         "baseUrl": target.base_url,
                                         "repo": repo,
@@ -1347,6 +1357,16 @@ fn observe_terminal_run_status(
     *observations >= 2
 }
 
+fn should_print_jobs_snapshot(
+    watch: bool,
+    done: bool,
+    interactive: bool,
+    json_lines: bool,
+    changed: bool,
+) -> bool {
+    !watch || done || (interactive && changed) || (json_lines && changed)
+}
+
 fn is_run_done_from_jobs(jobs: &[crate::ui_actions::JobInfo]) -> bool {
     let in_progress = ["running", "queued", "pending", "waiting"];
     !jobs.iter().any(|j| {
@@ -1405,7 +1425,10 @@ fn run_terminal_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{artifact_items, log_delta, observe_terminal_run_status, run_status_is_terminal};
+    use super::{
+        artifact_items, log_delta, observe_terminal_run_status, run_status_is_terminal,
+        should_print_jobs_snapshot,
+    };
 
     #[test]
     fn terminal_run_status_overrides_a_stale_job_snapshot() {
@@ -1451,6 +1474,17 @@ mod tests {
         let response = serde_json::json!({"artifacts": [{"name": "apk"}]});
         assert_eq!(artifact_items(&response).len(), 1);
         assert!(artifact_items(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn json_lines_watch_emits_only_state_changes_and_completion() {
+        assert!(should_print_jobs_snapshot(true, false, false, true, true));
+        assert!(!should_print_jobs_snapshot(true, false, false, true, false));
+        assert!(should_print_jobs_snapshot(true, true, false, true, false));
+        assert!(!should_print_jobs_snapshot(true, false, false, false, true));
+        assert!(should_print_jobs_snapshot(
+            false, false, false, false, false
+        ));
     }
 }
 
