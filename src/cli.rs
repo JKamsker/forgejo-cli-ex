@@ -19,7 +19,7 @@ pub enum Command {
     Token(TokenCommand),
     /// Forgejo Actions: workflows, runs, jobs, logs, artifacts, cancel/rerun.
     Actions(ActionsCommand),
-    /// Create and merge pull requests through the Forgejo REST API.
+    /// Inspect and manage pull requests through the Forgejo REST API.
     Pulls(PullsCommand),
     /// Smoke test for Actions access (useful for debugging auth/connectivity/log downloads).
     #[command(name = "smoke-test")]
@@ -234,6 +234,29 @@ pub struct PullsCommand {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum PullsSubcommand {
+    /// List pull requests.
+    List {
+        /// Pull request state to include.
+        #[arg(long, value_enum, default_value = "open")]
+        state: PullState,
+        /// Page number (1-based).
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        page: u32,
+        /// Items per page.
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        limit: u32,
+        /// Print JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Create a pull request.
     Create {
         /// Source branch.
@@ -264,6 +287,126 @@ pub enum PullsSubcommand {
         #[arg(long)]
         force: bool,
     },
+    /// Post a normal issue comment on a pull request.
+    Comment {
+        /// Pull request number.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        index: u64,
+        /// Comment body. Use --body-file for multi-line or generated content.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the comment body from a file, or from stdin when set to '-'.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<std::path::PathBuf>,
+        /// Print the created comment as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Submit a pull request review. The default event only posts a comment.
+    Review {
+        /// Pull request number.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        index: u64,
+        /// Review body. Use --body-file for multi-line or generated content.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the review body from a file, or from stdin when set to '-'.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<std::path::PathBuf>,
+        /// Review event. Defaults to comment; approve and request-changes are explicit.
+        #[arg(long, value_enum, default_value = "comment")]
+        event: ReviewEvent,
+        /// Commit SHA the review applies to.
+        #[arg(long)]
+        commit: Option<String>,
+        /// Print the created review as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List normal issue comments on a pull request.
+    Comments {
+        /// Pull request number.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        index: u64,
+        /// Page number (1-based).
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        page: u32,
+        /// Items per page.
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        limit: u32,
+        /// Print JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List review objects on a pull request.
+    Reviews {
+        /// Pull request number.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        index: u64,
+        /// Page number (1-based).
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        page: u32,
+        /// Items per page.
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        limit: u32,
+        /// Print JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PullState {
+    Open,
+    Closed,
+    All,
+}
+
+impl PullState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewEvent {
+    /// Add a review comment without approving or rejecting the pull request.
+    Comment,
+    /// Approve the pull request. This must be explicitly requested.
+    Approve,
+    /// Request changes. This must be explicitly requested.
+    #[value(name = "request-changes")]
+    RequestChanges,
+}
+
+impl ReviewEvent {
+    pub fn as_api_value(self) -> &'static str {
+        match self {
+            Self::Comment => "COMMENT",
+            Self::Approve => "APPROVE",
+            Self::RequestChanges => "REQUEST_CHANGES",
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]

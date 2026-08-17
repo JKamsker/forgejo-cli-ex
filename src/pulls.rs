@@ -1,5 +1,10 @@
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
 use eyre::{eyre, Context};
 use reqwest::header::{HeaderValue, AUTHORIZATION};
+use reqwest::{RequestBuilder, Response};
+use serde_json::{json, Value};
 
 use crate::cli::{PullsCommand, PullsSubcommand};
 
@@ -30,6 +35,32 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
     );
 
     match args.command {
+        PullsSubcommand::List {
+            state,
+            page,
+            limit,
+            json,
+        } => {
+            let url = format!(
+                "{api_root}/pulls?state={}&page={page}&limit={limit}",
+                state.as_str()
+            );
+            let response =
+                send_authenticated(client.get(url), &credentials, "pull request list").await?;
+            let pulls = response_value(response, "pull request list").await?;
+            let output = json!({
+                "repo": repo,
+                "state": state.as_str(),
+                "page": page,
+                "limit": limit,
+                "pulls": pulls,
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                print_pull_list(&output["pulls"])?;
+            }
+        }
         PullsSubcommand::Create {
             head,
             base,
@@ -117,6 +148,110 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
                 ));
             }
             println!("Merged pull request #{index}.");
+        }
+        PullsSubcommand::Comment {
+            index,
+            body,
+            body_file,
+            json,
+        } => {
+            let body = read_body(body, body_file)?;
+            let response = send_authenticated(
+                client
+                    .post(format!("{api_root}/issues/{index}/comments"))
+                    .json(&json!({ "body": body })),
+                &credentials,
+                "pull request comment",
+            )
+            .await?;
+            let comment = response_value(response, "pull request comment").await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&comment)?);
+            } else {
+                let id = comment
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                println!("Posted comment #{id} on pull request #{index}.");
+            }
+        }
+        PullsSubcommand::Review {
+            index,
+            body,
+            body_file,
+            event,
+            commit,
+            json,
+        } => {
+            let body = read_body(body, body_file)?;
+            let mut request_body = json!({
+                "body": body,
+                "event": event.as_api_value(),
+            });
+            if let Some(commit) = commit {
+                request_body["commit_id"] = Value::String(nonempty("--commit", commit)?);
+            }
+            let response = send_authenticated(
+                client
+                    .post(format!("{api_root}/pulls/{index}/reviews"))
+                    .json(&request_body),
+                &credentials,
+                "pull request review",
+            )
+            .await?;
+            let review = response_value(response, "pull request review").await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&review)?);
+            } else {
+                let id = review.get("id").and_then(Value::as_u64).unwrap_or_default();
+                println!("Posted {event:?} review #{id} on pull request #{index}.");
+            }
+        }
+        PullsSubcommand::Comments {
+            index,
+            page,
+            limit,
+            json,
+        } => {
+            let url = format!("{api_root}/issues/{index}/comments?page={page}&limit={limit}");
+            let response =
+                send_authenticated(client.get(url), &credentials, "pull request comments").await?;
+            let comments = response_value(response, "pull request comments").await?;
+            let output = json!({
+                "repo": repo,
+                "index": index,
+                "page": page,
+                "limit": limit,
+                "comments": comments,
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                print_comment_list(&output["comments"])?;
+            }
+        }
+        PullsSubcommand::Reviews {
+            index,
+            page,
+            limit,
+            json,
+        } => {
+            let url = format!("{api_root}/pulls/{index}/reviews?page={page}&limit={limit}");
+            let response =
+                send_authenticated(client.get(url), &credentials, "pull request reviews").await?;
+            let reviews = response_value(response, "pull request reviews").await?;
+            let output = json!({
+                "repo": repo,
+                "index": index,
+                "page": page,
+                "limit": limit,
+                "reviews": reviews,
+            });
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                print_review_list(&output["reviews"])?;
+            }
         }
     }
 
@@ -215,9 +350,123 @@ fn nonempty(flag: &str, value: String) -> eyre::Result<String> {
     Ok(value)
 }
 
+async fn send_authenticated(
+    request: RequestBuilder,
+    credentials: &ApiCredentials,
+    operation: &str,
+) -> eyre::Result<Response> {
+    authenticate_request(request, credentials)?
+        .send()
+        .await
+        .wrap_err_with(|| format!("{operation} request failed"))
+}
+
+async fn response_value(response: Response, operation: &str) -> eyre::Result<Value> {
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .wrap_err_with(|| format!("failed to read {operation} response"))?;
+    if !status.is_success() {
+        let detail = String::from_utf8_lossy(&body);
+        return Err(eyre!(
+            "{operation} failed: HTTP {status}.{}",
+            response_detail(detail.trim())
+        ));
+    }
+    if body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&body)
+        .wrap_err_with(|| format!("failed to parse {operation} response as JSON"))
+}
+
+fn read_body(body: Option<String>, body_file: Option<PathBuf>) -> eyre::Result<String> {
+    let value = match (body, body_file) {
+        (Some(body), None) => body,
+        (None, Some(path)) if path == Path::new("-") => {
+            let mut body = String::new();
+            std::io::stdin()
+                .read_to_string(&mut body)
+                .wrap_err("failed to read comment body from stdin")?;
+            body
+        }
+        (None, Some(path)) => std::fs::read_to_string(&path)
+            .wrap_err_with(|| format!("failed to read comment body file '{}'", path.display()))?,
+        (Some(_), Some(_)) => unreachable!("clap prevents conflicting body sources"),
+        (None, None) => return Err(eyre!("provide either --body or --body-file")),
+    };
+    nonempty("comment body", value)
+}
+
+fn print_pull_list(value: &Value) -> eyre::Result<()> {
+    for pull in value
+        .as_array()
+        .ok_or_else(|| eyre!("pull request list response was not an array"))?
+    {
+        let number = pull
+            .get("number")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let state = pull.get("state").and_then(Value::as_str).unwrap_or("?");
+        let title = pull.get("title").and_then(Value::as_str).unwrap_or("");
+        let head = pull
+            .get("head")
+            .and_then(|head| head.get("ref"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let base = pull
+            .get("base")
+            .and_then(|base| base.get("ref"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        println!("#{number}\t{state}\t{head} -> {base}\t{title}");
+    }
+    Ok(())
+}
+
+fn print_comment_list(value: &Value) -> eyre::Result<()> {
+    for comment in value
+        .as_array()
+        .ok_or_else(|| eyre!("comment list response was not an array"))?
+    {
+        let id = comment
+            .get("id")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let user = comment
+            .get("user")
+            .and_then(|user| user.get("login"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let body = comment.get("body").and_then(Value::as_str).unwrap_or("");
+        println!("#{id}\t{user}\t{body}");
+    }
+    Ok(())
+}
+
+fn print_review_list(value: &Value) -> eyre::Result<()> {
+    for review in value
+        .as_array()
+        .ok_or_else(|| eyre!("review list response was not an array"))?
+    {
+        let id = review.get("id").and_then(Value::as_u64).unwrap_or_default();
+        let user = review
+            .get("user")
+            .and_then(|user| user.get("login"))
+            .and_then(Value::as_str)
+            .unwrap_or("?");
+        let state = review.get("state").and_then(Value::as_str).unwrap_or("?");
+        let body = review.get("body").and_then(Value::as_str).unwrap_or("");
+        println!("#{id}\t{user}\t{state}\t{body}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{nonempty, request_base, response_detail};
+    use super::{nonempty, read_body, request_base, response_detail};
+    use crate::cli::{PullState, ReviewEvent};
 
     #[test]
     fn normalizes_pull_request_inputs_without_changing_content() {
@@ -237,5 +486,23 @@ mod tests {
     fn limits_server_error_detail_without_hiding_a_concise_message() {
         assert_eq!(response_detail("no approval"), " Response: no approval");
         assert!(response_detail(&"x".repeat(1_001)).ends_with("..."));
+    }
+
+    #[test]
+    fn uses_explicit_comment_body_sources() {
+        assert_eq!(read_body(Some("hello".to_string()), None).unwrap(), "hello");
+        assert!(read_body(None, None).is_err());
+        assert!(read_body(Some(" ".to_string()), None).is_err());
+    }
+
+    #[test]
+    fn serializes_safe_pull_filters_and_review_events() {
+        assert_eq!(PullState::Open.as_str(), "open");
+        assert_eq!(PullState::All.as_str(), "all");
+        assert_eq!(ReviewEvent::Comment.as_api_value(), "COMMENT");
+        assert_eq!(
+            ReviewEvent::RequestChanges.as_api_value(),
+            "REQUEST_CHANGES"
+        );
     }
 }
