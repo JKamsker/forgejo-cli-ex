@@ -1,4 +1,4 @@
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::num::NonZeroU64;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::cli::{
     ActionsArtifactsSubcommand, ActionsCommand, ActionsLogsSubcommand, ActionsRunnersSubcommand,
-    ActionsSubcommand, RunnerScope,
+    ActionsSecretsSubcommand, ActionsSubcommand, ActionsVariablesSubcommand, RunnerScope,
 };
 
 static SAFE_FILENAME_COMPONENT_RE: LazyLock<regex::Regex> =
@@ -22,6 +22,12 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
     )?;
 
     match args.command {
+        ActionsSubcommand::Secrets { command } => {
+            run_secrets(command, &target).await?;
+        }
+        ActionsSubcommand::Variables { command } => {
+            run_variables(command, &target).await?;
+        }
         ActionsSubcommand::Runners { command } => {
             run_runners(command, &target).await?;
         }
@@ -871,11 +877,163 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 ActionsSubcommand::Runners { .. } => {
                     unreachable!("Runners is handled before UiSession initialization")
                 }
+                ActionsSubcommand::Secrets { .. } => {
+                    unreachable!("Secrets is handled before UiSession initialization")
+                }
+                ActionsSubcommand::Variables { .. } => {
+                    unreachable!("Variables is handled before UiSession initialization")
+                }
             }
         }
     }
 
     Ok(())
+}
+
+async fn run_secrets(
+    command: ActionsSecretsSubcommand,
+    target: &crate::target::ResolvedTarget,
+) -> eyre::Result<()> {
+    let ActionsSecretsSubcommand::Set { name, value_stdin } = command;
+    run_repository_actions_value(target, &name, value_stdin, "secrets", "data", "secret").await
+}
+
+async fn run_variables(
+    command: ActionsVariablesSubcommand,
+    target: &crate::target::ResolvedTarget,
+) -> eyre::Result<()> {
+    let ActionsVariablesSubcommand::Set { name, value_stdin } = command;
+    run_repository_actions_value(target, &name, value_stdin, "variables", "value", "variable").await
+}
+
+async fn run_repository_actions_value(
+    target: &crate::target::ResolvedTarget,
+    name: &str,
+    value_stdin: bool,
+    resource_path: &str,
+    value_field: &str,
+    resource_label: &str,
+) -> eyre::Result<()> {
+    if !value_stdin {
+        return Err(eyre!(
+            "Pass --value-stdin; literal secret values are intentionally unsupported."
+        ));
+    }
+
+    let actions_name = validate_actions_name(name)?;
+    let actions_value = read_actions_value_from_stdin()?;
+    let repo = require_repo_owned(target)?;
+    let (owner, repo_name) = repo.trim_matches('/').split_once('/').ok_or_else(|| {
+        eyre!(
+            "Repo should be in the format owner/name; got '{}'. Pass --repo owner/name.",
+            repo
+        )
+    })?;
+
+    // Unix-socket targets must use the HTTP base while reqwest carries the socket path.
+    let request_base = if target.base_url.starts_with("http+unix://") {
+        "http://localhost"
+    } else {
+        target.base_url.trim_end_matches('/')
+    };
+    let url = format!(
+        "{}/api/v1/repos/{}/{}/actions/{}/{}",
+        request_base,
+        urlencoding::encode(owner),
+        urlencoding::encode(repo_name),
+        resource_path,
+        urlencoding::encode(&actions_name)
+    );
+
+    let creds = crate::store::get_ui_creds(&target.base_url)
+        .await?
+        .ok_or_else(|| {
+            eyre!(
+                "No stored UI creds for '{}'. Run `fj-ex auth login` first.",
+                target.base_url
+            )
+        })?;
+    let mut builder = reqwest::Client::builder()
+        .user_agent(concat!(
+            env!("CARGO_PKG_NAME"),
+            "/",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .timeout(std::time::Duration::from_secs(60));
+    #[cfg(unix)]
+    if let Some(socket_path) = target.unix_socket.as_deref() {
+        builder = builder.unix_socket(socket_path);
+    }
+    let client = builder.build().wrap_err("failed to build http client")?;
+    let mut body = serde_json::Map::new();
+    body.insert(
+        value_field.to_string(),
+        serde_json::Value::String(actions_value),
+    );
+    let response = client
+        .put(url)
+        .basic_auth(&creds.username, Some(&creds.password))
+        .json(&body)
+        .send()
+        .await
+        .wrap_err("Actions secret update request failed")?;
+
+    if !matches!(
+        response.status(),
+        reqwest::StatusCode::CREATED | reqwest::StatusCode::NO_CONTENT
+    ) {
+        // Never include a remote response body here: it may echo sensitive input.
+        return Err(eyre!(
+            "Actions {} update failed for '{}': HTTP {}",
+            resource_label,
+            actions_name,
+            response.status()
+        ));
+    }
+
+    println!(
+        "Updated Actions {} '{}' for '{}'.",
+        resource_label, actions_name, repo
+    );
+    Ok(())
+}
+
+fn validate_actions_name(name: &str) -> eyre::Result<String> {
+    let name = name.trim();
+    let mut chars = name.chars();
+    let valid_start = chars
+        .next()
+        .is_some_and(|c| c == '_' || c.is_ascii_alphabetic());
+    if !valid_start || !chars.all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        return Err(eyre!(
+            "Invalid Actions secret name '{}'. Use ASCII letters, digits, and underscores; the first character must be a letter or underscore.",
+            name
+        ));
+    }
+    Ok(name.to_string())
+}
+
+fn read_actions_value_from_stdin() -> eyre::Result<String> {
+    if std::io::stdin().is_terminal() {
+        return Err(eyre!("--value-stdin requires a piped secret value."));
+    }
+
+    let mut value = String::new();
+    std::io::stdin()
+        .read_to_string(&mut value)
+        .wrap_err("failed to read Actions secret from standard input")?;
+    if value.ends_with('\n') {
+        value.pop();
+        if value.ends_with('\r') {
+            value.pop();
+        }
+    }
+    if value.is_empty() {
+        return Err(eyre!(
+            "Actions secret value from standard input must not be empty."
+        ));
+    }
+    Ok(value)
 }
 
 async fn rerun_failed_jobs(
@@ -1427,7 +1585,7 @@ fn run_terminal_error(
 mod tests {
     use super::{
         artifact_items, log_delta, observe_terminal_run_status, run_status_is_terminal,
-        should_print_jobs_snapshot,
+        should_print_jobs_snapshot, validate_actions_name,
     };
 
     #[test]
@@ -1485,6 +1643,18 @@ mod tests {
         assert!(should_print_jobs_snapshot(
             false, false, false, false, false
         ));
+    }
+
+    #[test]
+    fn actions_value_names_are_validated_before_any_network_request() {
+        assert_eq!(
+            validate_actions_name("HARBOR_PASSWORD").unwrap(),
+            "HARBOR_PASSWORD"
+        );
+        assert_eq!(validate_actions_name(" _release1 ").unwrap(), "_release1");
+        assert!(validate_actions_name("1BAD").is_err());
+        assert!(validate_actions_name("HAS-DASH").is_err());
+        assert!(validate_actions_name(" ").is_err());
     }
 }
 

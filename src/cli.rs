@@ -19,6 +19,8 @@ pub enum Command {
     Token(TokenCommand),
     /// Forgejo Actions: workflows, runs, jobs, logs, artifacts, cancel/rerun.
     Actions(ActionsCommand),
+    /// Create and merge pull requests through the Forgejo REST API.
+    Pulls(PullsCommand),
     /// Smoke test for Actions access (useful for debugging auth/connectivity/log downloads).
     #[command(name = "smoke-test")]
     SmokeTest(SmokeTestCommand),
@@ -221,6 +223,49 @@ pub struct ActionsCommand {
     pub command: ActionsSubcommand,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct PullsCommand {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    #[command(subcommand)]
+    pub command: PullsSubcommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PullsSubcommand {
+    /// Create a pull request.
+    Create {
+        /// Source branch.
+        #[arg(long)]
+        head: String,
+        /// Target branch.
+        #[arg(long)]
+        base: String,
+        /// Pull request title.
+        #[arg(long)]
+        title: String,
+        /// Optional pull request body.
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// Merge a pull request using the current source commit.
+    Merge {
+        /// Pull request number.
+        #[arg(long)]
+        index: u64,
+        /// Expected source commit SHA. Required to prevent merging a changed head.
+        #[arg(long)]
+        head_commit: String,
+        /// Merge commit title.
+        #[arg(long)]
+        title: String,
+        /// Bypass configured required checks. Use only after explicit operator authorization.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum ActionsSubcommand {
     /// List available workflows for the repo.
@@ -346,6 +391,16 @@ pub enum ActionsSubcommand {
         #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// Create or replace a repository Actions secret from standard input.
+    Secrets {
+        #[command(subcommand)]
+        command: ActionsSecretsSubcommand,
+    },
+    /// Create or replace a repository Actions variable from standard input.
+    Variables {
+        #[command(subcommand)]
+        command: ActionsVariablesSubcommand,
+    },
     /// Runner registration tokens and queued jobs (REST API; uses `fj`'s stored API token).
     Runners {
         #[command(subcommand)]
@@ -399,6 +454,32 @@ pub enum ActionsSubcommand {
         dry_run: bool,
         #[arg(long, help = "Print JSON output.")]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ActionsSecretsSubcommand {
+    /// Create or replace one repository Actions secret.
+    Set {
+        /// Secret name (for example HARBOR_PASSWORD).
+        #[arg(long)]
+        name: String,
+        /// Read the secret value from standard input. The value is never echoed.
+        #[arg(long, required = true)]
+        value_stdin: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ActionsVariablesSubcommand {
+    /// Create or replace one repository Actions variable.
+    Set {
+        /// Variable name (for example HARBOR_USERNAME).
+        #[arg(long)]
+        name: String,
+        /// Read the variable value from standard input. The value is never echoed.
+        #[arg(long, required = true)]
+        value_stdin: bool,
     },
 }
 

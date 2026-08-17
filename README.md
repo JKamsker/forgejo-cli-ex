@@ -38,9 +38,19 @@ fj-ex actions logs job --repo owner/name --latest --job-index 0 --follow
 fj-ex actions cancel --repo owner/name --run-index 50 --dry-run
 fj-ex actions rerun  --repo owner/name --latest --failed-only
 
+# Create or replace a repository Actions secret without exposing it in argv/logs
+printf '%s' "$HARBOR_PASSWORD" | \
+  fj-ex actions secrets set --repo owner/name --name HARBOR_PASSWORD --value-stdin
+printf '%s' "$HARBOR_USERNAME" | \
+  fj-ex actions variables set --repo owner/name --name HARBOR_USERNAME --value-stdin
+
 # Runner registration token + queued jobs (requires `fj auth login`)
 fj-ex actions runners token --repo owner/name
 fj-ex actions runners jobs  --repo owner/name --waiting
+
+# Create a release-control PR (merge requires the expected source commit)
+fj-ex pulls create --repo owner/name --head release-fix --base release/canary --title "fix: release control"
+fj-ex pulls merge --repo owner/name --index 42 --head-commit <sha> --title "fix: release control" --force
 ```
 
 > `--host` can be omitted — `fj-ex` infers it from the current repo's git remotes, or falls back to `$FJ_FALLBACK_HOST`.
@@ -58,6 +68,9 @@ fj-ex actions runners jobs  --repo owner/name --waiting
 | `actions cancel` | Cancel a running workflow |
 | `actions rerun` | Rerun a workflow (optionally `--failed-only`) |
 | `actions trigger` | Dispatch a `workflow_dispatch` event |
+| `actions secrets set` | Create or replace a repository Actions secret from stdin; never accepts or echoes a literal value |
+| `actions variables set` | Create or replace a repository Actions variable from stdin; never accepts or echoes a literal value |
+| `pulls` | Create pull requests and merge an expected source commit through the REST API |
 | `actions runners` | Runner tokens + queued jobs (REST API; uses `fj` token store) |
 | `smoke-test` | Non-destructive end-to-end validation |
 
