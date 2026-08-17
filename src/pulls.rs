@@ -1,4 +1,5 @@
 use eyre::{eyre, Context};
+use reqwest::header::{HeaderValue, AUTHORIZATION};
 
 use crate::cli::{PullsCommand, PullsSubcommand};
 
@@ -18,7 +19,7 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
             repo
         )
     })?;
-    let creds = api_credentials(&target).await?;
+    let credentials = api_credentials(&target).await?;
     let client = api_client(&target)?;
     let base = request_base(&target.base_url);
     let api_root = format!(
@@ -40,13 +41,13 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
             let title = nonempty("--title", title)?;
             let response = client
                 .post(format!("{api_root}/pulls"))
-                .basic_auth(&creds.username, Some(&creds.password))
                 .json(&serde_json::json!({
                     "head": head,
                     "base": base,
                     "title": title,
                     "body": body.unwrap_or_default(),
-                }))
+                }));
+            let response = authenticate_request(response, &credentials)?
                 .send()
                 .await
                 .wrap_err("pull request creation request failed")?;
@@ -81,24 +82,38 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
             }
             let head_commit = nonempty("--head-commit", head_commit)?;
             let title = nonempty("--title", title)?;
-            let response = client
-                .post(format!("{api_root}/pulls/{index}/merge"))
-                .basic_auth(&creds.username, Some(&creds.password))
-                .json(&serde_json::json!({
-                    "Do": "merge",
-                    "head_commit_id": head_commit,
-                    "MergeTitleField": title,
-                    "MergeMessageField": "",
-                    "force_merge": force,
-                    "merge_when_checks_succeed": false,
-                }))
+            let response =
+                client
+                    .post(format!("{api_root}/pulls/{index}/merge"))
+                    .json(&serde_json::json!({
+                        "Do": "merge",
+                        "head_commit_id": head_commit,
+                        "MergeTitleField": title,
+                        "MergeMessageField": "",
+                        "force_merge": force,
+                        "merge_when_checks_succeed": false,
+                    }));
+            let response = authenticate_request(response, &credentials)?
                 .send()
                 .await
                 .wrap_err("pull request merge request failed")?;
             if response.status() != reqwest::StatusCode::OK {
+                let status = response.status();
+                let detail = response.text().await.unwrap_or_default();
+                let detail = detail.trim();
+                if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
+                    return Err(eyre!(
+                        "Pull request merge rejected: HTTP {status}. Forgejo uses 405 when the caller cannot merge the current PR state. \
+                         Authentication source: {}. Check the caller has repository admin/merge permission and that branch-protection approvals/checks are satisfied; \
+                         use --force only with explicit operator authorization.{}",
+                        credentials.source(),
+                        response_detail(detail),
+                    ));
+                }
                 return Err(eyre!(
-                    "Pull request merge failed: HTTP {}",
-                    response.status()
+                    "Pull request merge failed: HTTP {status}. Authentication source: {}.{}",
+                    credentials.source(),
+                    response_detail(detail),
                 ));
             }
             println!("Merged pull request #{index}.");
@@ -108,17 +123,65 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
     Ok(())
 }
 
-async fn api_credentials(
-    target: &crate::target::ResolvedTarget,
-) -> eyre::Result<crate::store::UiCreds> {
+enum ApiCredentials {
+    ApiToken(String),
+    Basic(crate::store::UiCreds),
+}
+
+impl ApiCredentials {
+    fn source(&self) -> &'static str {
+        match self {
+            Self::ApiToken(_) => "fj API token",
+            Self::Basic(_) => "stored UI basic credentials",
+        }
+    }
+}
+
+async fn api_credentials(target: &crate::target::ResolvedTarget) -> eyre::Result<ApiCredentials> {
+    // `fj` API tokens carry the caller's Forgejo repository permissions. Prefer
+    // them over UI credentials so PR administration is not silently performed
+    // as a weaker automation account.
+    if let Some(token) = crate::store::get_fj_api_token_for_base_url(&target.base_url)? {
+        return Ok(ApiCredentials::ApiToken(token));
+    }
+
     crate::store::get_ui_creds(&target.base_url)
         .await?
+        .map(ApiCredentials::Basic)
         .ok_or_else(|| {
             eyre!(
-                "No stored UI creds for '{}'. Run `fj-ex auth login` first.",
+                "No API token or stored UI creds for '{}'. Configure `fj auth login` for an API token, or run `fj-ex auth login` first.",
                 target.base_url
             )
         })
+}
+
+fn authenticate_request(
+    request: reqwest::RequestBuilder,
+    credentials: &ApiCredentials,
+) -> eyre::Result<reqwest::RequestBuilder> {
+    match credentials {
+        ApiCredentials::ApiToken(token) => {
+            let value = HeaderValue::from_str(&format!("token {token}"))
+                .wrap_err("invalid fj API token for Authorization header")?;
+            Ok(request.header(AUTHORIZATION, value))
+        }
+        ApiCredentials::Basic(creds) => {
+            Ok(request.basic_auth(&creds.username, Some(&creds.password)))
+        }
+    }
+}
+
+fn response_detail(detail: &str) -> String {
+    if detail.is_empty() {
+        String::new()
+    } else {
+        let mut clipped = detail.chars().take(1_000).collect::<String>();
+        if detail.chars().count() > clipped.chars().count() {
+            clipped.push_str("...");
+        }
+        format!(" Response: {clipped}")
+    }
 }
 
 fn api_client(target: &crate::target::ResolvedTarget) -> eyre::Result<reqwest::Client> {
@@ -154,7 +217,7 @@ fn nonempty(flag: &str, value: String) -> eyre::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{nonempty, request_base};
+    use super::{nonempty, request_base, response_detail};
 
     #[test]
     fn normalizes_pull_request_inputs_without_changing_content() {
@@ -168,5 +231,11 @@ mod tests {
             request_base("http+unix://%2Ftmp%2Fforgejo.sock"),
             "http://localhost"
         );
+    }
+
+    #[test]
+    fn limits_server_error_detail_without_hiding_a_concise_message() {
+        assert_eq!(response_detail("no approval"), " Response: no approval");
+        assert!(response_detail(&"x".repeat(1_001)).ends_with("..."));
     }
 }
