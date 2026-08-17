@@ -51,6 +51,11 @@ fj-ex actions runners jobs  --repo owner/name --waiting
 # Create a release-control PR (merge requires the expected source commit)
 fj-ex pulls create --repo owner/name --head release-fix --base release/canary --title "fix: release control"
 fj-ex pulls merge --repo owner/name --index 42 --head-commit <sha> --title "fix: release control" --force
+
+# Review a PR without approving it (the default review event is COMMENT)
+fj-ex pulls list --repo owner/name --state open --json
+fj-ex pulls comment --repo owner/name --index 42 --body-file review.md
+fj-ex pulls review --repo owner/name --index 42 --body-file review.md
 ```
 
 > `--host` can be omitted — `fj-ex` infers it from the current repo's git remotes, or falls back to `$FJ_FALLBACK_HOST`.
@@ -70,7 +75,12 @@ fj-ex pulls merge --repo owner/name --index 42 --head-commit <sha> --title "fix:
 | `actions trigger` | Dispatch a `workflow_dispatch` event |
 | `actions secrets set` | Create or replace a repository Actions secret from stdin; never accepts or echoes a literal value |
 | `actions variables set` | Create or replace a repository Actions variable from stdin; never accepts or echoes a literal value |
-| `pulls` | Create pull requests and merge an expected source commit through the REST API |
+| `pulls list` | List pull requests with state/page/limit filters |
+| `pulls comment` | Post a normal PR comment through the issue-comments API |
+| `pulls comments` | Read normal PR comments for verification |
+| `pulls review` | Submit a review; defaults to `COMMENT`, with explicit approval events only |
+| `pulls reviews` | Read review objects for verification |
+| `pulls create/merge` | Create pull requests and merge an expected source commit through the REST API |
 | `actions runners` | Runner tokens + queued jobs (REST API; uses `fj` token store) |
 | `smoke-test` | Non-destructive end-to-end validation |
 
@@ -85,6 +95,16 @@ stale job data. A terminal status must be observed twice because Forgejo can
 briefly report a previous terminal state while scheduling a rerun attempt. Use `actions logs job --follow` only for progress, and download
 the complete job or run log after a terminal failure to diagnose it. Logs never
 decide the terminal state.
+
+## Pull request review contract
+
+`pulls comment` uses Forgejo's issue-comment endpoint because this instance
+exposes normal pull request comments at `/issues/{index}/comments`, not
+`/pulls/{index}/comments`. `pulls review` uses `/pulls/{index}/reviews` and
+defaults to the non-decision `COMMENT` event. Use `--event approve` or
+`--event request-changes` only when that decision is explicitly authorized.
+For generated or multi-line text, prefer `--body-file`; `--body-file -` reads
+from stdin and keeps the body out of the process list.
 
 ## Target resolution
 
