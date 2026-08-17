@@ -94,11 +94,56 @@ fj-ex actions runs --repo owner/name --workflow ci.yml
 
 ---
 
+## pulls
+
+All pull commands use the stored `fj` API token when available and otherwise
+fall back to the `fj-ex` UI login's Basic credentials. Error output never
+prints either credential.
+
+List open pull requests:
+
+```sh
+fj-ex pulls list --repo owner/name
+fj-ex pulls list --repo owner/name --state all --page 2 --limit 50 --json
+```
+
+Post and verify a normal PR comment:
+
+```sh
+fj-ex pulls comment --repo owner/name --index 42 --body "Review complete"
+fj-ex pulls comment --repo owner/name --index 42 --body-file review.md --json
+fj-ex pulls comments --repo owner/name --index 42 --json
+```
+
+Submit and verify a review object. `COMMENT` is the default and does not
+approve or request changes:
+
+```sh
+fj-ex pulls review --repo owner/name --index 42 --body-file review.md
+fj-ex pulls review --repo owner/name --index 42 --body-file review.md --commit <sha>
+fj-ex pulls reviews --repo owner/name --index 42 --json
+```
+
+Use `--body-file -` to read generated content from standard input. Approval and
+change-request events are explicit:
+
+```sh
+fj-ex pulls review --repo owner/name --index 42 --body "Approved" --event approve
+fj-ex pulls review --repo owner/name --index 42 --body "Please fix" --event request-changes
+```
+
+This Forgejo deployment exposes normal PR comments through
+`/issues/{index}/comments`; review objects use `/pulls/{index}/reviews`.
+
+---
+
 ## actions jobs
 
 ```sh
 fj-ex actions jobs --repo owner/name --latest
 fj-ex actions jobs --repo owner/name --latest --watch
+fj-ex actions jobs --repo owner/name --run-index 50 --watch --json
+fj-ex actions jobs --repo owner/name --run-index 50 --watch --json-lines
 ```
 
 ---
@@ -110,6 +155,7 @@ Download a single job's log to stdout:
 ```sh
 fj-ex actions logs job --repo owner/name --latest --job-index 0
 fj-ex actions logs job --repo owner/name --run-index 50 --job-index 0
+fj-ex actions logs job --repo owner/name --run-index 50 --job-index 0 --follow --follow-interval 5
 ```
 
 Download all logs for a run to files:
