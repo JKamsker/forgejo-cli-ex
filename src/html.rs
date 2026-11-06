@@ -27,6 +27,13 @@ pub fn get_input_value_by_name(html: &str, input_name: &str) -> Option<String> {
     None
 }
 
+/// Username of the signed-in user from the `/user/settings` profile form.
+pub fn get_settings_username(html: &str) -> Option<String> {
+    get_input_value_by_name(html, "name")
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
 pub fn get_csrf_from_login_html(html: &str) -> Option<String> {
     get_input_value_by_name(html, "_csrf")
 }
@@ -57,6 +64,16 @@ pub fn get_csrf_token_from_html(html: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_username_is_read_from_profile_form() {
+        // Forgejo 17 and Gitea 1.27 profile forms (trimmed).
+        let forgejo = r#"<form><input name="_csrf" value="x"><input name="name" value="e2e" data-name="e2e" autofocus required  maxlength="40"></form>"#;
+        let gitea = r#"<input id="username" name="name" value="sso&#43;user" data-name="sso+user" required>"#;
+        assert_eq!(get_settings_username(forgejo).as_deref(), Some("e2e"));
+        assert_eq!(get_settings_username(gitea).as_deref(), Some("sso+user"));
+        assert_eq!(get_settings_username(r#"<input name="q" value="x">"#), None);
+    }
 
     #[test]
     fn csrf_is_extracted_and_decoded() {

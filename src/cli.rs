@@ -31,7 +31,8 @@ pub enum Command {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
-    /// Log in to an instance (stores plaintext creds + UI session cookies).
+    /// Log in to an instance: username + password (default), an API token
+    /// (`--token-stdin`), or an imported browser session (`--session-cookie-stdin`, for SSO).
     Login(LoginCommand),
     /// Check login status against the host.
     Status(AuthStatusCommand),
@@ -39,9 +40,9 @@ pub enum AuthCommand {
     List(AuthListCommand),
     /// Show stored login info for a host.
     Show(AuthShowCommand),
-    /// Delete stored login info for a host.
+    /// Delete stored login info (password, imported session and stored token) for a host.
     Logout(AuthLogoutCommand),
-    /// Clear stored UI cookies for a host (keeps creds).
+    /// Clear stored UI cookies for a host (keeps password/token; removes an imported session).
     #[command(name = "clear-cookies")]
     ClearCookies(AuthClearCookiesCommand),
     /// Create a package token suitable for Forgejo NuGet auth.
@@ -143,7 +144,50 @@ pub struct LoginCommand {
     /// When used with --password-stdin, the password is the first line and the passcode is the second.
     #[arg(long, conflicts_with = "otp")]
     pub otp_stdin: bool,
+
+    /// Store a Forgejo/Gitea API token instead of a password (unsafe: visible in process list;
+    /// prefer --token-stdin).
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        conflicts_with_all = PASSWORD_LOGIN_ARGS,
+        conflicts_with = "token_stdin",
+        conflicts_with = "session_cookie_stdin"
+    )]
+    pub token: Option<String>,
+
+    /// Read a Forgejo/Gitea API token from stdin (first line) and store it. Prompts without
+    /// echo when stdin is a terminal. Recommended for automation and SSO accounts.
+    #[arg(
+        long,
+        conflicts_with_all = PASSWORD_LOGIN_ARGS,
+        conflicts_with = "session_cookie_stdin"
+    )]
+    pub token_stdin: bool,
+
+    /// Import a logged-in browser session (for SSO/OAuth accounts without a password).
+    ///
+    /// Reads the session cookie from stdin: either the bare value of the session cookie
+    /// (`session` on current Forgejo, `i_like_gitea` on Gitea/older Forgejo), `name=value`, or a
+    /// full `Cookie:` header (`a=1; b=2`). Prompts without echo when stdin is a terminal. The
+    /// session is validated before it is stored and cannot be renewed automatically once it expires.
+    #[arg(long, conflicts_with_all = PASSWORD_LOGIN_ARGS)]
+    pub session_cookie_stdin: bool,
+
+    /// Session cookie name for a bare --session-cookie-stdin value (default: try `session`,
+    /// `i_like_gitea`, then `i_like_forgejo`). Needed for a custom [session] COOKIE_NAME.
+    #[arg(long, value_name = "NAME", requires = "session_cookie_stdin")]
+    pub cookie_name: Option<String>,
 }
+
+const PASSWORD_LOGIN_ARGS: [&str; 6] = [
+    "userpass",
+    "username",
+    "password",
+    "password_stdin",
+    "otp",
+    "otp_stdin",
+];
 
 #[derive(Args, Debug, Clone)]
 pub struct AuthStatusCommand {

@@ -66,26 +66,41 @@ impl UiSession {
             };
 
         let info = store::get_store_entry(&normalized).await?;
+        let entry = info.entry;
+        let ui_login = entry.as_ref().and_then(store::StoreEntry::ui_login_kind);
+
+        match ui_login {
+            Some(store::CredentialKind::Session) => {
+                if force_relogin {
+                    return Err(session_expired_error(&normalized));
+                }
+                let jar = entry.and_then(|e| e.cookie_jar);
+                let session = Self::new_with_socket(&normalized, jar.as_ref(), effective_socket)?;
+                if session.test_session().await? {
+                    let _ = session.persist_cookie_jar().await;
+                    return Ok(session);
+                }
+                return Err(session_expired_error(&normalized));
+            }
+            Some(store::CredentialKind::Password) => {}
+            _ => return Err(no_ui_login_error(&normalized, entry.as_ref())),
+        }
+
         let cookie_jar = if force_relogin {
             None
         } else {
-            info.entry.and_then(|e| e.cookie_jar)
+            entry.and_then(|e| e.cookie_jar)
         };
 
         let session = Self::new_with_socket(&normalized, cookie_jar.as_ref(), effective_socket)?;
-        if !force_relogin {
-            if session.test_session().await.unwrap_or(false) {
-                let _ = session.persist_cookie_jar().await;
-                return Ok(session);
-            }
+        if !force_relogin && session.test_session().await.unwrap_or(false) {
+            let _ = session.persist_cookie_jar().await;
+            return Ok(session);
         }
 
-        let creds = store::get_ui_creds(&normalized).await?.ok_or_else(|| {
-            eyre!(
-                "No stored UI creds for '{}'. Run `fj-ex auth login` (or legacy `fj-ex login`) first.",
-                normalized
-            )
-        })?;
+        let creds = store::get_ui_creds(&normalized)
+            .await?
+            .ok_or_else(|| no_ui_login_error(&normalized, None))?;
 
         session
             .login_with_creds(&creds.username, &creds.password)
@@ -167,22 +182,61 @@ impl UiSession {
     }
 
     pub async fn relogin_from_store(&self) -> eyre::Result<()> {
+        let info = store::get_store_entry(self.storage_base_url()).await?;
+        if info
+            .entry
+            .as_ref()
+            .and_then(store::StoreEntry::ui_login_kind)
+            == Some(store::CredentialKind::Session)
+        {
+            // An imported browser session cannot be renewed without a password.
+            return Err(session_expired_error(self.storage_base_url()));
+        }
+
+        let creds = store::get_ui_creds(self.storage_base_url())
+            .await?
+            .ok_or_else(|| no_ui_login_error(self.storage_base_url(), info.entry.as_ref()))?;
+
         store::clear_cookie_jar(self.storage_base_url()).await?;
         {
             let mut guard = self.cookie_store.lock().unwrap();
             guard.clear();
         }
 
-        let creds = store::get_ui_creds(self.storage_base_url()).await?.ok_or_else(|| {
-            eyre!(
-                "No stored UI creds for '{}'. Run `fj-ex auth login` (or legacy `fj-ex login`) first.",
-                self.storage_base_url()
-            )
-        })?;
         self.login_with_creds(&creds.username, &creds.password)
             .await?;
         self.persist_cookie_jar_required().await?;
         Ok(())
+    }
+
+    /// Snapshot of the session's current cookies.
+    pub fn cookie_jar(&self) -> eyre::Result<store::CookieJar> {
+        session_cookies::cookie_jar_from_store(&self.cookie_store)
+    }
+
+    /// Cookie domain used for requests to this instance (`localhost` for Unix sockets).
+    pub fn cookie_domain(&self) -> eyre::Result<String> {
+        Url::parse(self.request_base_url())
+            .ok()
+            .and_then(|u| u.host_str().map(ToOwned::to_owned))
+            .ok_or_else(|| eyre!("unable to determine cookie domain for '{}'", self.base_url))
+    }
+
+    /// Whether requests to this instance go over HTTPS.
+    pub fn is_https(&self) -> bool {
+        self.request_base_url().starts_with("https://")
+    }
+
+    /// Login name of the session's user, read from the profile settings form
+    /// (the REST API does not accept session cookies).
+    pub async fn fetch_login(&self) -> Option<String> {
+        let url = format!("{}/user/settings", self.request_base_url());
+        let resp = self.client.get(&url).send().await.ok()?;
+        if !resp.status().is_success() || is_auth_challenge_url(resp.url()) {
+            return None;
+        }
+        let page = resp.text().await.ok()?;
+        html::get_settings_username(&page)
     }
 
     pub async fn login_with_creds(&self, username: &str, password: &str) -> eyre::Result<()> {
@@ -429,6 +483,34 @@ impl UiSession {
         self.persist_cookie_jar().await?;
         Ok(resp)
     }
+}
+
+/// Error shown when an imported browser session no longer authenticates.
+pub fn session_expired_error(base_url: &str) -> eyre::Report {
+    eyre!(
+        "The imported browser session for '{base_url}' has expired (the server redirected to the login page).\n\
+         Imported sessions cannot be renewed automatically. Either re-import a fresh session cookie:\n  \
+         fj-ex auth login --host {base_url} --session-cookie-stdin\n\
+         or use an API token instead:\n  \
+         fj-ex auth login --host {base_url} --token-stdin   # or export FJ_EX_TOKEN / FORGEJO_TOKEN / GITEA_TOKEN"
+    )
+}
+
+/// Error shown when a command needs a UI session but none is stored.
+pub fn no_ui_login_error(base_url: &str, entry: Option<&store::StoreEntry>) -> eyre::Report {
+    let token_only = entry.is_some_and(store::StoreEntry::has_api_token);
+    if token_only {
+        return eyre!(
+            "No UI session for '{base_url}': only an API token is stored, and this command needs the web UI.\n\
+             Log in with `fj-ex auth login --host {base_url}` (password) or import a browser session with \
+             `fj-ex auth login --host {base_url} --session-cookie-stdin`."
+        );
+    }
+    eyre!(
+        "No stored UI creds for '{base_url}'. Run `fj-ex auth login --host {base_url}` (password), \
+         `fj-ex auth login --host {base_url} --session-cookie-stdin` (SSO browser session), \
+         or provide an API token (`fj-ex auth login --host {base_url} --token-stdin`, or FJ_EX_TOKEN/FORGEJO_TOKEN/GITEA_TOKEN)."
+    )
 }
 
 fn is_auth_challenge_url(url: &Url) -> bool {

@@ -2,6 +2,7 @@ mod actions;
 mod api;
 mod auth;
 mod cli;
+mod credentials;
 mod html;
 mod login;
 mod output;

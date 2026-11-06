@@ -2,7 +2,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use eyre::{eyre, Context};
-use reqwest::header::{HeaderValue, AUTHORIZATION};
 use reqwest::{RequestBuilder, Response};
 use serde_json::{json, Value};
 
@@ -137,13 +136,13 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
                         "Pull request merge rejected: HTTP {status}. Forgejo uses 405 when the caller cannot merge the current PR state. \
                          Authentication source: {}. Check the caller has repository admin/merge permission and that branch-protection approvals/checks are satisfied; \
                          use --force only with explicit operator authorization.{}",
-                        credentials.source(),
+                        credentials.source_label(),
                         response_detail(detail),
                     ));
                 }
                 return Err(eyre!(
                     "Pull request merge failed: HTTP {status}. Authentication source: {}.{}",
-                    credentials.source(),
+                    credentials.source_label(),
                     response_detail(detail),
                 ));
             }
@@ -258,53 +257,23 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
     Ok(())
 }
 
-enum ApiCredentials {
-    ApiToken(String),
-    Basic(crate::store::UiCreds),
-}
-
-impl ApiCredentials {
-    fn source(&self) -> &'static str {
-        match self {
-            Self::ApiToken(_) => "fj API token",
-            Self::Basic(_) => "stored UI basic credentials",
-        }
-    }
-}
+type ApiCredentials = crate::credentials::ApiAuth;
 
 async fn api_credentials(target: &crate::target::ResolvedTarget) -> eyre::Result<ApiCredentials> {
-    // `fj` API tokens carry the caller's Forgejo repository permissions. Prefer
-    // them over UI credentials so PR administration is not silently performed
-    // as a weaker automation account.
-    if let Some(token) = crate::store::get_fj_api_token_for_base_url(&target.base_url)? {
-        return Ok(ApiCredentials::ApiToken(token));
-    }
-
-    crate::store::get_ui_creds(&target.base_url)
+    // API tokens carry the caller's repository permissions. Prefer them over
+    // UI credentials so PR administration is not silently performed as a
+    // weaker automation account. Token sources: `fj-ex auth login --token-stdin`,
+    // FJ_EX_TOKEN / FORGEJO_TOKEN / GITEA_TOKEN, then `fj`'s keys.json.
+    crate::credentials::resolve_api_auth(&target.base_url)
         .await?
-        .map(ApiCredentials::Basic)
-        .ok_or_else(|| {
-            eyre!(
-                "No API token or stored UI creds for '{}'. Configure `fj auth login` for an API token, or run `fj-ex auth login` first.",
-                target.base_url
-            )
-        })
+        .ok_or_else(|| crate::credentials::missing_api_auth_error(&target.base_url))
 }
 
 fn authenticate_request(
     request: reqwest::RequestBuilder,
     credentials: &ApiCredentials,
 ) -> eyre::Result<reqwest::RequestBuilder> {
-    match credentials {
-        ApiCredentials::ApiToken(token) => {
-            let value = HeaderValue::from_str(&format!("token {token}"))
-                .wrap_err("invalid fj API token for Authorization header")?;
-            Ok(request.header(AUTHORIZATION, value))
-        }
-        ApiCredentials::Basic(creds) => {
-            Ok(request.basic_auth(&creds.username, Some(&creds.password)))
-        }
-    }
+    credentials.apply(request)
 }
 
 fn response_detail(detail: &str) -> String {
