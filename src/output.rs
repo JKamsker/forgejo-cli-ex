@@ -5,12 +5,16 @@ use std::io::IsTerminal;
 /// printed for a human, so a crafted PR title, comment, job or artifact name
 /// cannot inject terminal escape sequences.
 ///
-/// C0 controls, DEL and C1 controls become U+FFFD. With `multiline` (for
-/// bodies), `\n` and `\t` are kept and `\r\n` becomes `\n`; otherwise, and for
-/// a lone `\r`, tabs and line breaks become spaces. JSON output must not be
-/// passed through this function.
+/// C0 controls, DEL and C1 controls become U+FFFD, and so do the invisible
+/// formatting characters of [`is_display_spoofing_char`]. With `multiline`
+/// (for bodies), `\n` and `\t` are kept and `\r\n` becomes `\n`; otherwise,
+/// and for a lone `\r`, tabs and line breaks become spaces. JSON output must
+/// not be passed through this function.
 pub fn sanitize_terminal_text(text: &str, multiline: bool) -> Cow<'_, str> {
-    if !text.chars().any(char::is_control) {
+    if !text
+        .chars()
+        .any(|ch| ch.is_control() || is_display_spoofing_char(ch))
+    {
         return Cow::Borrowed(text);
     }
 
@@ -21,11 +25,26 @@ pub fn sanitize_terminal_text(text: &str, multiline: bool) -> Cow<'_, str> {
             '\n' | '\t' if multiline => out.push(ch),
             '\r' if multiline && chars.peek() == Some(&'\n') => {}
             '\n' | '\t' | '\r' => out.push(' '),
-            ch if ch.is_control() => out.push('\u{FFFD}'),
+            ch if ch.is_control() || is_display_spoofing_char(ch) => out.push('\u{FFFD}'),
             ch => out.push(ch),
         }
     }
     Cow::Owned(out)
+}
+
+/// Invisible characters that reorder or disguise the text around them on a
+/// bidi-aware terminal: bidi embeddings, overrides and isolates (which carry
+/// to the end of the line), the zero-width space and the byte-order mark.
+/// Directional marks and zero-width (non-)joiners only affect neighbouring
+/// characters and are common in RTL scripts and emoji, so they are kept.
+fn is_display_spoofing_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200B}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
 }
 
 /// [`sanitize_terminal_text`] for single-line values such as names and titles.
@@ -117,6 +136,23 @@ mod tests {
             sanitize_terminal_text("line 1\r\n\tline 2\r\u{1b}[31m", true),
             "line 1\n\tline 2 \u{fffd}[31m"
         );
+    }
+
+    #[test]
+    fn sanitizer_replaces_bidi_overrides_and_invisible_marks() {
+        assert_eq!(
+            sanitize_line("feat\u{202E}gnp.exe\u{2066}x\u{2069}\u{200B}y\u{FEFF}"),
+            "feat\u{fffd}gnp.exe\u{fffd}x\u{fffd}\u{fffd}y\u{fffd}"
+        );
+        assert_eq!(
+            sanitize_terminal_text("a\u{202D}\nb\u{2067}", true),
+            "a\u{fffd}\nb\u{fffd}"
+        );
+        // Joiners and marks are part of emoji sequences and RTL text.
+        assert!(matches!(
+            sanitize_line("\u{1F469}\u{200D}\u{1F4BB} \u{0645}\u{06CC}\u{200C}\u{062E}\u{200F}"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
