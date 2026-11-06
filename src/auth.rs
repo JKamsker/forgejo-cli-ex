@@ -203,7 +203,7 @@ async fn run_status(args: AuthStatusCommand) -> eyre::Result<()> {
     }
 
     if !args.json {
-        println!("{username}@{host_key}");
+        println!("{}@{host_key}", crate::output::sanitize_line(&username));
         println!("OK");
         if let Some(kind) = ui_kind {
             let state = if ui.ok { "ok" } else { "unusable" };
@@ -230,18 +230,59 @@ fn display_key(entry_key: &str, entry: &crate::store::StoreEntry) -> String {
     }
 }
 
+/// Groups store entries for `auth list`. Root URLs are shown by host key, but
+/// when logins for different base URLs share one (`http://` and `https://` on
+/// the same host), the non-https ones are shown by their full base URL so that
+/// both stay visible. Only genuine duplicates (same base URL under legacy
+/// keys) are merged, keeping the first.
+fn entries_by_display_key(
+    store: crate::store::CredsStore,
+) -> std::collections::BTreeMap<String, crate::store::StoreEntry> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let rows = store
+        .into_iter()
+        .map(|(key, entry)| {
+            let display = display_key(&key, &entry);
+            let base = entry.base_url.as_deref().unwrap_or(&key);
+            let normalized =
+                crate::target::normalize_base_url(base).unwrap_or_else(|_| base.to_string());
+            (display, normalized, entry)
+        })
+        .collect::<Vec<_>>();
+
+    let mut bases_by_display: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for (display, normalized, _) in &rows {
+        bases_by_display
+            .entry(display.as_str())
+            .or_default()
+            .insert(normalized.as_str());
+    }
+    let shared: BTreeSet<String> = bases_by_display
+        .into_iter()
+        .filter(|(_, bases)| bases.len() > 1)
+        .map(|(display, _)| display.to_string())
+        .collect();
+
+    let mut by_display = BTreeMap::new();
+    for (display, normalized, entry) in rows {
+        let display = if shared.contains(&display) && !normalized.starts_with("https://") {
+            normalized
+        } else {
+            display
+        };
+        by_display.entry(display).or_insert(entry);
+    }
+    by_display
+}
+
 async fn run_list(args: AuthListCommand) -> eyre::Result<()> {
     let store_path = crate::store::ui_creds_store_paths()?.path;
     let store = crate::store::read_creds_store()
         .await
         .wrap_err("failed to read creds store")?;
 
-    let mut by_host: std::collections::BTreeMap<String, crate::store::StoreEntry> =
-        std::collections::BTreeMap::new();
-    for (key, entry) in store {
-        let host_key = display_key(&key, &entry);
-        by_host.entry(host_key).or_insert(entry);
-    }
+    let by_host = entries_by_display_key(store);
 
     if args.json {
         let logins = by_host
@@ -280,7 +321,10 @@ async fn run_list(args: AuthListCommand) -> eyre::Result<()> {
     for (host_key, entry) in by_host {
         let summary = entry.credential_summary();
         let username = entry.username.unwrap_or_else(|| "?".to_string());
-        println!("{username}@{host_key} ({summary})");
+        println!(
+            "{}@{host_key} ({summary})",
+            crate::output::sanitize_line(&username)
+        );
     }
     Ok(())
 }
@@ -342,6 +386,7 @@ async fn run_show(args: AuthShowCommand) -> eyre::Result<()> {
     }
 
     let username = entry.username.unwrap_or_else(|| "?".to_string());
+    let username = crate::output::sanitize_line(&username);
     println!("Host:      {base_url}");
     println!("HostKey:   {host_key}");
     println!("Username:  {username}");
@@ -388,7 +433,10 @@ async fn run_logout(args: AuthLogoutCommand) -> eyre::Result<()> {
     let removed = crate::store::delete_store_entry(&base_url).await?;
     if let Some(entry) = removed {
         let username = entry.username.unwrap_or_else(|| "?".to_string());
-        println!("signed out of {username}@{host_key}");
+        println!(
+            "signed out of {}@{host_key}",
+            crate::output::sanitize_line(&username)
+        );
     } else {
         println!("already signed out of {host_key}");
     }
@@ -435,7 +483,9 @@ pub async fn run_nuget_api_key(args: AuthNugetApiKeyCommand) -> eyre::Result<()>
         .await?
         .ok_or_else(|| {
             eyre!(
-                "No stored password login for '{}'. Run `fj-ex auth login --host {}` first                  (the API only allows creating tokens with username + password; SSO accounts                  can create a package token in the web UI under Settings > Applications).",
+                "No stored password login for '{}'. Run `fj-ex auth login --host {}` first \
+                 (the API only allows creating tokens with username + password; SSO accounts \
+                 can create a package token in the web UI under Settings > Applications).",
                 base_url,
                 base_url
             )
@@ -521,4 +571,63 @@ fn default_nuget_token_name() -> String {
         "fj-ex-nuget-{}",
         OffsetDateTime::now_utc().unix_timestamp_nanos()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{CredentialKind, CredsStore, StoreEntry};
+
+    fn token_entry(base_url: &str, token: &str) -> StoreEntry {
+        StoreEntry {
+            base_url: Some(base_url.to_string()),
+            kind: Some(CredentialKind::Token),
+            api_token: Some(token.to_string()),
+            ..StoreEntry::default()
+        }
+    }
+
+    #[test]
+    fn list_shows_http_and_https_logins_for_one_host() {
+        let mut store = CredsStore::default();
+        store.insert(
+            "forge.example.com".to_string(),
+            token_entry("https://forge.example.com", "a"),
+        );
+        store.insert(
+            "http://forge.example.com".to_string(),
+            token_entry("http://forge.example.com", "b"),
+        );
+
+        let listed = entries_by_display_key(store);
+        let keys = listed.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys, vec!["forge.example.com", "http://forge.example.com"]);
+        assert_eq!(listed["forge.example.com"].api_token.as_deref(), Some("a"));
+        assert_eq!(
+            listed["http://forge.example.com"].api_token.as_deref(),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn list_merges_legacy_duplicates_and_keeps_plain_host_keys() {
+        let mut store = CredsStore::default();
+        store.insert(
+            "forge.example.com".to_string(),
+            token_entry("https://forge.example.com", "a"),
+        );
+        store.insert(
+            "https://forge.example.com".to_string(),
+            token_entry("https://forge.example.com", "dup"),
+        );
+        store.insert(
+            "localhost:3000".to_string(),
+            token_entry("http://localhost:3000", "c"),
+        );
+
+        let listed = entries_by_display_key(store);
+        let keys = listed.keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys, vec!["forge.example.com", "localhost:3000"]);
+        assert_eq!(listed["forge.example.com"].api_token.as_deref(), Some("a"));
+    }
 }

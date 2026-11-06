@@ -58,7 +58,11 @@ pub async fn run(args: LoginCommand) -> eyre::Result<()> {
 
     let store_path = crate::store::ui_creds_store_paths()?.path;
 
-    println!("{}@{}", input.username, host_label(&base_url));
+    println!(
+        "{}@{}",
+        crate::output::sanitize_line(&input.username),
+        host_label(&base_url)
+    );
     println!("Saved UI creds to: {}", store_path.display());
 
     Ok(())
@@ -107,7 +111,7 @@ async fn run_token_login(
 
     println!(
         "{}@{}",
-        login.as_deref().unwrap_or("?"),
+        crate::output::sanitize_line(login.as_deref().unwrap_or("?")),
         host_label(base_url)
     );
     println!("Saved API token to: {}", store_path.display());
@@ -120,8 +124,8 @@ async fn run_token_login(
     if let Some(existing) = outcome.ui_username_mismatch {
         eprintln!(
             "warn: the token belongs to '{}' but the stored UI login is for '{}'.",
-            login.as_deref().unwrap_or("?"),
-            existing
+            crate::output::sanitize_line(login.as_deref().unwrap_or("?")),
+            crate::output::sanitize_line(&existing)
         );
     }
     Ok(())
@@ -230,7 +234,7 @@ async fn run_session_import(
             .join(", ");
         println!(
             "{}@{}",
-            login.as_deref().unwrap_or("?"),
+            crate::output::sanitize_line(login.as_deref().unwrap_or("?")),
             host_label(base_url)
         );
         println!(
