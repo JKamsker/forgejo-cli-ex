@@ -263,8 +263,26 @@ pub struct ActionsCommand {
     #[command(flatten)]
     pub target: TargetArgs,
 
+    /// How to talk to the server: `ui` (web UI with the stored password login or imported
+    /// session), `api` (REST API with an API token), or `auto` (UI when a UI login is stored,
+    /// otherwise the API token; falls back to the token when the UI session is unusable).
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    pub backend: ActionsBackendMode,
+
     #[command(subcommand)]
     pub command: ActionsSubcommand,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ActionsBackendMode {
+    /// UI session when a password login or imported session is stored, else the API token.
+    #[default]
+    Auto,
+    /// Always use the web UI session.
+    Ui,
+    /// Always use the REST API (token from `auth login --token-stdin`, FJ_EX_TOKEN,
+    /// FORGEJO_TOKEN, GITEA_TOKEN, or fj keys.json; else basic auth with the stored password).
+    Api,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -639,7 +657,7 @@ pub enum ActionsSubcommand {
         #[command(subcommand)]
         command: ActionsVariablesSubcommand,
     },
-    /// Runner registration tokens and queued jobs (REST API; uses `fj`'s stored API token).
+    /// Runner registration tokens and queued jobs (REST API; needs an API token).
     Runners {
         #[command(subcommand)]
         command: ActionsRunnersSubcommand,

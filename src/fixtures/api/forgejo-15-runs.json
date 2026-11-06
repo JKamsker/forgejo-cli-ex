@@ -1,0 +1,33 @@
+{
+ "workflow_runs": [
+  {
+   "id": 3,
+   "index_in_repo": 2,
+   "title": "chore: bump",
+   "status": "failure",
+   "workflow_id": "ci.yml",
+   "prettyref": "main",
+   "event": "push",
+   "html_url": "http://forge.example.com/e2e/demo/actions/runs/2",
+   "created": "2026-11-06T18:08:52Z",
+   "started": "2026-11-06T18:08:53Z",
+   "stopped": "2026-11-06T18:08:55Z",
+   "duration": 2000000000
+  },
+  {
+   "id": 1,
+   "index_in_repo": 1,
+   "title": "ci: add workflow",
+   "status": "failure",
+   "workflow_id": "ci.yml",
+   "prettyref": "main",
+   "event": "push",
+   "html_url": "http://forge.example.com/e2e/demo/actions/runs/1",
+   "created": "2026-11-06T18:08:09Z",
+   "started": "2026-11-06T18:08:11Z",
+   "stopped": "2026-11-06T18:08:14Z",
+   "duration": 3000000000
+  }
+ ],
+ "total_count": 2
+}
