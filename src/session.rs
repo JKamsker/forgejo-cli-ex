@@ -172,7 +172,9 @@ impl UiSession {
             .await
             .wrap_err("failed to probe session")?;
 
-        if is_auth_challenge_url(self.request_base_url(), resp.url()) {
+        if is_auth_challenge_url(self.request_base_url(), resp.url())
+            || is_off_instance_url(self.request_base_url(), resp.url())
+        {
             return Ok(false);
         }
         if resp.status().as_u16() >= 400 {
@@ -232,7 +234,10 @@ impl UiSession {
     pub async fn fetch_login(&self) -> Option<String> {
         let url = format!("{}/user/settings", self.request_base_url());
         let resp = self.client.get(&url).send().await.ok()?;
-        if !resp.status().is_success() || is_auth_challenge_url(&self.base_url, resp.url()) {
+        if !resp.status().is_success()
+            || is_auth_challenge_url(self.request_base_url(), resp.url())
+            || is_off_instance_url(self.request_base_url(), resp.url())
+        {
             return None;
         }
         let page = resp.text().await.ok()?;
@@ -542,6 +547,30 @@ fn is_auth_challenge_url(base_url: &str, url: &Url) -> bool {
     is_login_url(base_url, url) || is_two_factor_url(base_url, url)
 }
 
+/// Whether a (redirected) response URL left the instance: another host, a
+/// different scheme or port (except an `http` -> `https` upgrade on default
+/// ports), or a path outside the instance base path. SSO deployments redirect
+/// unauthenticated requests to an identity provider or forward-auth login
+/// page, which answers 200 but is not a logged-in instance page.
+fn is_off_instance_url(base_url: &str, url: &Url) -> bool {
+    let Ok(base) = Url::parse(base_url) else {
+        return false;
+    };
+    if base.host_str() != url.host_str() {
+        return true;
+    }
+    let same_origin = base.scheme() == url.scheme() && base.port() == url.port();
+    let https_upgrade = base.scheme() == "http"
+        && url.scheme() == "https"
+        && base.port().is_none()
+        && url.port().is_none();
+    if !same_origin && !https_upgrade {
+        return true;
+    }
+    let base_path = base.path().trim_end_matches('/');
+    !base_path.is_empty() && !path_is_or_under(url.path(), base_path)
+}
+
 /// Matches `/user/login` relative to the instance base path, so both
 /// `https://host/user/login` and `https://host/gitea/user/login` (for a
 /// `https://host/gitea` instance) are detected, but repository pages such as
@@ -617,6 +646,111 @@ mod tests {
         assert!(!is_auth_challenge_url(base, &repo_file));
         assert!(!is_auth_challenge_url(base, &repo_two_factor));
         assert!(!is_auth_challenge_url(base, &lookalike));
+    }
+
+    #[test]
+    fn off_instance_urls_are_detected() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        let base = "https://forge.example.com";
+        assert!(!is_off_instance_url(
+            base,
+            &url("https://forge.example.com/user/settings")
+        ));
+        assert!(is_off_instance_url(
+            base,
+            &url("https://idp.example.com/login?client_id=forge")
+        ));
+        assert!(is_off_instance_url(
+            base,
+            &url("https://forge.example.com:9091/oauth2/sign_in")
+        ));
+        assert!(is_off_instance_url(
+            base,
+            &url("http://forge.example.com/user/settings")
+        ));
+        assert!(!is_off_instance_url(
+            "http://forge.example.com",
+            &url("https://forge.example.com/user/settings")
+        ));
+        assert!(!is_off_instance_url(
+            "http://localhost:3000",
+            &url("http://localhost:3000/user/settings")
+        ));
+        assert!(is_off_instance_url(
+            "http://localhost:3000",
+            &url("http://localhost:3001/user/settings")
+        ));
+
+        let sub = "https://apps.example.com/gitea";
+        assert!(!is_off_instance_url(
+            sub,
+            &url("https://apps.example.com/gitea/user/settings")
+        ));
+        assert!(is_off_instance_url(
+            sub,
+            &url("https://apps.example.com/oauth2/sign_in")
+        ));
+        assert!(is_off_instance_url(
+            sub,
+            &url("https://apps.example.com/gitea2/user/settings")
+        ));
+    }
+
+    /// Answers `/user/settings` with a redirect to `redirect_to(port)` and every
+    /// other path with a 200 sign-in page.
+    fn spawn_redirecting_server(redirect_to: impl Fn(u16) -> String + Send + 'static) -> u16 {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut stream) = stream else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    continue;
+                }
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if line == "\r\n" => break,
+                        Ok(_) => {}
+                    }
+                }
+                let response = if request_line.contains(" /user/settings ") {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        redirect_to(port)
+                    )
+                } else {
+                    let body = "<html>Sign in with your identity provider</html>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn session_probe_rejects_a_redirect_to_an_off_instance_login_page() {
+        // 127.0.0.1 redirects to `localhost`: another host, like an external IdP.
+        let port = spawn_redirecting_server(|port| format!("http://localhost:{port}/idp/login"));
+        let session = UiSession::new(&format!("http://127.0.0.1:{port}"), None).unwrap();
+        assert!(!session.test_session().await.unwrap());
+        assert_eq!(session.fetch_login().await, None);
+    }
+
+    #[tokio::test]
+    async fn session_probe_accepts_on_instance_pages() {
+        let port = spawn_redirecting_server(|_| "/user/settings/profile".to_string());
+        let session = UiSession::new(&format!("http://127.0.0.1:{port}"), None).unwrap();
+        assert!(session.test_session().await.unwrap());
     }
 
     #[test]
