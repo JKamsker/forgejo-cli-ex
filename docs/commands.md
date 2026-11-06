@@ -157,6 +157,12 @@ fj-ex actions --backend ui   ...   # always the web UI (password or imported ses
 fj-ex actions --backend api  ...   # always the REST API (token, else basic auth with the stored password)
 ```
 
+`--backend` selects how runs, jobs, logs, artifacts, workflows, `cancel`, `rerun`, `wait` and the
+`--wait` part of `trigger` reach the server. The `trigger` dispatch itself, `secrets`, `variables`
+and `runners` always use the REST API, whatever `--backend` says: dispatch, `secrets` and
+`variables` with the API token, else basic auth with the stored password; `runners` with the API
+token only.
+
 `auto` uses the UI when a password or session login is stored for the host, otherwise the API
 token. When the UI session cannot be established (for example an expired imported session) and a
 token is available, it falls back to the API and prints a warning.

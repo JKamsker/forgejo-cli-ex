@@ -173,6 +173,8 @@ Token scopes: `read:repository` is enough to list runs/jobs and download logs/ar
 (`--backend auto|ui|api`, default `auto`). `auto` uses the UI when a password or session login is
 stored — exactly as before — and otherwise the API token. If the UI session is unusable (e.g. an
 imported session expired) and a token is available, `auto` falls back to the API with a warning.
+`--backend` does not affect the `trigger` dispatch, `secrets`, `variables` or `runners`, which
+always use the REST API.
 
 Forgejo/Gitea web routes do not accept API tokens, and REST coverage of Actions differs by server:
 
