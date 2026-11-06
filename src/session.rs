@@ -381,8 +381,24 @@ impl UiSession {
         body: &serde_json::Value,
         retry_on_logout: bool,
     ) -> eyre::Result<reqwest::Response> {
-        self.send_with_retry(retry_on_logout, || self.client.post(url).json(body))
-            .await
+        self.send_with_retry(retry_on_logout, || {
+            let request = self.client.post(url).json(body);
+            // Servers that still use token-based CSRF protection (e.g. Gitea
+            // <= 1.25) mirror the token in the `_csrf` cookie and reject UI
+            // POSTs without the matching header. Newer servers ignore it.
+            match self.csrf_cookie(url) {
+                Some(token) => request.header("X-Csrf-Token", token),
+                None => request,
+            }
+        })
+        .await
+    }
+
+    /// Value of the `_csrf` cookie that would be sent to `url`, if any.
+    fn csrf_cookie(&self, url: &str) -> Option<String> {
+        let url = Url::parse(url).ok()?;
+        let store = self.cookie_store.lock().ok()?;
+        csrf_cookie_value(&store, &url)
     }
 
     pub async fn post_json_response_with_csrf(
@@ -431,6 +447,15 @@ impl UiSession {
     }
 }
 
+fn csrf_cookie_value(store: &CookieStore, url: &Url) -> Option<String> {
+    store
+        .matches(url)
+        .into_iter()
+        .find(|cookie| cookie.name() == "_csrf")
+        .map(|cookie| cookie.value().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn is_auth_challenge_url(url: &Url) -> bool {
     is_login_url(url) || is_two_factor_url(url)
 }
@@ -459,5 +484,20 @@ mod tests {
         assert!(is_auth_challenge_url(&login));
         assert!(is_auth_challenge_url(&two_factor));
         assert!(!is_auth_challenge_url(&settings));
+    }
+
+    #[test]
+    fn csrf_cookie_is_found_for_matching_urls_only() {
+        let base = Url::parse("http://localhost:3000/").unwrap();
+        let mut store = CookieStore::default();
+        assert_eq!(csrf_cookie_value(&store, &base), None);
+        store
+            .parse("_csrf=tok123; Path=/", &base)
+            .expect("cookie parses");
+        store.parse("i_like_gitea=abc; Path=/", &base).unwrap();
+        let post = Url::parse("http://localhost:3000/o/r/actions/runs/1/cancel").unwrap();
+        assert_eq!(csrf_cookie_value(&store, &post).as_deref(), Some("tok123"));
+        let other = Url::parse("http://other.example/o/r/actions/runs/1/cancel").unwrap();
+        assert_eq!(csrf_cookie_value(&store, &other), None);
     }
 }
