@@ -179,8 +179,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 && status != reqwest::StatusCode::OK
                 && status != reqwest::StatusCode::CREATED
             {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(eyre!("Trigger failed: HTTP {} body={}", status, text));
+                let detail = crate::pulls::read_error_detail(resp).await;
+                return Err(eyre!("Trigger failed: HTTP {status}.{detail}"));
             }
 
             if json {

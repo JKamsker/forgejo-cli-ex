@@ -130,21 +130,20 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
                 .wrap_err("pull request merge request failed")?;
             if response.status() != reqwest::StatusCode::OK {
                 let status = response.status();
-                let detail = response.text().await.unwrap_or_default();
-                let detail = detail.trim();
+                let detail = read_error_detail(response).await;
                 if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
                     return Err(eyre!(
                         "Pull request merge rejected: HTTP {status}. Forgejo uses 405 when the caller cannot merge the current PR state. \
                          Authentication source: {}. Check the caller has repository admin/merge permission and that branch-protection approvals/checks are satisfied; \
                          use --force only with explicit operator authorization.{}",
                         credentials.source(),
-                        response_detail(detail),
+                        detail,
                     ));
                 }
                 return Err(eyre!(
                     "Pull request merge failed: HTTP {status}. Authentication source: {}.{}",
                     credentials.source(),
-                    response_detail(detail),
+                    detail,
                 ));
             }
             println!("Merged pull request #{index}.");
@@ -307,16 +306,100 @@ fn authenticate_request(
     }
 }
 
-fn response_detail(detail: &str) -> String {
+/// Server error details shown to the user are clipped to this many characters.
+const ERROR_DETAIL_MAX_CHARS: usize = 1_000;
+/// Bytes of an error body kept in memory: enough for the clipped detail even
+/// if every character takes four UTF-8 bytes, plus one byte to notice more.
+const ERROR_BODY_MAX_BYTES: usize = ERROR_DETAIL_MAX_CHARS * 4 + 1;
+
+/// Formats a (possibly already truncated) server error body for an error
+/// message. `truncated` marks a body that was cut off while reading.
+fn response_detail(detail: &str, truncated: bool) -> String {
+    let detail = detail.trim();
     if detail.is_empty() {
-        String::new()
-    } else {
-        let mut clipped = detail.chars().take(1_000).collect::<String>();
-        if detail.chars().count() > clipped.chars().count() {
-            clipped.push_str("...");
-        }
-        format!(" Response: {clipped}")
+        return String::new();
     }
+    let mut clipped = detail
+        .chars()
+        .take(ERROR_DETAIL_MAX_CHARS)
+        .collect::<String>();
+    if truncated || detail.chars().count() > ERROR_DETAIL_MAX_CHARS {
+        clipped.push_str("...");
+    }
+    format!(" Response: {clipped}")
+}
+
+/// Accumulates at most `max_bytes` of a response body, dropping the rest.
+struct BodyPrefix {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    truncated: bool,
+}
+
+impl BodyPrefix {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+            truncated: false,
+        }
+    }
+
+    /// Appends a chunk; returns `false` once the prefix is full.
+    fn push(&mut self, chunk: &[u8]) -> bool {
+        let room = self.max_bytes.saturating_sub(self.bytes.len());
+        if chunk.len() > room {
+            self.bytes.extend_from_slice(&chunk[..room]);
+            self.truncated = true;
+            return false;
+        }
+        self.bytes.extend_from_slice(chunk);
+        true
+    }
+
+    /// Decodes the prefix, dropping a multi-byte character cut in half at the end.
+    fn into_detail(self) -> String {
+        let end = complete_utf8_prefix_len(&self.bytes);
+        let text = String::from_utf8_lossy(&self.bytes[..end]);
+        response_detail(&text, self.truncated)
+    }
+}
+
+/// Length of `bytes` without a trailing, incomplete UTF-8 sequence.
+fn complete_utf8_prefix_len(bytes: &[u8]) -> usize {
+    // A UTF-8 sequence is at most four bytes, so only the last three can
+    // belong to an unfinished character.
+    for back in 1..=bytes.len().min(3) {
+        let byte = bytes[bytes.len() - back];
+        if byte & 0b1100_0000 == 0b1000_0000 {
+            continue; // continuation byte
+        }
+        let needed = match byte {
+            0x00..=0x7F => 1,
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            _ => 4,
+        };
+        return if needed > back {
+            bytes.len() - back
+        } else {
+            bytes.len()
+        };
+    }
+    bytes.len()
+}
+
+/// Reads an error response body incrementally and returns its clipped detail
+/// without buffering an arbitrarily large body.
+pub(crate) async fn read_error_detail(mut response: Response) -> String {
+    let mut prefix = BodyPrefix::new(ERROR_BODY_MAX_BYTES);
+    // A body that fails mid-read still yields whatever arrived before.
+    while let Ok(Some(chunk)) = response.chunk().await {
+        if !prefix.push(&chunk) {
+            break;
+        }
+    }
+    prefix.into_detail()
 }
 
 fn api_client(target: &crate::target::ResolvedTarget) -> eyre::Result<reqwest::Client> {
@@ -363,17 +446,14 @@ async fn send_authenticated(
 
 async fn response_value(response: Response, operation: &str) -> eyre::Result<Value> {
     let status = response.status();
+    if !status.is_success() {
+        let detail = read_error_detail(response).await;
+        return Err(eyre!("{operation} failed: HTTP {status}.{detail}"));
+    }
     let body = response
         .bytes()
         .await
         .wrap_err_with(|| format!("failed to read {operation} response"))?;
-    if !status.is_success() {
-        let detail = String::from_utf8_lossy(&body);
-        return Err(eyre!(
-            "{operation} failed: HTTP {status}.{}",
-            response_detail(detail.trim())
-        ));
-    }
     if body.is_empty() {
         return Ok(Value::Null);
     }
@@ -465,7 +545,10 @@ fn print_review_list(value: &Value) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{nonempty, read_body, request_base, response_detail};
+    use super::{
+        complete_utf8_prefix_len, nonempty, read_body, request_base, response_detail, BodyPrefix,
+        ERROR_BODY_MAX_BYTES, ERROR_DETAIL_MAX_CHARS,
+    };
     use crate::cli::{PullState, ReviewEvent};
 
     #[test]
@@ -484,8 +567,48 @@ mod tests {
 
     #[test]
     fn limits_server_error_detail_without_hiding_a_concise_message() {
-        assert_eq!(response_detail("no approval"), " Response: no approval");
-        assert!(response_detail(&"x".repeat(1_001)).ends_with("..."));
+        assert_eq!(
+            response_detail(" no approval\n", false),
+            " Response: no approval"
+        );
+        assert!(response_detail(&"x".repeat(1_001), false).ends_with("..."));
+        assert_eq!(response_detail("short", true), " Response: short...");
+        assert_eq!(response_detail("  ", false), "");
+    }
+
+    #[test]
+    fn error_body_prefix_keeps_only_a_bounded_prefix_of_an_oversized_body() {
+        let mut prefix = BodyPrefix::new(ERROR_BODY_MAX_BYTES);
+        let chunk = "é".repeat(1_024); // 2 bytes per character
+        let mut chunks_accepted = 0;
+        for _ in 0..1_000 {
+            if !prefix.push(chunk.as_bytes()) {
+                break;
+            }
+            chunks_accepted += 1;
+        }
+        assert!(chunks_accepted < 1_000, "reading must stop once full");
+        assert_eq!(prefix.bytes.len(), ERROR_BODY_MAX_BYTES);
+        assert!(prefix.truncated);
+
+        let detail = prefix.into_detail();
+        let clipped = detail.strip_prefix(" Response: ").unwrap();
+        let clipped = clipped.strip_suffix("...").unwrap();
+        assert_eq!(clipped.chars().count(), ERROR_DETAIL_MAX_CHARS);
+        assert!(clipped.chars().all(|ch| ch == 'é'));
+    }
+
+    #[test]
+    fn error_body_prefix_drops_a_character_split_at_the_byte_limit() {
+        let mut prefix = BodyPrefix::new(4);
+        assert!(!prefix.push("ab€".as_bytes())); // '€' is three bytes
+        assert_eq!(prefix.into_detail(), " Response: ab...");
+
+        assert_eq!(complete_utf8_prefix_len("a€".as_bytes()), 4);
+        assert_eq!(complete_utf8_prefix_len(&"a€".as_bytes()[..3]), 1);
+        assert_eq!(complete_utf8_prefix_len(&"😀".as_bytes()[..3]), 0);
+        assert_eq!(complete_utf8_prefix_len("😀".as_bytes()), 4);
+        assert_eq!(complete_utf8_prefix_len(b""), 0);
     }
 
     #[test]
