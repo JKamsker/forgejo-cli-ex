@@ -181,10 +181,14 @@ pub fn find(id: &str) -> Option<&'static Target> {
     TARGETS.iter().find(|t| t.id == id)
 }
 
-/// Targets selected by `FJ_EX_E2E_TARGET` (comma separated ids, or `all`).
+/// Name of the `e2e_target!` test (and CI matrix `test_name`) for a target id.
+pub fn test_name(id: &str) -> String {
+    format!("e2e_{}_docker", id.replace('-', "_"))
+}
+
+/// Parse a `FJ_EX_E2E_TARGET` value (comma separated ids, or `all`).
 /// `None` means "no filter".
-pub fn selection_from_env() -> Option<Vec<String>> {
-    let raw = std::env::var("FJ_EX_E2E_TARGET").ok()?;
+pub fn parse_selection(raw: &str) -> Option<Vec<String>> {
     let ids: Vec<String> = raw
         .split(',')
         .map(|s| s.trim().to_string())
@@ -196,6 +200,63 @@ pub fn selection_from_env() -> Option<Vec<String>> {
     Some(ids)
 }
 
-pub fn is_selected(id: &str) -> bool {
-    selection_from_env().is_none_or(|ids| ids.iter().any(|s| s == id))
+/// Targets selected by `FJ_EX_E2E_TARGET`. `None` means "no filter".
+pub fn selection_from_env() -> Option<Vec<String>> {
+    parse_selection(&std::env::var("FJ_EX_E2E_TARGET").ok()?)
+}
+
+/// Selected ids that name no target (typos such as `gitea-1.27`), which would
+/// otherwise make every test skip and pass.
+pub fn unknown_ids(selection: &[String]) -> Vec<String> {
+    selection
+        .iter()
+        .filter(|id| find(id).is_none())
+        .cloned()
+        .collect()
+}
+
+/// Whether `id` is selected. Fails when `FJ_EX_E2E_TARGET` names an unknown target.
+pub fn is_selected(id: &str) -> eyre::Result<bool> {
+    let Some(ids) = selection_from_env() else {
+        return Ok(true);
+    };
+    let unknown = unknown_ids(&ids);
+    if !unknown.is_empty() {
+        let known: Vec<&str> = TARGETS.iter().map(|t| t.id).collect();
+        return Err(eyre::eyre!(
+            "FJ_EX_E2E_TARGET names unknown target(s) {unknown:?}; known: {}",
+            known.join(", ")
+        ));
+    }
+    Ok(ids.iter().any(|s| s == id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_selection_handles_all_and_lists() {
+        assert_eq!(parse_selection(""), None);
+        assert_eq!(parse_selection(" , "), None);
+        assert_eq!(parse_selection("forgejo-17,all"), None);
+        assert_eq!(
+            parse_selection(" forgejo-17 , gitea-1-27 "),
+            Some(vec!["forgejo-17".to_string(), "gitea-1-27".to_string()])
+        );
+    }
+
+    #[test]
+    fn unknown_ids_reports_typos() {
+        let sel = vec!["forgejo-17".to_string(), "gitea-1.27".to_string()];
+        assert_eq!(unknown_ids(&sel), vec!["gitea-1.27".to_string()]);
+        let ok: Vec<String> = TARGETS.iter().map(|t| t.id.to_string()).collect();
+        assert!(unknown_ids(&ok).is_empty());
+    }
+
+    #[test]
+    fn test_name_follows_the_id() {
+        assert_eq!(test_name("forgejo-17"), "e2e_forgejo_17_docker");
+        assert_eq!(test_name("gitea-1-27"), "e2e_gitea_1_27_docker");
+    }
 }
