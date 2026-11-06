@@ -50,8 +50,8 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
     println!(
         "job0Index={} job0Status={} job0Name={}",
         job0.job_index,
-        job0.status.as_deref().unwrap_or("?"),
-        job0.name.as_deref().unwrap_or("?")
+        crate::output::sanitize_line(job0.status.as_deref().unwrap_or("?")),
+        crate::output::sanitize_line(job0.name.as_deref().unwrap_or("?"))
     );
 
     println!("[5] Artifacts for latest run");

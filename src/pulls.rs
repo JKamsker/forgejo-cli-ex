@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +8,7 @@ use reqwest::{RequestBuilder, Response};
 use serde_json::{json, Value};
 
 use crate::cli::{PullsCommand, PullsSubcommand};
+use crate::output::{sanitize_line, sanitize_terminal_text};
 
 pub async fn run(args: PullsCommand) -> eyre::Result<()> {
     let target = crate::target::resolve_target(
@@ -100,7 +102,7 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
                 .get("html_url")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            println!("Created pull request #{number} {html_url}");
+            println!("Created pull request #{number} {}", sanitize_line(html_url));
         }
         PullsSubcommand::Merge {
             index,
@@ -319,6 +321,8 @@ fn response_detail(detail: &str, truncated: bool) -> String {
     if detail.is_empty() {
         return String::new();
     }
+    // Error messages end up on a terminal as well.
+    let detail = sanitize_terminal_text(detail, true);
     let mut clipped = detail
         .chars()
         .take(ERROR_DETAIL_MAX_CHARS)
@@ -479,75 +483,82 @@ fn read_body(body: Option<String>, body_file: Option<PathBuf>) -> eyre::Result<S
     nonempty("comment body", value)
 }
 
+// Human-readable list output. Every server-controlled string is sanitized so
+// it cannot inject terminal escape sequences; `--json` output stays verbatim.
+
 fn print_pull_list(value: &Value) -> eyre::Result<()> {
-    for pull in value
-        .as_array()
-        .ok_or_else(|| eyre!("pull request list response was not an array"))?
-    {
-        let number = pull
-            .get("number")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        let state = pull.get("state").and_then(Value::as_str).unwrap_or("?");
-        let title = pull.get("title").and_then(Value::as_str).unwrap_or("");
-        let head = pull
-            .get("head")
-            .and_then(|head| head.get("ref"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let base = pull
-            .get("base")
-            .and_then(|base| base.get("ref"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        println!("#{number}\t{state}\t{head} -> {base}\t{title}");
-    }
-    Ok(())
+    print_lines(value, "pull request list", format_pull_line)
 }
 
 fn print_comment_list(value: &Value) -> eyre::Result<()> {
-    for comment in value
+    print_lines(value, "comment list", format_comment_line)
+}
+
+fn print_review_list(value: &Value) -> eyre::Result<()> {
+    print_lines(value, "review list", format_review_line)
+}
+
+fn print_lines(value: &Value, what: &str, format: fn(&Value) -> String) -> eyre::Result<()> {
+    for item in value
         .as_array()
-        .ok_or_else(|| eyre!("comment list response was not an array"))?
+        .ok_or_else(|| eyre!("{what} response was not an array"))?
     {
-        let id = comment
-            .get("id")
-            .and_then(Value::as_u64)
-            .unwrap_or_default();
-        let user = comment
-            .get("user")
-            .and_then(|user| user.get("login"))
-            .and_then(Value::as_str)
-            .unwrap_or("?");
-        let body = comment.get("body").and_then(Value::as_str).unwrap_or("");
-        println!("#{id}\t{user}\t{body}");
+        println!("{}", format(item));
     }
     Ok(())
 }
 
-fn print_review_list(value: &Value) -> eyre::Result<()> {
-    for review in value
-        .as_array()
-        .ok_or_else(|| eyre!("review list response was not an array"))?
-    {
-        let id = review.get("id").and_then(Value::as_u64).unwrap_or_default();
-        let user = review
-            .get("user")
-            .and_then(|user| user.get("login"))
-            .and_then(Value::as_str)
-            .unwrap_or("?");
-        let state = review.get("state").and_then(Value::as_str).unwrap_or("?");
-        let body = review.get("body").and_then(Value::as_str).unwrap_or("");
-        println!("#{id}\t{user}\t{state}\t{body}");
-    }
-    Ok(())
+fn str_field<'a>(value: &'a Value, pointer: &str, default: &'a str) -> &'a str {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .unwrap_or(default)
+}
+
+fn line_field<'a>(value: &'a Value, pointer: &str, default: &'a str) -> Cow<'a, str> {
+    sanitize_line(str_field(value, pointer, default))
+}
+
+fn body_field<'a>(value: &'a Value) -> Cow<'a, str> {
+    sanitize_terminal_text(str_field(value, "/body", ""), true)
+}
+
+fn format_pull_line(pull: &Value) -> String {
+    let number = pull
+        .get("number")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let state = line_field(pull, "/state", "?");
+    let title = line_field(pull, "/title", "");
+    let head = line_field(pull, "/head/ref", "");
+    let base = line_field(pull, "/base/ref", "");
+    format!("#{number}\t{state}\t{head} -> {base}\t{title}")
+}
+
+fn format_comment_line(comment: &Value) -> String {
+    let id = comment
+        .get("id")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let user = line_field(comment, "/user/login", "?");
+    let body = body_field(comment);
+    format!("#{id}\t{user}\t{body}")
+}
+
+fn format_review_line(review: &Value) -> String {
+    let id = review.get("id").and_then(Value::as_u64).unwrap_or_default();
+    let user = line_field(review, "/user/login", "?");
+    let state = line_field(review, "/state", "?");
+    let body = body_field(review);
+    format!("#{id}\t{user}\t{state}\t{body}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        complete_utf8_prefix_len, nonempty, read_body, request_base, response_detail, BodyPrefix,
-        ERROR_BODY_MAX_BYTES, ERROR_DETAIL_MAX_CHARS,
+        complete_utf8_prefix_len, format_comment_line, format_pull_line, format_review_line,
+        nonempty, read_body, request_base, response_detail, BodyPrefix, ERROR_BODY_MAX_BYTES,
+        ERROR_DETAIL_MAX_CHARS,
     };
     use crate::cli::{PullState, ReviewEvent};
 
@@ -574,6 +585,48 @@ mod tests {
         assert!(response_detail(&"x".repeat(1_001), false).ends_with("..."));
         assert_eq!(response_detail("short", true), " Response: short...");
         assert_eq!(response_detail("  ", false), "");
+    }
+
+    #[test]
+    fn human_output_neutralizes_terminal_escapes_in_server_fields() {
+        let pull = serde_json::json!({
+            "number": 7,
+            "state": "open\u{1b}[2J",
+            "title": "fix\u{1b}]8;;https://evil\u{07}title\tpart",
+            "head": {"ref": "feat\u{9b}31m"},
+            "base": {"ref": "main\r"},
+        });
+        let line = format_pull_line(&pull);
+        assert!(!line.chars().any(|ch| ch.is_control() && ch != '\t'));
+        assert_eq!(
+            line,
+            "#7\topen\u{fffd}[2J\tfeat\u{fffd}31m -> main \tfix\u{fffd}]8;;https://evil\u{fffd}title part"
+        );
+
+        let comment = serde_json::json!({
+            "id": 3,
+            "user": {"login": "mallory\u{1b}[8m"},
+            "body": "line 1\r\n\tline 2\u{1b}[0m",
+        });
+        assert_eq!(
+            format_comment_line(&comment),
+            "#3\tmallory\u{fffd}[8m\tline 1\n\tline 2\u{fffd}[0m"
+        );
+
+        let review = serde_json::json!({
+            "id": 4,
+            "user": {"login": "bob"},
+            "state": "APPROVED\u{7}",
+            "body": "ok\u{1b}c",
+        });
+        assert_eq!(
+            format_review_line(&review),
+            "#4\tbob\tAPPROVED\u{fffd}\tok\u{fffd}c"
+        );
+        assert_eq!(
+            response_detail("{\"message\":\"\u{1b}[31mdenied\"}", false),
+            " Response: {\"message\":\"\u{fffd}[31mdenied\"}"
+        );
     }
 
     #[test]

@@ -270,7 +270,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     }
 
                     for w in workflows {
-                        println!("{w}");
+                        println!("{}", crate::output::sanitize_line(&w));
                     }
                 }
                 ActionsSubcommand::Runs {
@@ -667,7 +667,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 {
                                     Ok(m) => m.attempt_number,
                                     Err(e) => {
-                                        let msg = format!("Job {job_index} ({job_name}): {e}");
+                                        let msg = format!(
+                                            "Job {job_index} ({}): {e}",
+                                            crate::output::sanitize_line(job_name)
+                                        );
                                         eprintln!("warn: {msg}");
                                         failures.push(msg);
                                         continue;
@@ -691,7 +694,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                         );
                                     }
                                     Err(e) => {
-                                        let msg = format!("Job {job_index} ({job_name}): {e}");
+                                        let msg = format!(
+                                            "Job {job_index} ({}): {e}",
+                                            crate::output::sanitize_line(job_name)
+                                        );
                                         eprintln!("warn: {msg}");
                                         failures.push(msg);
                                     }
@@ -721,7 +727,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
 
                             eprintln!(
                                 "== job {} (attempt {}) :: {} ==",
-                                job_index, attempt, job_name
+                                job_index,
+                                attempt,
+                                crate::output::sanitize_line(job_name)
                             );
                             let resp = crate::ui_actions::open_job_logs(
                                 &session, &repo, run_index, job_index, attempt,
@@ -991,7 +999,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         None => println!("Rerun requested for run #{run_index}."),
                     }
                     if let Some(redirect) = redirect {
-                        println!("{redirect}");
+                        println!("{}", crate::output::sanitize_line(&redirect));
                     }
                 }
                 ActionsSubcommand::Trigger { .. } => {
@@ -1310,6 +1318,7 @@ fn print_wait_result(
         return Ok(());
     }
 
+    let status = crate::output::sanitize_line(&status);
     if let Some(job_index) = job_index {
         println!(
             "Run #{} job #{} completed with status '{}'.",
@@ -1441,7 +1450,7 @@ fn wait_terminal_error(result: &WaitResult, job_index: Option<i64>) -> Option<ey
 
     if let Some(job) = finished_wait_job(result, job_index) {
         if job.status.as_deref().is_some_and(is_failing_status) {
-            let status = job.status.as_deref().unwrap_or("unknown");
+            let status = crate::output::sanitize_line(job.status.as_deref().unwrap_or("unknown"));
             return Some(eyre!(
                 "run {run_index} job {job_index} finished with status {status}"
             ));
@@ -1626,7 +1635,7 @@ async fn rerun_failed_jobs(
                 .join(", ")
         );
         for redirect in redirects {
-            println!("{redirect}");
+            println!("{}", crate::output::sanitize_line(&redirect));
         }
     }
 
@@ -2166,7 +2175,11 @@ fn run_terminal_error(
             continue;
         };
         if is_failing_status(status) {
-            failures.push(format!("job {}: {}", j.job_index, status));
+            failures.push(format!(
+                "job {}: {}",
+                j.job_index,
+                crate::output::sanitize_line(status)
+            ));
         }
     }
 
