@@ -282,12 +282,12 @@ impl ActionsClient {
                 let resp = s
                     .post_json_response(&url, &serde_json::json!({}), true)
                     .await?;
-                if resp.status() != reqwest::StatusCode::OK {
+                if let Some(problem) = ui_post_problem(resp.status(), resp.url(), &url) {
                     return Err(eyre!(
-                        "Failed to cancel run '{}' via '{}'. HTTP {}.",
+                        "Failed to cancel run '{}' via '{}': {}.",
                         run_index,
                         url,
-                        resp.status()
+                        problem
                     ));
                 }
                 Ok(url)
@@ -363,12 +363,8 @@ impl ActionsClient {
                 let resp = s
                     .post_json_response(&url, &serde_json::json!({}), true)
                     .await?;
-                if resp.status() != reqwest::StatusCode::OK {
-                    return Err(eyre!(
-                        "Failed to rerun via '{}'. HTTP {}.",
-                        url,
-                        resp.status()
-                    ));
+                if let Some(problem) = ui_post_problem(resp.status(), resp.url(), &url) {
+                    return Err(eyre!("Failed to rerun via '{}': {}.", url, problem));
                 }
                 let text = resp.text().await.unwrap_or_default();
                 Ok((url, redirect_from_body(&text)))
@@ -445,13 +441,8 @@ impl ActionsClient {
                             continue;
                         }
                     };
-                    if resp.status() != reqwest::StatusCode::OK {
-                        failures.push(format!(
-                            "job {}: POST {} -> HTTP {}",
-                            job_index,
-                            url,
-                            resp.status()
-                        ));
+                    if let Some(problem) = ui_post_problem(resp.status(), resp.url(), &url) {
+                        failures.push(format!("job {}: POST {} -> {}", job_index, url, problem));
                         continue;
                     }
                     let text = resp.text().await.unwrap_or_default();
@@ -475,6 +466,30 @@ impl ActionsClient {
     }
 }
 
+/// Why a state-changing UI POST did not succeed, if it did not. Success is a
+/// 200 answered by the requested URL itself: a server that rejects the request
+/// (e.g. a failed CSRF check) redirects to another page, which the client
+/// follows to a 200 HTML page.
+fn ui_post_problem(
+    status: reqwest::StatusCode,
+    final_url: &reqwest::Url,
+    request_url: &str,
+) -> Option<String> {
+    if status != reqwest::StatusCode::OK {
+        return Some(format!("HTTP {status}"));
+    }
+    let redirected = reqwest::Url::parse(request_url).is_ok_and(|requested| {
+        requested.origin() != final_url.origin() || requested.path() != final_url.path()
+    });
+    redirected.then(|| {
+        format!(
+            "the server redirected to '{}' instead of answering (the request was rejected, \
+             e.g. by a CSRF check; try `fj-ex auth login` again)",
+            crate::output::sanitize_line(final_url.path())
+        )
+    })
+}
+
 fn redirect_from_body(text: &str) -> Option<String> {
     if text.trim().is_empty() {
         return None;
@@ -496,6 +511,29 @@ mod tests {
         assert_eq!(auto_choice(true, false), AutoChoice::Ui);
         assert_eq!(auto_choice(false, true), AutoChoice::Api);
         assert_eq!(auto_choice(false, false), AutoChoice::None);
+    }
+
+    #[test]
+    fn ui_posts_that_were_redirected_are_failures() {
+        let url = "http://h/o/r/actions/runs/7/cancel";
+        let at = |u: &str| reqwest::Url::parse(u).unwrap();
+        assert_eq!(
+            ui_post_problem(reqwest::StatusCode::OK, &at(url), url),
+            None
+        );
+        // A rejected CSRF check redirects to the home page, which answers 200.
+        let problem = ui_post_problem(reqwest::StatusCode::OK, &at("http://h/"), url).unwrap();
+        assert!(problem.contains("redirected to '/'"), "{problem}");
+        assert!(ui_post_problem(
+            reqwest::StatusCode::OK,
+            &at("https://h/o/r/actions/runs/7/cancel"),
+            url
+        )
+        .is_some());
+        assert_eq!(
+            ui_post_problem(reqwest::StatusCode::FORBIDDEN, &at(url), url).as_deref(),
+            Some("HTTP 403 Forbidden")
+        );
     }
 
     #[test]
