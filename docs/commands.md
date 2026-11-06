@@ -3,6 +3,11 @@
 All commands support `--host`/`-H`, `--repo`/`-r`, and `--remote`/`-R` for target resolution.
 See the main [README](../README.md) for install and quickstart.
 
+Tested against Forgejo 15–17 and Gitea 1.25–1.27 (see [tests/e2e](../tests/e2e/README.md)).
+`--run-index` is the number in the run's web URL: the per-repository run index on Forgejo and
+Gitea ≤ 1.25, the run id on Gitea ≥ 1.26 (which switched its Actions URLs to ids). `--job-index`
+is always the 0-based position of the job in the run.
+
 ---
 
 ## auth
@@ -267,6 +272,9 @@ fj-ex actions runners jobs --repo owner/name --waiting
 # Filter by runner labels (repeatable; sent as labels=a,b)
 fj-ex actions runners jobs --scope global --label self-hosted --label linux
 ```
+
+Gitea has no runner job queue endpoint; there `runners jobs` reads Gitea's `/actions/jobs`
+listing instead, reports queued jobs as `waiting` and applies `--label` client-side.
 
 If you get a "No Forgejo API token found" error, authenticate via `fj`:
 

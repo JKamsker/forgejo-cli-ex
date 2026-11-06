@@ -147,6 +147,19 @@ This is required for automatic re-login. Downloaded logs and artifacts may conta
 
 If your account uses two-factor authentication, `fj-ex auth login` prompts for the current passcode after the password step. For noninteractive use, pass `--otp`, `--otp-stdin`, or set `FJ_OTP`. The passcode is not stored; only the resulting UI cookies are stored so later commands can reuse the session until Forgejo expires it.
 
+## Testing
+
+```sh
+cargo test --locked                      # unit tests
+FJ_EX_E2E=1 cargo test --locked --test e2e_docker e2e_forgejo_17_docker -- --ignored --nocapture
+FJ_EX_E2E=1 cargo test --locked --test e2e_docker -- --ignored --nocapture --test-threads=2   # all targets
+tests/e2e/up.sh gitea-1-27               # a seeded server to try fj-ex against by hand
+```
+
+The Docker E2E suite runs every command against Forgejo 15, 16 and 17 and
+Gitea 1.25, 1.26 and 1.27, each in its own container with an Actions runner
+and seeded demo repositories. See [tests/e2e/README.md](tests/e2e/README.md).
+
 ## License
 
 LGPL-3.0-or-later
