@@ -127,7 +127,8 @@ pub async fn run(ctx: &Ctx<'_>) -> Result<()> {
         .ok()
         .await?;
     ensure!(
-        out.stdout.contains("first comment"),
+        out.stdout.contains("first comment")
+            && out.stdout.contains("comment from stdin\n\tsecond line"),
         "comments table:\n{}",
         out.stdout
     );
