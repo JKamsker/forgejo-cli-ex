@@ -9,7 +9,7 @@ use eyre::Context;
 use time::OffsetDateTime;
 
 use super::{
-    creds::{remove_entries_without_complete_creds, CredsStore},
+    creds::{remove_unusable_entries, CredsStore},
     lock::{acquire_store_lock, StoreLockMode},
     repair::repair_creds_store_from_raw,
     StorePaths,
@@ -31,7 +31,7 @@ pub(super) fn update_creds_store<T>(
 
     let mut load = read_creds_store_unlocked(&paths.path, true)?;
     let (value, changed) = update(&mut load.store)?;
-    let removed_invalid_entries = remove_entries_without_complete_creds(&mut load.store);
+    let removed_invalid_entries = remove_unusable_entries(&mut load.store);
 
     if changed || load.repaired || removed_invalid_entries > 0 {
         write_creds_store_atomic_unlocked(paths, &load.store)?;
@@ -43,7 +43,7 @@ pub(super) fn update_creds_store<T>(
 pub(super) fn read_creds_store_with_paths(paths: &StorePaths) -> eyre::Result<CredsStore> {
     match read_creds_store_unlocked(&paths.path, false) {
         Ok(mut load) => {
-            if remove_entries_without_complete_creds(&mut load.store) > 0 {
+            if remove_unusable_entries(&mut load.store) > 0 {
                 return read_cleaned_creds_store_with_lock(paths);
             }
             Ok(load.store)
@@ -58,7 +58,7 @@ fn read_cleaned_creds_store_with_lock(paths: &StorePaths) -> eyre::Result<CredsS
     };
 
     let mut load = read_creds_store_unlocked(&paths.path, true)?;
-    let removed_invalid_entries = remove_entries_without_complete_creds(&mut load.store);
+    let removed_invalid_entries = remove_unusable_entries(&mut load.store);
     if load.repaired || removed_invalid_entries > 0 {
         write_creds_store_atomic_unlocked(paths, &load.store)?;
     }
@@ -104,7 +104,7 @@ fn repair_invalid_store(
     let repaired = repair_creds_store_from_raw(raw)?;
     if !repaired.is_empty() {
         eprintln!(
-            "warn: ui-creds.json was invalid JSON; backed up to '{}' and repaired by dropping cookie jars.",
+            "warn: ui-creds.json was invalid JSON; backed up to '{}' and repaired by dropping cookie jars (imported browser sessions must be re-imported).",
             backup.display()
         );
         return Ok(StoreLoad {
@@ -139,7 +139,7 @@ fn write_creds_store_atomic_unlocked(paths: &StorePaths, store: &CredsStore) -> 
         .wrap_err_with(|| format!("failed to create creds store dir '{}'", paths.dir.display()))?;
 
     let mut store = store.clone();
-    remove_entries_without_complete_creds(&mut store);
+    remove_unusable_entries(&mut store);
 
     let json = serde_json::to_vec_pretty(&store).wrap_err("failed to serialize creds store")?;
     let temp_path = temp_store_path(&paths.path);
