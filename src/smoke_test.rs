@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use crate::cli::SmokeTestCommand;
 use tokio::io::AsyncWriteExt;
 
@@ -88,20 +90,33 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
         meta.attempt_number,
     )
     .await?;
-    let mut file = tokio::fs::File::create(&out_file).await?;
-    let log_bytes = crate::ui_actions::copy_response_body_with_limit(
-        resp,
-        &mut file,
-        args.opts.log_download_max_bytes,
-    )
-    .await
-    .map_err(|err| {
-        eyre::eyre!(
-            "Log file exceeds LogDownloadMaxBytes ({}): {err}. Rerun with a larger limit.",
-            args.opts.log_download_max_bytes
+    let (mut file, temp_file) = create_exclusive_temp_file(&out_file).await?;
+    let written = async {
+        let log_bytes = crate::ui_actions::copy_response_body_with_limit(
+            resp,
+            &mut file,
+            args.opts.log_download_max_bytes,
         )
-    })?;
-    file.flush().await?;
+        .await
+        .map_err(|err| {
+            eyre::eyre!(
+                "Log file exceeds LogDownloadMaxBytes ({}): {err}. Rerun with a larger limit.",
+                args.opts.log_download_max_bytes
+            )
+        })?;
+        file.flush().await?;
+        drop(file);
+        tokio::fs::rename(&temp_file, &out_file).await?;
+        Ok::<_, eyre::Report>(log_bytes)
+    }
+    .await;
+    let log_bytes = match written {
+        Ok(log_bytes) => log_bytes,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&temp_file).await;
+            return Err(err);
+        }
+    };
     if log_bytes == 0 {
         return Err(eyre::eyre!("Log file is empty (expected non-empty)"));
     }
@@ -125,4 +140,54 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
     println!();
     println!("OK");
     Ok(())
+}
+
+/// Creates a new temp file next to `target`. It is opened with `create_new`,
+/// so an existing file or symlink at that name is never written through; the
+/// caller renames it over `target`, which replaces a symlink planted there (the
+/// default output directory is under the shared system temp dir) instead of
+/// following it.
+async fn create_exclusive_temp_file(target: &Path) -> std::io::Result<(tokio::fs::File, PathBuf)> {
+    let file_name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "log".to_string());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let temp = target.with_file_name(format!(".{file_name}.{}.{nanos}.tmp", std::process::id()));
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .await?;
+    Ok((file, temp))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn log_write_replaces_a_planted_symlink_instead_of_following_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let victim = temp.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        let out_file = temp.path().join("job-0-attempt-1.log");
+        std::os::unix::fs::symlink(&victim, &out_file).unwrap();
+
+        let (mut file, temp_file) = create_exclusive_temp_file(&out_file).await.unwrap();
+        file.write_all(b"log line").await.unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+        tokio::fs::rename(&temp_file, &out_file).await.unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        assert!(!std::fs::symlink_metadata(&out_file)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&out_file).unwrap(), "log line");
+    }
 }

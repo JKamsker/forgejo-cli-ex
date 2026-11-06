@@ -35,36 +35,128 @@ impl CredentialKind {
     }
 }
 
+/// JSON key of the credential kind. A `kind` value this build does not know
+/// (from a newer version, or a hand edit) is kept in [`StoreEntry::extra`]
+/// under this key, so the entry survives reads and rewrites unchanged instead
+/// of making the whole store invalid.
+const KIND_KEY: &str = "kind";
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(from = "RawStoreEntry", into = "RawStoreEntry")]
 pub struct StoreEntry {
-    #[serde(rename = "baseUrl")]
     pub base_url: Option<String>,
 
     /// Credential kind of this entry (absent in stores written by older versions).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<CredentialKind>,
 
     pub username: Option<String>,
     pub password: Option<String>,
 
-    #[serde(rename = "userPass")]
     pub user_pass: Option<String>,
 
     /// Forgejo/Gitea API token stored by `fj-ex auth login --token[-stdin]`.
-    #[serde(rename = "apiToken", default, skip_serializing_if = "Option::is_none")]
     pub api_token: Option<String>,
 
-    #[serde(rename = "updatedUtc")]
     pub updated_utc: Option<String>,
 
-    #[serde(rename = "cookieJar")]
     pub cookie_jar: Option<CookieJar>,
 
-    #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
 
+/// On-disk shape of [`StoreEntry`].
+#[derive(Serialize, Deserialize)]
+struct RawStoreEntry {
+    #[serde(rename = "baseUrl")]
+    base_url: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<Value>,
+
+    username: Option<String>,
+    password: Option<String>,
+
+    #[serde(rename = "userPass")]
+    user_pass: Option<String>,
+
+    #[serde(rename = "apiToken", default, skip_serializing_if = "Option::is_none")]
+    api_token: Option<String>,
+
+    #[serde(rename = "updatedUtc")]
+    updated_utc: Option<String>,
+
+    #[serde(rename = "cookieJar")]
+    cookie_jar: Option<CookieJar>,
+
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+/// Parses a stored `kind` value, ignoring case and surrounding whitespace.
+fn parse_credential_kind(value: &Value) -> Option<CredentialKind> {
+    match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+        "password" => Some(CredentialKind::Password),
+        "session" => Some(CredentialKind::Session),
+        "token" => Some(CredentialKind::Token),
+        _ => None,
+    }
+}
+
+impl From<RawStoreEntry> for StoreEntry {
+    fn from(raw: RawStoreEntry) -> Self {
+        let mut extra = raw.extra;
+        let kind = match raw.kind {
+            None | Some(Value::Null) => None,
+            Some(value) => {
+                let kind = parse_credential_kind(&value);
+                if kind.is_none() {
+                    extra.insert(KIND_KEY.to_string(), value);
+                }
+                kind
+            }
+        };
+        Self {
+            base_url: raw.base_url,
+            kind,
+            username: raw.username,
+            password: raw.password,
+            user_pass: raw.user_pass,
+            api_token: raw.api_token,
+            updated_utc: raw.updated_utc,
+            cookie_jar: raw.cookie_jar,
+            extra,
+        }
+    }
+}
+
+impl From<StoreEntry> for RawStoreEntry {
+    fn from(entry: StoreEntry) -> Self {
+        let mut extra = entry.extra;
+        let unrecognized_kind = extra.remove(KIND_KEY);
+        let kind = match entry.kind {
+            Some(kind) => Some(Value::String(kind.as_str().to_string())),
+            None => unrecognized_kind,
+        };
+        Self {
+            base_url: entry.base_url,
+            kind,
+            username: entry.username,
+            password: entry.password,
+            user_pass: entry.user_pass,
+            api_token: entry.api_token,
+            updated_utc: entry.updated_utc,
+            cookie_jar: entry.cookie_jar,
+            extra,
+        }
+    }
+}
+
 impl StoreEntry {
+    /// Whether the stored `kind` is one this build does not know.
+    pub(super) fn has_unrecognized_kind(&self) -> bool {
+        self.kind.is_none() && self.extra.contains_key(KIND_KEY)
+    }
+
     fn has_password(&self) -> bool {
         nonempty(self.username.as_deref()) && nonempty(self.password.as_deref())
     }
@@ -83,6 +175,8 @@ impl StoreEntry {
     pub fn credential_kind(&self) -> Option<CredentialKind> {
         match self.kind {
             Some(kind) => Some(kind),
+            // Do not guess what an unknown (newer) kind means.
+            None if self.has_unrecognized_kind() => None,
             None if self.has_password() => Some(CredentialKind::Password),
             None if self.has_api_token() => Some(CredentialKind::Token),
             None => None,
@@ -101,9 +195,10 @@ impl StoreEntry {
     /// Whether the entry still holds at least one usable credential.
     ///
     /// Cookie jars on their own are only meaningful for imported sessions;
-    /// a legacy cookie-only entry (no kind, no password) is broken.
+    /// a legacy cookie-only entry (no kind, no password) is broken. Entries
+    /// of an unrecognized kind are kept for the version that wrote them.
     pub(super) fn is_usable(&self) -> bool {
-        self.has_api_token() || self.ui_login_kind().is_some()
+        self.has_api_token() || self.ui_login_kind().is_some() || self.has_unrecognized_kind()
     }
 
     /// Short human-readable description such as `password` or `session + token`.

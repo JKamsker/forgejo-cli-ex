@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     ffi::OsString,
-    fs::{File, OpenOptions},
+    fs::File,
     io::ErrorKind,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex, MutexGuard, TryLockError},
@@ -63,8 +63,7 @@ pub(super) fn acquire_store_lock(
     paths: &StorePaths,
     mode: StoreLockMode,
 ) -> eyre::Result<Option<StoreLock>> {
-    std::fs::create_dir_all(&paths.dir)
-        .wrap_err_with(|| format!("failed to create creds store dir '{}'", paths.dir.display()))?;
+    super::file::create_private_dir_all(&paths.dir)?;
 
     let timeout = mode.timeout();
     let Some(process_guard) = acquire_process_lock(&paths.path, mode, timeout)? else {
@@ -72,7 +71,7 @@ pub(super) fn acquire_store_lock(
     };
 
     let lock_path = lock_path(&paths.path);
-    let lock_file = OpenOptions::new()
+    let lock_file = super::file::private_open_options()
         .read(true)
         .write(true)
         .create(true)

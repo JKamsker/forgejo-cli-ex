@@ -99,7 +99,9 @@ fn repair_invalid_store(
     err: serde_json::Error,
 ) -> eyre::Result<StoreLoad> {
     let backup = backup_path(store_path)?;
-    let _ = std::fs::copy(store_path, &backup);
+    // The backup holds the same secrets as the store, so it gets the same
+    // owner-only permissions (`std::fs::copy` would copy the old mode).
+    let _ = write_private_file_new(&backup, raw.as_bytes());
 
     let repaired = repair_creds_store_from_raw(raw)?;
     if !repaired.is_empty() {
@@ -134,9 +136,45 @@ fn backup_path(original: &Path) -> eyre::Result<PathBuf> {
     )))
 }
 
+/// Creates `dir` (and missing parents). On Unix, directories created here are
+/// owner-only (0700); existing directories are left as they are.
+pub(super) fn create_private_dir_all(dir: &Path) -> eyre::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .wrap_err_with(|| format!("failed to create creds store dir '{}'", dir.display()))
+}
+
+/// Open options for files that hold credentials: owner read/write only (0600)
+/// on Unix when the file is created.
+pub(super) fn private_open_options() -> OpenOptions {
+    #[allow(unused_mut)]
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+}
+
+fn write_private_file_new(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut file = private_open_options()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
+}
+
 fn write_creds_store_atomic_unlocked(paths: &StorePaths, store: &CredsStore) -> eyre::Result<()> {
-    std::fs::create_dir_all(&paths.dir)
-        .wrap_err_with(|| format!("failed to create creds store dir '{}'", paths.dir.display()))?;
+    create_private_dir_all(&paths.dir)?;
 
     let mut store = store.clone();
     remove_unusable_entries(&mut store);
@@ -145,13 +183,9 @@ fn write_creds_store_atomic_unlocked(paths: &StorePaths, store: &CredsStore) -> 
     let temp_path = temp_store_path(&paths.path);
 
     let write_result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
-        file.write_all(&json)?;
-        file.sync_all()?;
-        drop(file);
+        // The temp file is created 0600 and renamed over the store, so a
+        // rewrite also tightens a store left world-readable by older versions.
+        write_private_file_new(&temp_path, &json)?;
 
         replace_file(&temp_path, &paths.path)?;
         sync_parent_dir(&paths.dir);

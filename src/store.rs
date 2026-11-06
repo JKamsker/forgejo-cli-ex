@@ -15,8 +15,8 @@ mod creds_tests;
 pub use creds::{
     clear_cookie_jar, delete_store_entry, get_store_entry, get_stored_api_token, get_ui_creds,
     read_creds_store, save_cookie_jar, save_cookie_jar_required, set_api_token,
-    set_imported_session, set_ui_creds, CookieJar, CookieRecord, CredentialKind, StoreEntry,
-    UiCreds,
+    set_imported_session, set_ui_creds, CookieJar, CookieRecord, CredentialKind, CredsStore,
+    StoreEntry, UiCreds,
 };
 pub use keys::get_fj_api_token_for_base_url;
 
