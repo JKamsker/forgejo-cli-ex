@@ -626,14 +626,34 @@ pub async fn find_run(
     repo: &str,
     run_index: i64,
 ) -> eyre::Result<Option<RunRef>> {
-    let page_size = RUN_LOOKUP_PAGE_SIZE;
+    // The size of a full page as the server serves it; an instance configured
+    // with a smaller maximum page size returns fewer runs than requested.
+    let mut page_size = RUN_LOOKUP_PAGE_SIZE;
     // Pages that may still contain the run: lowest..=highest.
     let mut lowest: u32 = 1;
     let mut highest: u32 = u32::MAX;
     let mut page: u32 = 1;
 
     for _ in 0..RUN_LOOKUP_MAX_REQUESTS {
-        let mut runs = list_runs(session, repo, None, page, page_size).await?;
+        let mut runs = list_runs(session, repo, None, page, RUN_LOOKUP_PAGE_SIZE).await?;
+        let short_first_page = page == 1
+            && !runs.is_empty()
+            && runs.len() < RUN_LOOKUP_PAGE_SIZE as usize
+            && runs
+                .last()
+                .is_some_and(|oldest| oldest.run_index > run_index);
+        if short_first_page {
+            // Either the whole list fits on one page or the server caps the
+            // page size; a second page tells the two apart.
+            if list_runs(session, repo, None, 2, RUN_LOOKUP_PAGE_SIZE)
+                .await?
+                .is_empty()
+            {
+                return Ok(None);
+            }
+            page_size = u32::try_from(runs.len()).unwrap_or(RUN_LOOKUP_PAGE_SIZE);
+        }
+
         match locate_run_on_page(&runs, run_index, page_size) {
             RunPagePosition::Found(pos) => return Ok(Some(runs.swap_remove(pos))),
             RunPagePosition::Missing => return Ok(None),
