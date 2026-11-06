@@ -202,7 +202,12 @@ async fn run_session_import(
             None,
             target.unix_socket.as_deref(),
         )?;
-        let jar = cookie_jar_for_pairs(&pairs, &probe.cookie_domain()?, probe.is_https());
+        let jar = cookie_jar_for_pairs(
+            &pairs,
+            &probe.cookie_domain()?,
+            &probe.cookie_path(),
+            probe.is_https(),
+        );
         let session = crate::session::UiSession::new_with_socket(
             base_url,
             Some(&jar),
@@ -300,9 +305,13 @@ fn parse_cookie_input(raw: &str) -> eyre::Result<CookieInput> {
     Ok(CookieInput::Pairs(pairs))
 }
 
+/// Imported cookies are scoped like the instance's own cookies (host-only, at
+/// the instance base path), so a server `Set-Cookie` replaces them instead of
+/// adding a second cookie with the same name.
 fn cookie_jar_for_pairs(
     pairs: &[(String, String)],
     domain: &str,
+    path: &str,
     secure: bool,
 ) -> crate::store::CookieJar {
     crate::store::CookieJar {
@@ -314,7 +323,7 @@ fn cookie_jar_for_pairs(
                 value: value.clone(),
                 domain: domain.to_string(),
                 host_only: true,
-                path: "/".to_string(),
+                path: path.to_string(),
                 expires_utc: None,
                 secure,
                 http_only: true,
@@ -536,6 +545,7 @@ mod tests {
         let jar = cookie_jar_for_pairs(
             &[("i_like_forgejo".into(), "v".into())],
             "forge.example.com",
+            "/",
             true,
         );
         assert_eq!(jar.cookies.len(), 1);
@@ -544,6 +554,24 @@ mod tests {
         assert!(cookie.host_only);
         assert!(cookie.secure);
         assert_eq!(cookie.path, "/");
+    }
+
+    #[test]
+    fn imported_cookies_use_the_instance_base_path() {
+        let session =
+            crate::session::UiSession::new("https://apps.example.com/gitea/", None).unwrap();
+        assert_eq!(session.cookie_path(), "/gitea");
+        let root = crate::session::UiSession::new("https://forge.example.com", None).unwrap();
+        assert_eq!(root.cookie_path(), "/");
+
+        let jar = cookie_jar_for_pairs(
+            &[("i_like_gitea".into(), "v".into())],
+            &session.cookie_domain().unwrap(),
+            &session.cookie_path(),
+            session.is_https(),
+        );
+        assert_eq!(jar.cookies[0].path, "/gitea");
+        assert_eq!(jar.cookies[0].domain, "apps.example.com");
     }
 
     fn test_login_command() -> LoginCommand {

@@ -224,6 +224,16 @@ impl UiSession {
             .ok_or_else(|| eyre!("unable to determine cookie domain for '{}'", self.base_url))
     }
 
+    /// Cookie path the instance uses for its own cookies: its base path
+    /// (`/gitea` for `https://host/gitea`), or `/` for a root instance.
+    pub fn cookie_path(&self) -> String {
+        Url::parse(self.request_base_url())
+            .ok()
+            .map(|u| u.path().trim_end_matches('/').to_string())
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| "/".to_string())
+    }
+
     /// Whether requests to this instance go over HTTPS.
     pub fn is_https(&self) -> bool {
         self.request_base_url().starts_with("https://")
@@ -506,13 +516,17 @@ impl UiSession {
     }
 }
 
+/// The `_csrf` cookie for `url`. When several match (e.g. an imported `Path=/`
+/// cookie next to a server-set one at the instance sub-path), the one with the
+/// longest path wins, as in RFC 6265 cookie ordering; `matches` itself returns
+/// cookies in no particular order.
 fn csrf_cookie_value(store: &CookieStore, url: &Url) -> Option<String> {
     store
         .matches(url)
         .into_iter()
-        .find(|cookie| cookie.name() == "_csrf")
+        .filter(|cookie| cookie.name() == "_csrf" && !cookie.value().is_empty())
+        .max_by_key(|cookie| AsRef::<str>::as_ref(&cookie.path).len())
         .map(|cookie| cookie.value().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 /// Error shown when an imported browser session no longer authenticates.
@@ -766,5 +780,22 @@ mod tests {
         assert_eq!(csrf_cookie_value(&store, &post).as_deref(), Some("tok123"));
         let other = Url::parse("http://other.example/o/r/actions/runs/1/cancel").unwrap();
         assert_eq!(csrf_cookie_value(&store, &other), None);
+    }
+
+    #[test]
+    fn csrf_cookie_prefers_the_most_specific_path() {
+        let base = Url::parse("https://apps.example.com/gitea/").unwrap();
+        let post = Url::parse("https://apps.example.com/gitea/o/r/actions/runs/1/cancel").unwrap();
+        // Insert in both orders so the result does not depend on map ordering.
+        for cookies in [
+            ["_csrf=stale; Path=/", "_csrf=fresh; Path=/gitea"],
+            ["_csrf=fresh; Path=/gitea", "_csrf=stale; Path=/"],
+        ] {
+            let mut store = CookieStore::default();
+            for cookie in cookies {
+                store.parse(cookie, &base).expect("cookie parses");
+            }
+            assert_eq!(csrf_cookie_value(&store, &post).as_deref(), Some("fresh"));
+        }
     }
 }
