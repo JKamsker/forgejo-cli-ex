@@ -757,6 +757,11 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         .await?;
 
                         let artifacts = session.run_artifacts(&repo, run_index).await?;
+                        if artifact_items(&artifacts).is_empty() {
+                            if let Some(hint) = session.empty_artifacts_hint() {
+                                eprintln!("{hint}");
+                            }
+                        }
 
                         if json {
                             let items = artifact_items(&artifacts);

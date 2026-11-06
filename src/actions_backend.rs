@@ -237,6 +237,14 @@ impl ActionsClient {
         }
     }
 
+    /// A note for an empty artifact list, when the backend may not see every artifact.
+    pub fn empty_artifacts_hint(&self) -> Option<String> {
+        match self {
+            Self::Ui(_) => None,
+            Self::Api(api) => api.artifacts_hint(),
+        }
+    }
+
     pub async fn open_artifact(
         &self,
         repo: &str,

@@ -181,13 +181,14 @@ Forgejo/Gitea web routes do not accept API tokens, and REST coverage of Actions 
 | `runs`, `trigger` | yes | yes | yes | yes | yes | yes |
 | `jobs`, `wait`, `logs job/run` | – | yes | yes | yes | yes | yes |
 | `logs job --attempt <older>` | – | yes | yes | – | – | yes |
-| `artifacts list/get` | – | yes | yes | yes | yes | yes |
+| `artifacts list/get` | – | yes | yes | v4 only | v4 only | v4 only |
 | `cancel` | – | yes | yes | – | – | – |
 | `rerun` (run, `--job-index`, `--failed-only`) | – | – | yes | – | yes | yes |
 | `workflows` | – | – | – | yes | yes | yes |
 
 Unsupported combinations fail with a message naming the missing endpoint and pointing to a UI
-login. `smoke-test` always uses the UI. `--run-index` is always the number shown in the run's web
+login. Gitea's REST API only sees artifacts uploaded with the v4 protocol
+(`actions/upload-artifact@v4`); v3 uploads need a UI login. `smoke-test` always uses the UI. `--run-index` is always the number shown in the run's web
 URL; `fj-ex` maps it to the API run id (on Gitea >= 1.26 the web URL already shows the id).
 
 ### SSO (OAuth2/OIDC/SAML) accounts

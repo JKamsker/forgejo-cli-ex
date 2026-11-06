@@ -170,7 +170,7 @@ REST API coverage verified against the servers' `/swagger.v1.json` and live inst
 | `jobs`, `jobs --watch`, `wait` | – | yes | yes | yes | yes | yes |
 | `logs job` (incl. `--follow`), `logs run` | – | yes | yes | yes | yes | yes |
 | `logs job --attempt <older attempt>` | – | yes | yes | – | – | yes |
-| `artifacts list` / `artifacts get` | – | yes | yes | yes | yes | yes |
+| `artifacts list` / `artifacts get` | – | yes | yes | v4 only | v4 only | v4 only |
 | `cancel` | – | yes | yes | – | – | – |
 | `rerun`, `rerun --job-index` | – | – | yes | – | yes | yes |
 | `rerun --failed-only` | – | – | yes (per job) | – | yes | yes |
@@ -179,6 +179,10 @@ REST API coverage verified against the servers' `/swagger.v1.json` and live inst
 
 When an operation has no endpoint on the server, the command fails with an explanation and asks
 for a UI login (`fj-ex auth login`, or `--session-cookie-stdin` for SSO) instead.
+
+Gitea's REST API only lists and downloads artifacts uploaded with the v4 protocol
+(`actions/upload-artifact@v4`). Artifacts uploaded with v3 (`actions/upload-artifact@v3`) are only
+visible to the UI backend; with a token, an empty list or a missing artifact prints a note saying so.
 
 `--run-index` is always the number in the run's web URL. That is the per-repository run number on
 Forgejo and Gitea <= 1.25, and the run id on Gitea >= 1.26; the API backend resolves it to the run

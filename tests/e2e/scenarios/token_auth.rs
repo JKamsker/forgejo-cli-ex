@@ -14,7 +14,7 @@ use serde_json::Value;
 use super::common::{self, status_of};
 use super::Ctx;
 use crate::e2e::cli::{FjEx, Output};
-use crate::e2e::harness::targets::Api;
+use crate::e2e::harness::targets::{Api, Family};
 use crate::e2e::harness::{ui, util};
 
 /// Scopes of the automation token (no admin/org/user write access).
@@ -198,6 +198,37 @@ pub async fn token_only_actions(ctx: &Ctx<'_>) -> Result<()> {
             "token job log lacks the step output:\n{}",
             out.stdout
         );
+    }
+
+    ctx.step("artifacts list with only a token");
+    // The fixture uploads with the v3 protocol. Gitea's REST API only covers
+    // v4 artifacts, so the list is empty there and fj-ex must say why.
+    let api_artifacts = if ctx.stack.target.family == Family::Forgejo {
+        caps.api_jobs
+    } else {
+        Api::Yes
+    };
+    if let Some(out) = expect_api(
+        ctx,
+        &fj,
+        &token,
+        "api_artifacts",
+        api_artifacts,
+        &ctx.actions(&ci, &["artifacts", "list", "--run-index", &ci_s, "--json"]),
+    )
+    .await?
+    {
+        let v = out.json()?;
+        let count = v["artifactCount"].as_i64().unwrap_or(-1);
+        if ctx.stack.target.family == Family::Gitea {
+            ensure!(
+                count == 0 && out.stderr.contains("v4 protocol"),
+                "token artifacts on Gitea (v3 upload): {v}\n{}",
+                out.stderr
+            );
+        } else {
+            ctx.note(&format!("token artifacts list: {count} artifact(s)"));
+        }
     }
 
     ctx.step("workflows with only a token");
