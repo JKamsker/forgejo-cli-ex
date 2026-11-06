@@ -441,7 +441,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                             "duration": j.duration,
                                         })).collect::<Vec<_>>(),
                                     });
-                                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                                    println!("{}", render_jobs_snapshot(&payload, json_lines)?);
                                 }
                             } else {
                                 let show_header =
@@ -544,14 +544,36 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                     .attempt_number
                                 }
                             };
-                            let resp = crate::ui_actions::open_job_logs(
+                            let resp = match crate::ui_actions::open_job_logs(
                                 &session,
                                 &repo,
                                 run_index,
                                 job_index_i64,
                                 attempt,
                             )
-                            .await?;
+                            .await
+                            {
+                                Ok(resp) => resp,
+                                // A job that is still queued has no log yet. Keep
+                                // following until it starts or the run ends.
+                                Err(err) if follow => {
+                                    let run_status =
+                                        crate::ui_actions::list_runs(&session, &repo, None, 1, 50)
+                                            .await?
+                                            .into_iter()
+                                            .find(|run| run.run_index == run_index)
+                                            .and_then(|run| run.status);
+                                    if !follow_should_wait_for_log(run_status.as_deref()) {
+                                        return Err(err);
+                                    }
+                                    tokio::time::sleep(std::time::Duration::from_secs(
+                                        follow_interval,
+                                    ))
+                                    .await;
+                                    continue;
+                                }
+                                Err(err) => return Err(err),
+                            };
 
                             if !follow {
                                 if let Some(out_file) = out_file.as_ref() {
@@ -1083,13 +1105,25 @@ async fn run_repository_actions_value(
         value_field.to_string(),
         serde_json::Value::String(actions_value),
     );
-    let response = client
-        .put(url)
+    let mut response = client
+        .put(&url)
         .basic_auth(&creds.username, Some(&creds.password))
         .json(&body)
         .send()
         .await
         .wrap_err("Actions secret update request failed")?;
+
+    if actions_value_needs_create(resource_path, response.status()) {
+        // Secrets are upserted by PUT, but variables are created with POST and
+        // only updated with PUT (which answers 404 for a missing variable).
+        response = client
+            .post(&url)
+            .basic_auth(&creds.username, Some(&creds.password))
+            .json(&body)
+            .send()
+            .await
+            .wrap_err("Actions variable create request failed")?;
+    }
 
     if !matches!(
         response.status(),
@@ -1109,6 +1143,10 @@ async fn run_repository_actions_value(
         resource_label, actions_name, repo
     );
     Ok(())
+}
+
+fn actions_value_needs_create(resource_path: &str, update_status: reqwest::StatusCode) -> bool {
+    resource_path == "variables" && update_status == reqwest::StatusCode::NOT_FOUND
 }
 
 fn validate_actions_name(name: &str) -> eyre::Result<String> {
@@ -1885,6 +1923,20 @@ fn observed_at_unix_ms() -> u128 {
         .as_millis()
 }
 
+/// `--json-lines` must emit exactly one JSON document per line; `--json` stays pretty.
+fn render_jobs_snapshot(payload: &serde_json::Value, json_lines: bool) -> eyre::Result<String> {
+    Ok(if json_lines {
+        serde_json::to_string(payload)?
+    } else {
+        serde_json::to_string_pretty(payload)?
+    })
+}
+
+/// `logs job --follow` retries a missing log only while the run is still queued or running.
+fn follow_should_wait_for_log(run_status: Option<&str>) -> bool {
+    run_status_is_terminal(run_status) == Some(false)
+}
+
 fn run_status_is_terminal(status: Option<&str>) -> Option<bool> {
     let status = status?;
     Some(matches!(
@@ -2003,7 +2055,8 @@ fn run_terminal_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_items, log_delta, observe_terminal_run_status, run_status_is_terminal,
+        actions_value_needs_create, artifact_items, follow_should_wait_for_log, log_delta,
+        observe_terminal_run_status, render_jobs_snapshot, run_status_is_terminal,
         should_print_jobs_snapshot, validate_actions_name,
     };
 
@@ -2074,6 +2127,45 @@ mod tests {
         assert!(validate_actions_name("1BAD").is_err());
         assert!(validate_actions_name("HAS-DASH").is_err());
         assert!(validate_actions_name(" ").is_err());
+    }
+
+    #[test]
+    fn json_lines_snapshots_are_single_line_documents() {
+        let payload = serde_json::json!({"runIndex": 1, "jobs": [{"jobIndex": 0}]});
+        let line = render_jobs_snapshot(&payload, true).unwrap();
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+            payload
+        );
+        assert!(render_jobs_snapshot(&payload, false)
+            .unwrap()
+            .contains('\n'));
+    }
+
+    #[test]
+    fn follow_waits_for_logs_only_while_the_run_is_active() {
+        assert!(follow_should_wait_for_log(Some("Waiting")));
+        assert!(follow_should_wait_for_log(Some("Running")));
+        assert!(!follow_should_wait_for_log(Some("Failure")));
+        assert!(!follow_should_wait_for_log(None));
+    }
+
+    #[test]
+    fn missing_variables_are_created_but_secrets_are_not_retried() {
+        use reqwest::StatusCode;
+        assert!(actions_value_needs_create(
+            "variables",
+            StatusCode::NOT_FOUND
+        ));
+        assert!(!actions_value_needs_create(
+            "variables",
+            StatusCode::NO_CONTENT
+        ));
+        assert!(!actions_value_needs_create(
+            "secrets",
+            StatusCode::NOT_FOUND
+        ));
     }
 }
 
