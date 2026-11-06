@@ -566,6 +566,95 @@ pub async fn latest_run_index(
     Ok(latest.run_index)
 }
 
+/// Forgejo and Gitea cap Actions run-list pages at 50 entries.
+const RUN_LOOKUP_PAGE_SIZE: u32 = 50;
+/// Upper bound on run-list pages fetched by one [`find_run`] call.
+const RUN_LOOKUP_MAX_REQUESTS: usize = 12;
+
+/// Where a run index sits relative to one page of the (newest-first) run list.
+#[derive(Debug, PartialEq, Eq)]
+enum RunPagePosition {
+    /// The run is on this page, at the given position.
+    Found(usize),
+    /// Every run on this full page is newer: the run is on a later page.
+    OnLaterPage,
+    /// The page is empty or every run on it is older: the run is on an earlier page.
+    OnEarlierPage,
+    /// The run would be on this page but is not listed (deleted or never existed).
+    Missing,
+}
+
+fn locate_run_on_page(runs: &[RunRef], run_index: i64, page_size: u32) -> RunPagePosition {
+    if let Some(pos) = runs.iter().position(|run| run.run_index == run_index) {
+        return RunPagePosition::Found(pos);
+    }
+    let (Some(newest), Some(oldest)) = (runs.first(), runs.last()) else {
+        return RunPagePosition::OnEarlierPage;
+    };
+    if oldest.run_index > run_index {
+        if runs.len() < page_size as usize {
+            // Last page of the list, and the run is older than all of it.
+            return RunPagePosition::Missing;
+        }
+        return RunPagePosition::OnLaterPage;
+    }
+    if newest.run_index < run_index {
+        return RunPagePosition::OnEarlierPage;
+    }
+    RunPagePosition::Missing
+}
+
+/// Predicts the page holding `run_index`, given that `page` ends with the run
+/// `oldest` (> `run_index`). At most `oldest - run_index - 1` runs separate the
+/// two, so the prediction is exact without deletions and never too early.
+fn predicted_run_page(page: u32, oldest: i64, run_index: i64, page_size: u32) -> u32 {
+    let runs_between = oldest.saturating_sub(run_index).saturating_sub(1).max(0);
+    let pages_between =
+        u32::try_from(runs_between / i64::from(page_size.max(1))).unwrap_or(u32::MAX);
+    page.saturating_add(1).saturating_add(pages_between)
+}
+
+/// Finds a run in the Actions run list by its index, however old it is.
+///
+/// The run list (not the run page) carries the authoritative run status, but
+/// it is paginated. Run indexes are allocated sequentially per repository, so
+/// the distance to the target index predicts its page exactly unless runs were
+/// deleted; in that case the prediction overshoots and is corrected by a
+/// bounded binary search.
+pub async fn find_run(
+    session: &UiSession,
+    repo: &str,
+    run_index: i64,
+) -> eyre::Result<Option<RunRef>> {
+    let page_size = RUN_LOOKUP_PAGE_SIZE;
+    // Pages that may still contain the run: lowest..=highest.
+    let mut lowest: u32 = 1;
+    let mut highest: u32 = u32::MAX;
+    let mut page: u32 = 1;
+
+    for _ in 0..RUN_LOOKUP_MAX_REQUESTS {
+        let mut runs = list_runs(session, repo, None, page, page_size).await?;
+        match locate_run_on_page(&runs, run_index, page_size) {
+            RunPagePosition::Found(pos) => return Ok(Some(runs.swap_remove(pos))),
+            RunPagePosition::Missing => return Ok(None),
+            RunPagePosition::OnLaterPage => {
+                lowest = page.saturating_add(1);
+                let oldest = runs.last().map_or(run_index, |run| run.run_index);
+                page = predicted_run_page(page, oldest, run_index, page_size).min(highest);
+            }
+            RunPagePosition::OnEarlierPage => {
+                highest = page.saturating_sub(1);
+                if lowest > highest {
+                    return Ok(None);
+                }
+                page = lowest + (highest - lowest) / 2;
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 pub async fn get_run_artifacts(
     session: &UiSession,
     repo: &str,
@@ -686,6 +775,70 @@ mod tests {
         assert_eq!(
             absolute_url("https://apps.example.com/gitea", "-/actions"),
             "https://apps.example.com/gitea/-/actions"
+        );
+    }
+
+    fn runs(indexes: impl IntoIterator<Item = i64>) -> Vec<RunRef> {
+        indexes
+            .into_iter()
+            .map(|run_index| RunRef {
+                run_index,
+                url: format!("https://forge.example/o/r/actions/runs/{run_index}"),
+                status: Some("Success".to_string()),
+                branch: None,
+                created_at: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn locate_run_on_page_finds_listed_runs() {
+        assert_eq!(
+            locate_run_on_page(&runs([12, 11, 10]), 11, 3),
+            RunPagePosition::Found(1)
+        );
+    }
+
+    #[test]
+    fn locate_run_on_page_continues_past_a_full_page_of_newer_runs() {
+        assert_eq!(
+            locate_run_on_page(&runs((101..=150).rev()), 3, 50),
+            RunPagePosition::OnLaterPage
+        );
+        // A short page is the end of the list, so an older run is not listed.
+        assert_eq!(
+            locate_run_on_page(&runs([20, 19]), 3, 50),
+            RunPagePosition::Missing
+        );
+    }
+
+    #[test]
+    fn locate_run_on_page_goes_back_from_older_or_empty_pages() {
+        assert_eq!(
+            locate_run_on_page(&runs([5, 4, 3]), 9, 3),
+            RunPagePosition::OnEarlierPage
+        );
+        assert_eq!(
+            locate_run_on_page(&runs([]), 9, 3),
+            RunPagePosition::OnEarlierPage
+        );
+    }
+
+    #[test]
+    fn predicted_run_page_jumps_directly_to_older_runs() {
+        // Page 1 holds runs 150..=101, page 2 holds 100..=51, page 3 holds 50..=1.
+        assert_eq!(predicted_run_page(1, 101, 100, 50), 2);
+        assert_eq!(predicted_run_page(1, 101, 51, 50), 2);
+        assert_eq!(predicted_run_page(1, 101, 50, 50), 3);
+        assert_eq!(predicted_run_page(1, 101, 1, 50), 3);
+        assert_eq!(predicted_run_page(2, 51, 1, 50), 3);
+    }
+
+    #[test]
+    fn locate_run_on_page_reports_a_deleted_run_inside_the_page_range() {
+        assert_eq!(
+            locate_run_on_page(&runs([12, 10, 9]), 11, 3),
+            RunPagePosition::Missing
         );
     }
 }

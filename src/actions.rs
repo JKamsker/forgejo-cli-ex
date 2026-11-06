@@ -21,6 +21,9 @@ const FAILING_JOB_STATUSES: &[&str] = &["failure", "canceled", "cancelled", "blo
 struct WaitResult {
     run_index: i64,
     run_url: String,
+    /// The run-list status, set only once it was observed as terminal (it then
+    /// overrides a possibly stale job snapshot).
+    terminal_run_status: Option<String>,
     jobs: Vec<crate::ui_actions::JobInfo>,
 }
 
@@ -235,7 +238,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         "triggered": true,
                     })),
                 )?;
-                if let Some(err) = wait_terminal_error(&result.jobs, run_index, None) {
+                if let Some(err) = wait_terminal_error(&result, None) {
                     return Err(err);
                 }
             }
@@ -366,17 +369,12 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
 
                     let interactive = std::io::stdout().is_terminal();
                     let mut last_sig: Option<String> = None;
-                    let mut terminal_status: Option<String> = None;
-                    let mut terminal_observations = 0_u8;
+                    let mut run_status_tracker = RunStatusTracker::new(run_index);
 
                     loop {
                         // The job state embedded in a run page can lag behind the Actions
                         // list. The list is the authoritative source for a terminal run.
-                        let run_status = crate::ui_actions::list_runs(&session, &repo, None, 1, 50)
-                            .await?
-                            .into_iter()
-                            .find(|run| run.run_index == run_index)
-                            .and_then(|run| run.status);
+                        let run_status = run_status_tracker.poll(&session, &repo).await?;
                         let view = crate::ui_actions::get_run_view_data(&session, &repo, run_index)
                             .await
                             .wrap_err("failed to load run view")?;
@@ -393,11 +391,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         let changed = last_sig.as_deref() != Some(sig.as_str());
                         last_sig = Some(sig);
 
-                        let done = observe_terminal_run_status(
-                            &mut terminal_status,
-                            &mut terminal_observations,
-                            run_status.as_deref(),
-                        ) || (run_status.is_none() && is_run_done_from_jobs(&jobs));
+                        let done = run_status_tracker.is_terminal()
+                            || (run_status.is_none() && is_run_done_from_jobs(&jobs));
 
                         // For watch, only print intermediate updates when interactive. JSON
                         // Lines is also a streaming interface, but it emits only state deltas
@@ -429,7 +424,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                         "runIndex": run_index,
                                         "runStatus": run_status,
                                         "observedAtUnixMs": observed_at_unix_ms(),
-                                        "terminalObservations": terminal_observations,
+                                        "terminalObservations": run_status_tracker.terminal_observations,
                                         "complete": done,
                                         "jobs": jobs.iter().map(|j| serde_json::json!({
                                             "runIndex": j.run_index,
@@ -503,7 +498,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     )
                     .await?;
                     print_wait_result(&target.base_url, &repo, &result, job_index, json, None)?;
-                    if let Some(err) = wait_terminal_error(&result.jobs, run_index, job_index) {
+                    if let Some(err) = wait_terminal_error(&result, job_index) {
                         return Err(err);
                     }
                 }
@@ -528,8 +523,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         .await?;
                         let job_index_i64 = job_index as i64;
                         let mut previous = Vec::new();
-                        let mut terminal_status: Option<String> = None;
-                        let mut terminal_observations = 0_u8;
+                        let mut run_status_tracker = RunStatusTracker::new(run_index);
+                        // Set once the run is known to be finished from the job snapshot
+                        // fallback: one more log fetch picks up the final bytes.
+                        let mut finishing: Option<Option<eyre::Report>> = None;
                         loop {
                             let attempt = match attempt {
                                 Some(a) => a.get() as i64,
@@ -587,23 +584,33 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             }
                             previous = current;
 
-                            let run_status =
-                                crate::ui_actions::list_runs(&session, &repo, None, 1, 50)
-                                    .await?
-                                    .into_iter()
-                                    .find(|run| run.run_index == run_index)
-                                    .and_then(|run| run.status);
-                            if observe_terminal_run_status(
-                                &mut terminal_status,
-                                &mut terminal_observations,
-                                run_status.as_deref(),
-                            ) {
+                            if let Some(final_error) = finishing.take() {
+                                if let Some(err) = final_error {
+                                    return Err(err);
+                                }
+                                break;
+                            }
+
+                            let run_status = run_status_tracker.poll(&session, &repo).await?;
+                            if run_status_tracker.is_terminal() {
                                 if let Some(err) =
                                     run_terminal_error(run_index, run_status.as_deref(), &[])
                                 {
                                     return Err(err);
                                 }
                                 break;
+                            }
+                            if run_status.is_none() {
+                                let view = crate::ui_actions::get_run_view_data(
+                                    &session, &repo, run_index,
+                                )
+                                .await
+                                .wrap_err("failed to load run view")?;
+                                let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+                                if is_run_done_from_jobs(&jobs) {
+                                    finishing = Some(run_terminal_error(run_index, None, &jobs));
+                                    continue;
+                                }
                             }
                             tokio::time::sleep(std::time::Duration::from_secs(follow_interval))
                                 .await;
@@ -1200,14 +1207,20 @@ async fn wait_for_run_completion(
     timeout: Option<Duration>,
 ) -> eyre::Result<WaitResult> {
     let started_at = Instant::now();
+    let mut run_status_tracker = RunStatusTracker::new(run_index);
 
     loop {
+        // As for `jobs --watch`, the run list is authoritative for a terminal
+        // run; the run page's job snapshot is used for single jobs and as a
+        // fallback when the run is not listed.
+        let run_status = run_status_tracker.poll(session, repo).await?;
         let view = crate::ui_actions::get_run_view_data(session, repo, run_index)
             .await
             .wrap_err("failed to load run view")?;
         let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
 
-        if is_wait_target_done(&jobs, job_index) {
+        let run_terminal = run_status_tracker.is_terminal();
+        if is_wait_target_done(&jobs, job_index, run_status.as_deref(), run_terminal) {
             let repo_path = repo.trim_matches('/');
             return Ok(WaitResult {
                 run_index,
@@ -1215,6 +1228,7 @@ async fn wait_for_run_completion(
                     "{}/{repo_path}/actions/runs/{run_index}",
                     session.base_url()
                 ),
+                terminal_run_status: run_status.filter(|_| run_terminal),
                 jobs,
             });
         }
@@ -1238,7 +1252,7 @@ fn print_wait_result(
     json: bool,
     trigger: Option<serde_json::Value>,
 ) -> eyre::Result<()> {
-    let status = wait_target_status(&result.jobs, job_index);
+    let status = wait_target_status(result, job_index);
 
     if json {
         let mut payload = serde_json::json!({
@@ -1248,6 +1262,7 @@ fn print_wait_result(
             "runUrl": result.run_url,
             "jobIndex": job_index,
             "status": status,
+            "runStatus": result.terminal_run_status,
             "jobs": result.jobs.iter().map(|job| serde_json::json!({
                 "runIndex": job.run_index,
                 "jobIndex": job.job_index,
@@ -1281,13 +1296,38 @@ fn print_wait_result(
     Ok(())
 }
 
-fn is_wait_target_done(jobs: &[crate::ui_actions::JobInfo], job_index: Option<i64>) -> bool {
+/// Whether a wait can stop.
+///
+/// `run_status` is the run-list status (`None` when the run is not listed) and
+/// `run_terminal` whether it has been terminal for two consecutive polls. A
+/// terminal run ends any wait; while the run is still active only the selected
+/// job finishing ends a job wait early. Without a run-list status the job
+/// snapshot decides, as before.
+fn is_wait_target_done(
+    jobs: &[crate::ui_actions::JobInfo],
+    job_index: Option<i64>,
+    run_status: Option<&str>,
+    run_terminal: bool,
+) -> bool {
+    if run_terminal {
+        return true;
+    }
+    if run_status.is_none() {
+        return is_snapshot_wait_target_done(jobs, job_index);
+    }
+    job_index.is_some_and(|job_index| find_job(jobs, job_index).is_some_and(is_job_finished))
+}
+
+fn is_snapshot_wait_target_done(
+    jobs: &[crate::ui_actions::JobInfo],
+    job_index: Option<i64>,
+) -> bool {
     if jobs.is_empty() {
         return false;
     }
 
     if let Some(job_index) = job_index {
-        if let Some(job) = jobs.iter().find(|job| job.job_index == job_index) {
+        if let Some(job) = find_job(jobs, job_index) {
             return is_job_done(job);
         }
         return is_run_done_from_jobs(jobs);
@@ -1296,22 +1336,60 @@ fn is_wait_target_done(jobs: &[crate::ui_actions::JobInfo], job_index: Option<i6
     is_run_done_from_jobs(jobs)
 }
 
+fn find_job(
+    jobs: &[crate::ui_actions::JobInfo],
+    job_index: i64,
+) -> Option<&crate::ui_actions::JobInfo> {
+    jobs.iter().find(|job| job.job_index == job_index)
+}
+
 fn is_job_done(job: &crate::ui_actions::JobInfo) -> bool {
     job.status
         .as_deref()
         .is_some_and(|status| !is_in_progress_status(status))
 }
 
-fn wait_target_status(jobs: &[crate::ui_actions::JobInfo], job_index: Option<i64>) -> String {
+/// A job that has finished while its run is still active. Unlike the snapshot
+/// fallback, `blocked` is not final here: Forgejo/Gitea also use it for jobs
+/// whose `needs` have not completed yet.
+fn is_job_finished(job: &crate::ui_actions::JobInfo) -> bool {
+    is_job_done(job)
+        && !job
+            .status
+            .as_deref()
+            .is_some_and(|status| status.eq_ignore_ascii_case("blocked"))
+}
+
+/// The selected job when its own status is final for this wait result.
+fn finished_wait_job(result: &WaitResult, job_index: i64) -> Option<&crate::ui_actions::JobInfo> {
+    find_job(&result.jobs, job_index).filter(|job| {
+        is_job_finished(job) || (result.terminal_run_status.is_none() && is_job_done(job))
+    })
+}
+
+fn wait_target_status(result: &WaitResult, job_index: Option<i64>) -> String {
+    let terminal_run_status = result.terminal_run_status.as_deref();
     if let Some(job_index) = job_index {
-        return jobs
-            .iter()
-            .find(|job| job.job_index == job_index)
-            .and_then(|job| job.status.clone())
-            .unwrap_or_else(|| "missing".to_string());
+        if let Some(status) =
+            finished_wait_job(result, job_index).and_then(|job| job.status.clone())
+        {
+            return status;
+        }
+        let job = find_job(&result.jobs, job_index);
+        return match (job, terminal_run_status) {
+            // The job snapshot lags behind the terminal run.
+            (Some(_), Some(run_status)) => normalize_run_status(run_status),
+            _ => job
+                .and_then(|job| job.status.clone())
+                .unwrap_or_else(|| "missing".to_string()),
+        };
     }
 
-    for job in jobs {
+    if let Some(run_status) = terminal_run_status {
+        return normalize_run_status(run_status);
+    }
+
+    for job in &result.jobs {
         let Some(status) = job.status.as_deref() else {
             return "unknown".to_string();
         };
@@ -1323,31 +1401,36 @@ fn wait_target_status(jobs: &[crate::ui_actions::JobInfo], job_index: Option<i64
     "success".to_string()
 }
 
-fn wait_terminal_error(
-    jobs: &[crate::ui_actions::JobInfo],
-    run_index: i64,
-    job_index: Option<i64>,
-) -> Option<eyre::Report> {
-    if let Some(job_index) = job_index {
-        if jobs.is_empty() {
-            return Some(eyre!("run {run_index} returned no jobs"));
-        }
+fn wait_terminal_error(result: &WaitResult, job_index: Option<i64>) -> Option<eyre::Report> {
+    let run_index = result.run_index;
+    let jobs = &result.jobs;
+    let terminal_run_status = result.terminal_run_status.as_deref();
+    let Some(job_index) = job_index else {
+        return run_terminal_error(run_index, terminal_run_status, jobs);
+    };
 
-        let Some(job) = jobs.iter().find(|job| job.job_index == job_index) else {
-            return Some(eyre!("run {run_index} completed without job {job_index}"));
-        };
-
+    if let Some(job) = finished_wait_job(result, job_index) {
         if job.status.as_deref().is_some_and(is_failing_status) {
             let status = job.status.as_deref().unwrap_or("unknown");
             return Some(eyre!(
                 "run {run_index} job {job_index} finished with status {status}"
             ));
         }
-
         return None;
     }
 
-    run_terminal_error(run_index, None, jobs)
+    // A failed or canceled run explains a missing or stale job best.
+    let run_error = terminal_run_status
+        .and_then(|run_status| run_terminal_error(run_index, Some(run_status), &[]));
+    if find_job(jobs, job_index).is_none() {
+        if jobs.is_empty() {
+            return run_error.or_else(|| Some(eyre!("run {run_index} returned no jobs")));
+        }
+        return Some(eyre!("run {run_index} completed without job {job_index}"));
+    }
+
+    // The job snapshot is stale; the terminal run status decides.
+    run_error
 }
 
 fn has_timed_out(started_at: Instant, timeout: Option<Duration>) -> bool {
@@ -1917,6 +2000,62 @@ fn observe_terminal_run_status(
     *observations >= 2
 }
 
+/// Polls one run's status from the Actions run list, which is authoritative
+/// when the run page's per-job snapshot lags behind, and tracks whether a
+/// terminal status has been stable (see [`observe_terminal_run_status`]).
+struct RunStatusTracker {
+    run_index: i64,
+    warned_missing: bool,
+    terminal_status: Option<String>,
+    terminal_observations: u8,
+}
+
+impl RunStatusTracker {
+    fn new(run_index: i64) -> Self {
+        Self {
+            run_index,
+            warned_missing: false,
+            terminal_status: None,
+            terminal_observations: 0,
+        }
+    }
+
+    /// Returns the run-list status, or `None` when the run is not listed (or
+    /// has no recognizable status). Callers then fall back to the job snapshot;
+    /// a missing run is reported once on stderr.
+    async fn poll(
+        &mut self,
+        session: &crate::session::UiSession,
+        repo: &str,
+    ) -> eyre::Result<Option<String>> {
+        let run = crate::ui_actions::find_run(session, repo, self.run_index).await?;
+        if run.is_none() {
+            self.warn_missing_once();
+        }
+        let status = run.and_then(|run| run.status);
+        observe_terminal_run_status(
+            &mut self.terminal_status,
+            &mut self.terminal_observations,
+            status.as_deref(),
+        );
+        Ok(status)
+    }
+
+    fn warn_missing_once(&mut self) {
+        if !std::mem::replace(&mut self.warned_missing, true) {
+            eprintln!(
+                "warning: run #{} was not found in the Actions run list; falling back to the run page's job status, which may lag behind",
+                self.run_index
+            );
+        }
+    }
+
+    /// Whether the run-list status has been terminal for two consecutive polls.
+    fn is_terminal(&self) -> bool {
+        self.terminal_observations >= 2
+    }
+}
+
 fn should_print_jobs_snapshot(
     watch: bool,
     done: bool,
@@ -2136,30 +2275,97 @@ mod wait_tests {
         assert!(parse_duration("1.5m").is_err());
     }
 
+    fn result(
+        terminal_run_status: Option<&str>,
+        jobs: Vec<crate::ui_actions::JobInfo>,
+    ) -> WaitResult {
+        WaitResult {
+            run_index: 10,
+            run_url: "https://forge.example/o/r/actions/runs/10".to_string(),
+            terminal_run_status: terminal_run_status.map(str::to_string),
+            jobs,
+        }
+    }
+
     #[test]
     fn wait_target_done_requires_terminal_statuses() {
         let running = vec![job(0, Some("success")), job(1, Some("running"))];
-        assert!(!is_wait_target_done(&running, None));
+        assert!(!is_wait_target_done(&running, None, None, false));
 
         let done = vec![job(0, Some("success")), job(1, Some("skipped"))];
-        assert!(is_wait_target_done(&done, None));
-        assert!(is_wait_target_done(&done, Some(0)));
+        assert!(is_wait_target_done(&done, None, None, false));
+        assert!(is_wait_target_done(&done, Some(0), None, false));
     }
 
     #[test]
     fn wait_target_done_treats_cancelling_as_in_progress() {
         let jobs = vec![job(0, Some("success")), job(1, Some("cancelling"))];
 
-        assert!(!is_wait_target_done(&jobs, None));
-        assert!(!is_wait_target_done(&jobs, Some(1)));
+        assert!(!is_wait_target_done(&jobs, None, None, false));
+        assert!(!is_wait_target_done(&jobs, Some(1), None, false));
+        assert!(!is_wait_target_done(
+            &jobs,
+            Some(1),
+            Some("Cancelling"),
+            false
+        ));
+        assert!(!is_run_done_from_jobs(&jobs));
+        assert_eq!(run_status_is_terminal(Some("Cancelling")), Some(false));
+    }
+
+    #[test]
+    fn wait_uses_the_run_list_status_over_a_stale_job_snapshot() {
+        // The run page still reports a running job, but the run list is terminal.
+        let stale = vec![job(0, Some("running"))];
+        assert!(is_wait_target_done(&stale, None, Some("Failure"), true));
+        assert!(is_wait_target_done(&stale, Some(0), Some("Failure"), true));
+
+        // All jobs look finished, but the run list still reports the run as active.
+        let done = vec![job(0, Some("success"))];
+        assert!(!is_wait_target_done(&done, None, Some("Running"), false));
+        // A first terminal observation is not trusted yet.
+        assert!(!is_wait_target_done(&stale, None, Some("Success"), false));
+
+        let failed = result(Some("Failure"), stale.clone());
+        assert!(wait_terminal_error(&failed, None).is_some());
+        assert!(wait_terminal_error(&failed, Some(0)).is_some());
+        assert_eq!(wait_target_status(&failed, None), "failure");
+        assert_eq!(wait_target_status(&failed, Some(0)), "failure");
+
+        let succeeded = result(Some("Success"), stale);
+        assert!(wait_terminal_error(&succeeded, None).is_none());
+        assert!(wait_terminal_error(&succeeded, Some(0)).is_none());
+        assert_eq!(wait_target_status(&succeeded, None), "success");
+    }
+
+    #[test]
+    fn job_wait_ends_when_the_job_finishes_before_its_run() {
+        let jobs = vec![job(0, Some("success")), job(1, Some("running"))];
+        assert!(is_wait_target_done(&jobs, Some(0), Some("Running"), false));
+        assert!(!is_wait_target_done(&jobs, Some(1), Some("Running"), false));
+    }
+
+    #[test]
+    fn job_wait_keeps_waiting_for_a_job_blocked_on_its_needs() {
+        let jobs = vec![job(0, Some("running")), job(1, Some("blocked"))];
+        assert!(!is_wait_target_done(&jobs, Some(1), Some("Running"), false));
+
+        // A run that stays blocked (e.g. awaiting approval) still ends the wait.
+        assert!(is_wait_target_done(&jobs, Some(1), Some("Blocked"), true));
+        let blocked = result(Some("Blocked"), jobs);
+        assert!(wait_terminal_error(&blocked, Some(1)).is_some());
     }
 
     #[test]
     fn wait_terminal_error_reports_failed_run_or_job() {
         let jobs = vec![job(0, Some("success")), job(1, Some("failure"))];
-        assert!(wait_terminal_error(&jobs, 10, None).is_some());
-        assert!(wait_terminal_error(&jobs, 10, Some(1)).is_some());
-        assert!(wait_terminal_error(&jobs, 10, Some(0)).is_none());
+        let snapshot = result(None, jobs.clone());
+        assert!(wait_terminal_error(&snapshot, None).is_some());
+        assert!(wait_terminal_error(&snapshot, Some(1)).is_some());
+        assert!(wait_terminal_error(&snapshot, Some(0)).is_none());
+        assert!(wait_terminal_error(&snapshot, Some(5)).is_some());
+        assert!(wait_terminal_error(&result(None, Vec::new()), Some(0)).is_some());
+        assert!(wait_terminal_error(&result(Some("Failure"), jobs), Some(0)).is_none());
     }
 
     #[test]
