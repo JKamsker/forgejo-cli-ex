@@ -43,7 +43,9 @@ pub async fn run(args: LoginCommand) -> eyre::Result<()> {
     {
         crate::session::LoginResult::LoggedIn => {}
         crate::session::LoginResult::TwoFactorRequired => {
-            let passcode = prompt_password("Forgejo 2FA passcode").await?;
+            let passcode = prompt_password("Forgejo 2FA passcode")
+                .await
+                .map_err(two_factor_prompt_error)?;
             session.submit_two_factor_code(&passcode).await?;
         }
     }
@@ -434,6 +436,16 @@ async fn prompt_line(label: &str) -> eyre::Result<String> {
     .await?
 }
 
+/// The account needs a 2FA passcode, none was given, and prompting failed
+/// (typically because there is no terminal, e.g. in CI).
+fn two_factor_prompt_error(err: eyre::Report) -> eyre::Report {
+    eyre!(
+        "This account requires a two-factor passcode, but none was given and it could not be prompted for ({err}).\n\
+         Pass it non-interactively with --otp-stdin (with --password-stdin: password on the first line, \
+         passcode on the second), --otp <CODE>, or the FJ_OTP environment variable."
+    )
+}
+
 async fn prompt_password(label: &str) -> eyre::Result<String> {
     let prompt = format!("{label}: ");
     tokio::task::spawn_blocking(move || rpassword::prompt_password(prompt).map_err(Into::into))
@@ -451,6 +463,17 @@ async fn read_lines_from_stdin() -> eyre::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn two_factor_prompt_error_names_the_non_interactive_options() {
+        let err = two_factor_prompt_error(eyre!("No such device or address (os error 6)"));
+        let msg = err.to_string();
+        assert!(msg.contains("two-factor passcode"));
+        assert!(msg.contains("No such device or address"));
+        for option in ["--otp-stdin", "--otp <CODE>", "FJ_OTP"] {
+            assert!(msg.contains(option), "missing {option}: {msg}");
+        }
+    }
 
     #[test]
     fn otp_stdin_uses_second_line_when_password_stdin_is_enabled() {
