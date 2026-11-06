@@ -113,6 +113,10 @@ pub struct RunViewMeta {
     pub job_index: Option<i64>,
     pub attempt_number: Option<i64>,
     pub actions_url: Option<String>,
+    /// Gitea >= 1.26 addresses runs and jobs by database id in Actions web
+    /// URLs (`/runs/{run_id}/jobs/{job_id}`); Forgejo and older Gitea use
+    /// the run index and the 0-based job index.
+    pub id_based_urls: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -337,6 +341,7 @@ pub async fn get_run_view_data(
         attempt_number: html::get_html_attribute_value(&html_s, "data-attempt-number")
             .and_then(|s| s.parse().ok()),
         actions_url: html::get_html_attribute_value(&html_s, "data-actions-url"),
+        id_based_urls: uses_id_based_urls(&html_s),
     };
 
     Ok(RunViewData {
@@ -346,32 +351,57 @@ pub async fn get_run_view_data(
     })
 }
 
+/// Whether a run view page belongs to a server that uses id-based Actions URLs.
+fn uses_id_based_urls(html_s: &str) -> bool {
+    html::get_html_attribute_value(html_s, "data-run-index").is_none()
+        && (html::get_html_attribute_value(html_s, "data-run-id").is_some()
+            || html::get_html_attribute_value(html_s, "data-actions-view-url").is_some())
+}
+
+/// URL the run view page POSTs to for its live state.
+fn live_run_state_url(base_url: &str, html_s: &str, run_index: i64) -> Option<String> {
+    let attr = |name: &str| html::get_html_attribute_value(html_s, name);
+    let number = |name: &str| attr(name).and_then(|s| s.parse::<i64>().ok());
+
+    // Gitea >= 1.27 renders the exact endpoint.
+    if let Some(view_url) = attr("data-actions-view-url").filter(|s| !s.is_empty()) {
+        return Some(absolute_url(base_url, &view_url));
+    }
+    let actions_base = absolute_url(base_url, &attr("data-actions-url")?);
+    if let Some(index) = number("data-run-index") {
+        // Forgejo and Gitea <= 1.25: run index + 0-based job index.
+        let job_index = number("data-job-index").unwrap_or(0);
+        return Some(format!("{actions_base}/runs/{index}/jobs/{job_index}"));
+    }
+    // Gitea 1.26: run id + job id, where job id 0 means "the run summary".
+    let run_id = number("data-run-id").unwrap_or(run_index);
+    match number("data-job-id").filter(|id| *id > 0) {
+        Some(job_id) => Some(format!("{actions_base}/runs/{run_id}/jobs/{job_id}")),
+        None => Some(format!("{actions_base}/runs/{run_id}")),
+    }
+}
+
 async fn fetch_live_run_state(
     session: &UiSession,
     html_s: &str,
     run_index: i64,
 ) -> eyre::Result<Option<Value>> {
-    let Some(csrf_token) = html::get_csrf_token_from_html(html_s) else {
+    let Some(job_url) = live_run_state_url(session.base_url(), html_s, run_index) else {
         return Ok(None);
     };
-    let Some(actions_url) = html::get_html_attribute_value(html_s, "data-actions-url") else {
-        return Ok(None);
-    };
-
-    let effective_run_index = html::get_html_attribute_value(html_s, "data-run-index")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(run_index);
-    let job_index = html::get_html_attribute_value(html_s, "data-job-index")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(0);
-    let actions_base = absolute_url(session.base_url(), &actions_url);
-    let job_url = format!("{actions_base}/runs/{effective_run_index}/jobs/{job_index}");
     let body = serde_json::json!({ "logCursors": [] });
 
-    let resp = session
-        .post_json_response_with_csrf(&job_url, &body, &csrf_token, true)
-        .await
-        .wrap_err("failed to fetch live run/job json")?;
+    // Servers with token-based CSRF protection embed the token in the page;
+    // newer Gitea uses header-based protection and renders no token.
+    let resp = match html::get_csrf_token_from_html(html_s) {
+        Some(csrf_token) => {
+            session
+                .post_json_response_with_csrf(&job_url, &body, &csrf_token, true)
+                .await
+        }
+        None => session.post_json_response(&job_url, &body, true).await,
+    }
+    .wrap_err("failed to fetch live run/job json")?;
     if resp.status() != reqwest::StatusCode::OK {
         return Ok(None);
     }
@@ -381,6 +411,38 @@ async fn fetch_live_run_state(
         .wrap_err("failed to read live run/job json")?;
     let view = serde_json::from_str(&text).wrap_err("failed to parse live run/job json")?;
     Ok(Some(view))
+}
+
+/// Path segment addressing job `job_index` of a run in Actions web URLs:
+/// the 0-based index on Forgejo and Gitea <= 1.25, the job id on Gitea >= 1.26.
+pub fn job_path_segment(view: &RunViewData, job_index: i64) -> eyre::Result<String> {
+    if !view.meta.id_based_urls {
+        return Ok(job_index.to_string());
+    }
+    let jobs = get_run_jobs(view.meta.run_index, &view.view)?;
+    jobs.iter()
+        .find(|job| job.job_index == job_index)
+        .and_then(|job| job.id)
+        .map(|id| id.to_string())
+        .ok_or_else(|| {
+            eyre!(
+                "Run {} has no job with index {job_index}.",
+                view.meta.run_index
+            )
+        })
+}
+
+/// Like [`job_path_segment`], loading the run view first.
+pub async fn resolve_job_path_segment(
+    session: &UiSession,
+    repo: &str,
+    run_index: i64,
+    job_index: i64,
+) -> eyre::Result<String> {
+    let view = get_run_view_data(session, repo, run_index)
+        .await
+        .wrap_err("failed to load run view")?;
+    job_path_segment(&view, job_index)
 }
 
 pub fn get_run_jobs(run_index: i64, run_view: &Value) -> eyre::Result<Vec<JobInfo>> {
@@ -420,8 +482,9 @@ pub async fn get_job_view_meta(
     job_index: i64,
 ) -> eyre::Result<JobViewMeta> {
     let repo_path = repo.trim_matches('/');
+    let job = resolve_job_path_segment(session, repo, run_index, job_index).await?;
     let url = format!(
-        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}",
+        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job}",
         session.base_url()
     );
 
@@ -469,10 +532,11 @@ pub async fn open_job_logs(
     attempt_number: i64,
 ) -> eyre::Result<reqwest::Response> {
     let repo_path = repo.trim_matches('/');
+    let job = resolve_job_path_segment(session, repo, run_index, job_index).await?;
 
     // Newer Forgejo versions expose logs under an attempt URL.
     let url_attempt = format!(
-        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/attempt/{attempt_number}/logs",
+        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job}/attempt/{attempt_number}/logs",
         session.base_url()
     );
     let resp = session.get_response(&url_attempt, true).await?;
@@ -481,9 +545,9 @@ pub async fn open_job_logs(
         return Ok(resp);
     }
 
-    // Older Forgejo versions (e.g. 11.x) expose logs without attempt numbers.
+    // Older Forgejo versions (e.g. 11.x) and Gitea expose logs without attempt numbers.
     let url_legacy = format!(
-        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/logs",
+        "{}/{repo_path}/actions/runs/{run_index}/jobs/{job}/logs",
         session.base_url()
     );
     let resp = session.get_response(&url_legacy, true).await?;
@@ -584,6 +648,7 @@ pub async fn get_run_artifacts(
             .wrap_err("failed to load run view while falling back after artifacts 404")?;
         return Ok(run_view
             .artifacts
+            .or_else(|| artifacts_from_live_state(&run_view.view))
             .unwrap_or_else(|| serde_json::json!({ "artifacts": [] })));
     }
 
@@ -600,6 +665,12 @@ pub async fn get_run_artifacts(
         .wrap_err("failed to read artifacts json")?;
     let json: Value = serde_json::from_str(&text).wrap_err("failed to parse artifacts json")?;
     Ok(json)
+}
+
+/// Gitea's live run state (`POST /runs/{run}`) lists the run's artifacts.
+fn artifacts_from_live_state(view: &Value) -> Option<Value> {
+    let artifacts = view.get("artifacts")?.as_array()?;
+    Some(serde_json::json!({ "artifacts": artifacts }))
 }
 
 pub async fn open_artifact(
@@ -675,6 +746,74 @@ mod tests {
             "owner/repo",
             "https://apps.example.com/gitea"
         ));
+    }
+
+    #[test]
+    fn live_run_state_url_covers_forgejo_and_gitea_page_layouts() {
+        let base = "http://forge.example";
+        // Forgejo / Gitea <= 1.25
+        let forgejo = r#"<div id="repo-action-view" data-run-index="7" data-job-index="1" data-actions-url="/o/r/actions">"#;
+        assert_eq!(
+            live_run_state_url(base, forgejo, 7).as_deref(),
+            Some("http://forge.example/o/r/actions/runs/7/jobs/1")
+        );
+        assert!(!uses_id_based_urls(forgejo));
+        // Gitea 1.26
+        let gitea_126 = r#"<div id="repo-action-view" data-run-id="42" data-job-id="0" data-actions-url="/o/r/actions">"#;
+        assert_eq!(
+            live_run_state_url(base, gitea_126, 42).as_deref(),
+            Some("http://forge.example/o/r/actions/runs/42")
+        );
+        assert!(uses_id_based_urls(gitea_126));
+        let gitea_126_job =
+            r#"<div data-run-id="42" data-job-id="99" data-actions-url="/o/r/actions">"#;
+        assert_eq!(
+            live_run_state_url(base, gitea_126_job, 42).as_deref(),
+            Some("http://forge.example/o/r/actions/runs/42/jobs/99")
+        );
+        // Gitea 1.27
+        let gitea_127 = r#"<div id="repo-action-view" data-job-id="0" data-actions-view-url="/o/r/actions/runs/42">"#;
+        assert_eq!(
+            live_run_state_url(base, gitea_127, 42).as_deref(),
+            Some("http://forge.example/o/r/actions/runs/42")
+        );
+        assert!(uses_id_based_urls(gitea_127));
+        assert_eq!(live_run_state_url(base, "<div></div>", 1), None);
+    }
+
+    #[test]
+    fn job_path_segment_uses_job_ids_only_for_id_based_servers() {
+        let view = serde_json::json!({"state": {"run": {"jobs": [{"id": 11}, {"id": 12}]}}});
+        let mut data = RunViewData {
+            meta: RunViewMeta {
+                url: String::new(),
+                run_index: 5,
+                run_id: None,
+                job_index: None,
+                attempt_number: None,
+                actions_url: None,
+                id_based_urls: false,
+            },
+            view,
+            artifacts: None,
+        };
+        assert_eq!(job_path_segment(&data, 1).unwrap(), "1");
+        data.meta.id_based_urls = true;
+        assert_eq!(job_path_segment(&data, 1).unwrap(), "12");
+        assert!(job_path_segment(&data, 2).is_err());
+    }
+
+    #[test]
+    fn artifacts_are_read_from_gitea_live_state() {
+        let view = serde_json::json!({"artifacts": [{"name": "a", "size": 3}], "state": {}});
+        assert_eq!(
+            artifacts_from_live_state(&view),
+            Some(serde_json::json!({"artifacts": [{"name": "a", "size": 3}]}))
+        );
+        assert_eq!(
+            artifacts_from_live_state(&serde_json::json!({"state": {}})),
+            None
+        );
     }
 
     #[test]

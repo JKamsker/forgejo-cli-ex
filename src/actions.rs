@@ -935,8 +935,15 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
 
                     let url = match job_index {
                         Some(job_index) => format!(
-                            "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
-                            session.base_url()
+                            "{}/{repo_path}/actions/runs/{run_index}/jobs/{}/rerun",
+                            session.base_url(),
+                            crate::ui_actions::resolve_job_path_segment(
+                                &session,
+                                &repo,
+                                run_index,
+                                i64::from(job_index),
+                            )
+                            .await?
                         ),
                         None => format!(
                             "{}/{repo_path}/actions/runs/{run_index}/rerun",
@@ -1449,8 +1456,9 @@ async fn rerun_failed_jobs(
         } else {
             for job_index in &failed_job_indexes {
                 let url = format!(
-                    "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
-                    session.base_url()
+                    "{}/{repo_path}/actions/runs/{run_index}/jobs/{}/rerun",
+                    session.base_url(),
+                    crate::ui_actions::job_path_segment(&view, *job_index)?
                 );
                 println!("DRY RUN: POST {url}");
             }
@@ -1481,8 +1489,9 @@ async fn rerun_failed_jobs(
 
     for job_index in &failed_job_indexes {
         let url = format!(
-            "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
-            session.base_url()
+            "{}/{repo_path}/actions/runs/{run_index}/jobs/{}/rerun",
+            session.base_url(),
+            crate::ui_actions::job_path_segment(&view, *job_index)?
         );
         let body = serde_json::json!({});
         let resp = match session.post_json_response(&url, &body, true).await {
