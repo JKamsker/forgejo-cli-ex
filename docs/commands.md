@@ -145,6 +145,12 @@ Default behavior:
   `FJ_EX_TOKEN`/`FORGEJO_TOKEN`/`GITEA_TOKEN`, or `fj`'s keys.json)
 - Lists token id, name, last eight characters, and scopes
 
+Credentials: an API token alone is not enough. Forgejo and Gitea only list tokens
+(`GET /api/v1/users/{username}/tokens`) for basic auth, so `token list` also needs a stored
+password login (`fj-ex auth login --host …`) for the same user as the token; the list request is
+then sent with that password. With only a token (or an imported SSO session) the server rejects
+the request (HTTP 401/403).
+
 ---
 
 ## actions backends (`--backend`)
@@ -428,7 +434,12 @@ printf '%s' "$HARBOR_USERNAME" | fj-ex actions variables set --repo owner/name -
 ```
 
 Flags: `--name NAME` (ASCII letters, digits, and underscores, not starting with a digit),
-`--value-stdin`. Both use the REST API with the stored `fj-ex` UI credentials (`fj-ex auth login`).
+`--value-stdin`. Both use the REST API with the first API token found (see
+[API token sources](../README.md#api-token-sources): a token stored with
+`fj-ex auth login --token-stdin`, then `FJ_EX_TOKEN` / `FORGEJO_TOKEN` / `GITEA_TOKEN`, then
+`fj`'s keys.json), and fall back to basic auth with the stored `fj-ex` password login
+(`fj-ex auth login`) only when no token is found. An exported environment token therefore takes
+precedence over the password login. The token needs `write:repository`.
 On failure only the HTTP status is reported, never the server's response body.
 
 ---
