@@ -683,5 +683,9 @@ mod tests {
             absolute_url("https://apps.example.com/gitea", "/gitea/-/actions"),
             "https://apps.example.com/gitea/-/actions"
         );
+        assert_eq!(
+            absolute_url("https://apps.example.com/gitea", "-/actions"),
+            "https://apps.example.com/gitea/-/actions"
+        );
     }
 }
