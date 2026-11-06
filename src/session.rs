@@ -435,12 +435,15 @@ fn is_auth_challenge_url(url: &Url) -> bool {
     is_login_url(url) || is_two_factor_url(url)
 }
 
+/// Matches `/user/login` at the instance root or below a sub-path (e.g. `/gitea/user/login`).
 fn is_login_url(url: &Url) -> bool {
-    url.path().starts_with("/user/login")
+    let path = url.path().trim_end_matches('/');
+    path == "/user/login" || path.ends_with("/user/login")
 }
 
 fn is_two_factor_url(url: &Url) -> bool {
-    url.path().starts_with("/user/two_factor")
+    let path = url.path();
+    path.starts_with("/user/two_factor") || path.contains("/user/two_factor")
 }
 
 #[cfg(test)]

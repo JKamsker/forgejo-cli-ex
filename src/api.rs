@@ -96,6 +96,41 @@ impl ApiClient {
         })
     }
 
+    pub async fn get_json_with_basic_auth<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        username: &str,
+        password: &str,
+    ) -> eyre::Result<T> {
+        let resp = self
+            .client
+            .get(url)
+            .basic_auth(username, Some(password))
+            .send()
+            .await
+            .wrap_err_with(|| format!("GET {url} failed"))?;
+
+        let status = resp.status();
+        let body = resp
+            .bytes()
+            .await
+            .wrap_err_with(|| format!("failed to read response body from GET {url}"))?;
+
+        if !status.is_success() {
+            return Err(eyre!(
+                "GET {url} failed: HTTP {status} (body_length={})",
+                body.len()
+            ));
+        }
+
+        serde_json::from_slice::<T>(&body).wrap_err_with(|| {
+            format!(
+                "failed to decode JSON from GET {url} (body_length={})",
+                body.len()
+            )
+        })
+    }
+
     pub async fn post_json_with_basic_auth<T: DeserializeOwned, B: Serialize>(
         &self,
         url: &str,

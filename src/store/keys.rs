@@ -55,27 +55,67 @@ fn get_fj_api_token_for_base_url_from_store(
     keys: &KeysStore,
     base_url: &str,
 ) -> eyre::Result<Option<String>> {
-    let mut host_key = crate::target::normalize_host_key(base_url)?;
+    let mut lookup_key = token_lookup_key(base_url)?;
     let mut seen = std::collections::HashSet::new();
 
     // Follow aliases a few times to avoid accidental loops.
     for _ in 0..10 {
-        if !seen.insert(host_key.clone()) {
+        if !seen.insert(lookup_key.clone()) {
             return Ok(None);
         }
 
-        if let Some(entry) = keys.hosts.get(&host_key) {
+        if let Some(entry) = find_host_entry(keys, &lookup_key)? {
             return Ok(entry.token.clone());
         }
 
-        let Some(next) = keys.aliases.get(&host_key) else {
+        let Some(next) = find_alias_target(keys, &lookup_key)? else {
             return Ok(None);
         };
-        host_key = crate::target::normalize_host_key(next)
+        lookup_key = token_lookup_key(next)
             .wrap_err_with(|| format!("invalid keys.json alias target '{next}'"))?;
     }
 
     Ok(None)
+}
+
+fn find_host_entry<'a>(
+    keys: &'a KeysStore,
+    lookup_key: &str,
+) -> eyre::Result<Option<&'a KeysHostEntry>> {
+    if let Some(entry) = keys.hosts.get(lookup_key) {
+        return Ok(Some(entry));
+    }
+
+    for (raw_key, entry) in &keys.hosts {
+        if token_lookup_key(raw_key).is_ok_and(|key| key == lookup_key) {
+            return Ok(Some(entry));
+        }
+    }
+
+    Ok(None)
+}
+
+fn find_alias_target<'a>(keys: &'a KeysStore, lookup_key: &str) -> eyre::Result<Option<&'a str>> {
+    if let Some(target) = keys.aliases.get(lookup_key) {
+        return Ok(Some(target));
+    }
+
+    for (raw_key, target) in &keys.aliases {
+        if token_lookup_key(raw_key).is_ok_and(|key| key == lookup_key) {
+            return Ok(Some(target));
+        }
+    }
+
+    Ok(None)
+}
+
+fn token_lookup_key(base_url: &str) -> eyre::Result<String> {
+    let normalized = crate::target::normalize_base_url(base_url)?;
+    if crate::target::normalized_base_url_has_path(&normalized) {
+        return Ok(normalized);
+    }
+
+    crate::target::normalize_host_key(&normalized)
 }
 
 #[cfg(test)]
@@ -116,5 +156,60 @@ mod tests {
         let token =
             get_fj_api_token_for_base_url_from_store(&keys, "https://alias.example.com").unwrap();
         assert_eq!(token.as_deref(), Some("real-token"));
+    }
+
+    #[test]
+    fn fj_keys_store_token_lookup_uses_path_specific_key() {
+        let raw = r#"
+{
+  "hosts": {
+    "forge.example.com": { "token": "root-token" },
+    "https://forge.example.com/gitea": { "token": "gitea-token" }
+  }
+}
+"#;
+
+        let keys: KeysStore = serde_json::from_str(raw).unwrap();
+        let token =
+            get_fj_api_token_for_base_url_from_store(&keys, "https://forge.example.com/gitea")
+                .unwrap();
+        assert_eq!(token.as_deref(), Some("gitea-token"));
+    }
+
+    #[test]
+    fn fj_keys_store_path_token_lookup_does_not_fall_back_to_host_key() {
+        let raw = r#"
+{
+  "hosts": {
+    "forge.example.com": { "token": "root-token" }
+  }
+}
+"#;
+
+        let keys: KeysStore = serde_json::from_str(raw).unwrap();
+        let token =
+            get_fj_api_token_for_base_url_from_store(&keys, "https://forge.example.com/gitea")
+                .unwrap();
+        assert_eq!(token, None);
+    }
+
+    #[test]
+    fn fj_keys_store_path_token_lookup_follows_path_aliases() {
+        let raw = r#"
+{
+  "hosts": {
+    "https://forge.example.com/gitea": { "token": "gitea-token" }
+  },
+  "aliases": {
+    "https://alias.example.com/gitea": "https://forge.example.com/gitea"
+  }
+}
+"#;
+
+        let keys: KeysStore = serde_json::from_str(raw).unwrap();
+        let token =
+            get_fj_api_token_for_base_url_from_store(&keys, "https://alias.example.com/gitea")
+                .unwrap();
+        assert_eq!(token.as_deref(), Some("gitea-token"));
     }
 }

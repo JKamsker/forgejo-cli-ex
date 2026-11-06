@@ -124,13 +124,14 @@ pub(super) fn set_ui_creds_with_paths(
 
     let normalized = crate::target::normalize_base_url(base_url)?;
     let host_key = crate::target::normalize_host_key(&normalized)?;
+    let store_key = store_key_for_base_url(&normalized, &host_key);
 
     file::update_creds_store(paths, StoreLockMode::Required, |store| {
         let existing_cookie_jar =
             take_store_entry(store, &normalized, &host_key).and_then(|e| e.cookie_jar.clone());
 
         store.insert(
-            host_key,
+            store_key,
             StoreEntry {
                 base_url: Some(normalized.clone()),
                 username: Some(username.to_string()),
@@ -181,6 +182,7 @@ pub async fn clear_cookie_jar(base_url: &str) -> eyre::Result<()> {
 pub(super) fn clear_cookie_jar_with_paths(paths: &StorePaths, base_url: &str) -> eyre::Result<()> {
     let normalized = crate::target::normalize_base_url(base_url)?;
     let host_key = crate::target::normalize_host_key(&normalized)?;
+    let store_key = store_key_for_base_url(&normalized, &host_key);
 
     file::update_creds_store(paths, StoreLockMode::Required, |store| {
         let Some(mut entry) = take_store_entry(store, &normalized, &host_key) else {
@@ -193,7 +195,7 @@ pub(super) fn clear_cookie_jar_with_paths(paths: &StorePaths, base_url: &str) ->
 
         entry.base_url = Some(normalized.clone());
         entry.cookie_jar = None;
-        store.insert(host_key, entry);
+        store.insert(store_key, entry);
         Ok(((), true))
     })?;
     Ok(())
@@ -235,6 +237,7 @@ fn save_cookie_jar_with_paths_and_mode(
 ) -> eyre::Result<()> {
     let normalized = crate::target::normalize_base_url(base_url)?;
     let host_key = crate::target::normalize_host_key(&normalized)?;
+    let store_key = store_key_for_base_url(&normalized, &host_key);
 
     file::update_creds_store(paths, lock_mode, |store| {
         let Some(mut entry) = take_store_entry(store, &normalized, &host_key) else {
@@ -247,7 +250,7 @@ fn save_cookie_jar_with_paths_and_mode(
 
         entry.base_url = Some(normalized.clone());
         entry.cookie_jar = Some(cookie_jar);
-        store.insert(host_key, entry);
+        store.insert(store_key, entry);
         Ok(((), true))
     })?;
     Ok(())
@@ -293,16 +296,31 @@ fn entry_has_complete_creds(entry: &StoreEntry) -> bool {
 }
 
 fn find_store_entry(store: &CredsStore, normalized: &str, host_key: &str) -> Option<StoreEntry> {
-    store
-        .get(host_key)
-        .or_else(|| store.get(normalized))
-        .cloned()
-        .map(|mut entry| {
-            if entry.base_url.is_none() {
-                entry.base_url = Some(normalized.to_string());
-            }
-            entry
-        })
+    for key in lookup_keys(normalized, host_key) {
+        let Some(entry) = store.get(&key) else {
+            continue;
+        };
+        if entry_matches_base_url(entry, normalized) {
+            return Some(entry_with_default_base_url(entry.clone(), normalized));
+        }
+    }
+
+    for entry in store.values() {
+        if entry_matches_base_url(entry, normalized) {
+            return Some(entry_with_default_base_url(entry.clone(), normalized));
+        }
+    }
+
+    for key in lookup_keys(normalized, host_key) {
+        let Some(entry) = store.get(&key) else {
+            continue;
+        };
+        if entry.base_url.is_none() {
+            return Some(entry_with_default_base_url(entry.clone(), normalized));
+        }
+    }
+
+    None
 }
 
 fn take_store_entry(
@@ -310,7 +328,90 @@ fn take_store_entry(
     normalized: &str,
     host_key: &str,
 ) -> Option<StoreEntry> {
-    let entry = store.remove(host_key);
-    let legacy_entry = store.remove(normalized);
-    entry.or(legacy_entry)
+    let mut keys = Vec::new();
+    for key in lookup_keys(normalized, host_key) {
+        if store
+            .get(&key)
+            .is_some_and(|entry| entry_matches_base_url(entry, normalized))
+        {
+            keys.push(key);
+        }
+    }
+    for (key, entry) in store.iter() {
+        if entry_matches_base_url(entry, normalized) && !keys.contains(key) {
+            keys.push(key.clone());
+        }
+    }
+    for key in lookup_keys(normalized, host_key) {
+        if store
+            .get(&key)
+            .is_some_and(|entry| entry.base_url.is_none())
+            && !keys.contains(&key)
+        {
+            keys.push(key);
+        }
+    }
+
+    let mut first = None;
+    for key in keys {
+        if first.is_none() {
+            first = store.remove(&key);
+        } else {
+            let _ = store.remove(&key);
+        }
+    }
+    first
+}
+
+fn store_key_for_base_url(normalized: &str, host_key: &str) -> String {
+    if normalized_has_path(normalized) {
+        normalized.to_string()
+    } else {
+        host_key.to_string()
+    }
+}
+
+fn normalized_has_path(normalized: &str) -> bool {
+    url::Url::parse(normalized).is_ok_and(|url| {
+        let path = url.path().trim_end_matches('/');
+        !path.is_empty() && path != "/"
+    })
+}
+
+fn lookup_keys(normalized: &str, host_key: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    push_unique(&mut keys, normalized.to_string());
+    push_unique(&mut keys, host_key.to_string());
+    if let Some(origin) = origin_base_url(normalized) {
+        push_unique(&mut keys, origin);
+    }
+    keys
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn origin_base_url(normalized: &str) -> Option<String> {
+    let url = url::Url::parse(normalized).ok()?;
+    let host = url.host_str()?;
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+    Some(format!("{}://{}{}", url.scheme(), host, port))
+}
+
+fn entry_matches_base_url(entry: &StoreEntry, normalized: &str) -> bool {
+    entry
+        .base_url
+        .as_deref()
+        .and_then(|base| crate::target::normalize_base_url(base).ok())
+        .is_some_and(|base| base == normalized)
+}
+
+fn entry_with_default_base_url(mut entry: StoreEntry, normalized: &str) -> StoreEntry {
+    if entry.base_url.is_none() {
+        entry.base_url = Some(normalized.to_string());
+    }
+    entry
 }

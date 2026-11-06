@@ -31,6 +31,12 @@ fj-ex token list --host forge.example.com
 # List recent runs
 fj-ex actions runs --repo owner/name --latest
 
+# Wait for CI to finish, failing the command if the run fails
+fj-ex actions wait --repo owner/name --latest --workflow ci.yml --timeout 30m
+
+# Stream job logs to stdout
+fj-ex actions logs job --repo owner/name --latest --job-index 0
+
 # Follow a running job without reprinting its prior log bytes
 fj-ex actions logs job --repo owner/name --latest --job-index 0 --follow
 
@@ -47,6 +53,9 @@ printf '%s' "$HARBOR_USERNAME" | \
 # Runner registration token + queued jobs (requires `fj auth login`)
 fj-ex actions runners token --repo owner/name
 fj-ex actions runners jobs  --repo owner/name --waiting
+
+# Dispatch a workflow and wait for the created run
+fj-ex actions trigger --repo owner/name --workflow ci.yml --ref main --wait --timeout 30m
 
 # Create a release-control PR (merge requires the expected source commit)
 fj-ex pulls create --repo owner/name --head release-fix --base release/canary --title "fix: release control"
@@ -68,6 +77,7 @@ fj-ex pulls review --repo owner/name --index 42 --body-file review.md
 | `token` | Mint and list personal access tokens |
 | `actions runs` | List workflow runs (filter by status, workflow, latest) |
 | `actions jobs` | List jobs for a run, optionally `--watch` |
+| `actions wait` | Wait for a run or job to complete, with script-friendly exit codes |
 | `actions logs` | Download complete job/run logs; `logs job --follow` prints only newly appended bytes |
 | `actions artifacts` | List / download artifacts |
 | `actions cancel` | Cancel a running workflow |
