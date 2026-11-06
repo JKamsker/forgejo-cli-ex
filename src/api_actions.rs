@@ -13,11 +13,13 @@
 //! | cancel run             | no         | yes        | yes        | no         | no         | no         |
 //! | rerun run / job        | no         | no         | yes        | no         | yes        | yes        |
 //! | rerun failed jobs      | no         | no         | yes (*)    | no         | yes        | yes        |
-//! | list/download artifacts| no         | yes        | yes        | yes        | yes        | yes        |
+//! | list/download artifacts| no         | yes        | yes        | yes (v4)   | yes (v4)   | yes (v4)   |
 //! | list workflows         | no         | no         | no         | yes        | yes        | yes        |
 //! | workflow dispatch      | yes        | yes        | yes        | yes        | yes        | yes        |
 //!
 //! (*) Forgejo has no single endpoint; each failed job is rerun individually.
+//! (v4) Gitea's REST API only covers artifacts uploaded with the v4 protocol
+//! (`actions/upload-artifact@v4`); v3 artifacts need the UI backend.
 //!
 //! The CLI addresses runs by the number shown in the run's web URL. That is
 //! the per-repo run index on Forgejo and Gitea <= 1.25, but the run *id* on
@@ -41,6 +43,40 @@ static RUN_URL_NUMBER_RE: LazyLock<Regex> = LazyLock::new(|| {
 const SCAN_PAGE_SIZE: u32 = 50;
 /// Upper bound on pages scanned to map a run number or filter by workflow.
 const MAX_SCAN_PAGES: u32 = 40;
+
+/// Decides when a paged list scan is complete.
+///
+/// Servers clamp `limit` to their `[api] MAX_RESPONSE_ITEMS`, so a page that
+/// is shorter than requested does not by itself mean the list ended. The
+/// response's `total_count` decides when there is one; otherwise a page
+/// shorter than the server's apparent page size (the first page's length)
+/// does, and a short first page is confirmed with one more request.
+#[derive(Debug, Default)]
+struct PageScan {
+    first_len: Option<usize>,
+    seen: usize,
+}
+
+impl PageScan {
+    /// Record a page of `got` items; returns whether to fetch the next page.
+    fn more(&mut self, got: usize, total: Option<i64>, requested: u32) -> bool {
+        self.seen += got;
+        let first_len = *self.first_len.get_or_insert(got);
+        if got == 0 {
+            return false;
+        }
+        match total {
+            Some(total) => (self.seen as i64) < total,
+            None if self.seen == got => true,
+            None => got >= first_len.min(requested as usize),
+        }
+    }
+}
+
+/// `total_count` of a list response, if the server sent one.
+fn total_count(v: &Value) -> Option<i64> {
+    v.get("total_count").and_then(Value::as_i64)
+}
 
 pub type Version = (u64, u64, u64);
 
@@ -139,6 +175,9 @@ impl ApiOp {
     }
 }
 
+/// What `wait` (and `trigger --wait`) need: the run's status and its jobs.
+pub const WAIT_OPS: &[ApiOp] = &[ApiOp::ListRuns, ApiOp::ListJobs];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Support {
     Yes,
@@ -229,7 +268,9 @@ pub fn normalize_status(
     let conclusion = conclusion.map(str::trim).filter(|s| !s.is_empty());
     match family {
         ServerFamily::Forgejo => status.map(str::to_ascii_lowercase),
-        // Gitea uses GitHub-compatible status/conclusion pairs.
+        // Gitea uses GitHub-compatible status/conclusion pairs. Its converter
+        // (`ToActionsStatus`) reports its own Waiting status as `queued` and
+        // Blocked (awaiting approval, `needs` or concurrency) as `waiting`.
         ServerFamily::Gitea => match status.map(str::to_ascii_lowercase).as_deref() {
             Some("completed") => Some(
                 conclusion
@@ -237,7 +278,8 @@ pub fn normalize_status(
                     .unwrap_or_else(|| "unknown".to_string()),
             ),
             Some("in_progress") => Some("running".to_string()),
-            Some("queued" | "pending" | "requested" | "waiting") => Some("waiting".to_string()),
+            Some("waiting") => Some("blocked".to_string()),
+            Some("queued" | "pending" | "requested") => Some("waiting".to_string()),
             Some(other) => Some(other.to_string()),
             None => conclusion.map(str::to_ascii_lowercase),
         },
@@ -371,6 +413,20 @@ pub fn parse_artifacts(v: &Value) -> Value {
         _ => Vec::new(),
     };
     serde_json::json!({ "artifacts": items })
+}
+
+/// Append the artifacts of `batch` not already in `all` (by id, else by value).
+fn merge_artifacts(all: &mut Vec<Value>, batch: Vec<Value>) {
+    for artifact in batch {
+        let id = artifact.get("id").and_then(Value::as_i64);
+        let known = all.iter().any(|a| match id {
+            Some(id) => a.get("id").and_then(Value::as_i64) == Some(id),
+            None => *a == artifact,
+        });
+        if !known {
+            all.push(artifact);
+        }
+    }
 }
 
 /// Pick an artifact by name, falling back to its numeric id.
@@ -584,11 +640,21 @@ impl ApiActions {
         limit: u32,
         extra_query: &str,
     ) -> eyre::Result<Vec<ApiRun>> {
+        Ok(self.runs_page_counted(page, limit, extra_query).await?.0)
+    }
+
+    /// A page of runs plus the list's `total_count`, if reported.
+    async fn runs_page_counted(
+        &self,
+        page: u32,
+        limit: u32,
+        extra_query: &str,
+    ) -> eyre::Result<(Vec<ApiRun>, Option<i64>)> {
         let url = self.actions_url(&format!("/runs?page={page}&limit={limit}{extra_query}"));
         let value = self.get_value(&url, ApiOp::ListRuns).await?;
         let runs = parse_runs(&value, self.server.family)?;
         self.remember(&runs);
-        Ok(runs)
+        Ok((runs, total_count(&value)))
     }
 
     fn remember(&self, runs: &[ApiRun]) {
@@ -629,9 +695,12 @@ impl ApiActions {
                 let skip = (page.saturating_sub(1) as usize) * limit as usize;
                 let wanted = skip + limit as usize;
                 let mut matched = Vec::new();
+                let mut scan = PageScan::default();
                 for server_page in 1..=MAX_SCAN_PAGES {
-                    let batch = self.runs_page(server_page, SCAN_PAGE_SIZE, "").await?;
-                    let done = (batch.len() as u32) < SCAN_PAGE_SIZE;
+                    let (batch, total) = self
+                        .runs_page_counted(server_page, SCAN_PAGE_SIZE, "")
+                        .await?;
+                    let done = !scan.more(batch.len(), total, SCAN_PAGE_SIZE);
                     matched.extend(batch.into_iter().filter(|r| workflow_matches(r, wf)));
                     if done || matched.len() >= wanted {
                         break;
@@ -736,12 +805,13 @@ impl ApiActions {
             }
         }
 
+        let mut scan = PageScan::default();
         for page in 1..=MAX_SCAN_PAGES {
-            let runs = self.runs_page(page, SCAN_PAGE_SIZE, "").await?;
+            let (runs, total) = self.runs_page_counted(page, SCAN_PAGE_SIZE, "").await?;
             if let Some(run) = runs.iter().find(|r| r.index == index) {
                 return Ok(run.clone());
             }
-            let exhausted = (runs.len() as u32) < SCAN_PAGE_SIZE;
+            let exhausted = !scan.more(runs.len(), total, SCAN_PAGE_SIZE);
             // Lists are newest first; once every run is older, stop.
             let all_older = !runs.is_empty() && runs.iter().all(|r| r.index < index);
             if exhausted || all_older {
@@ -789,14 +859,14 @@ impl ApiActions {
 
     async fn paged_jobs(&self, path: &str, op: ApiOp) -> eyre::Result<Vec<ApiJob>> {
         let mut all = Vec::new();
+        let mut scan = PageScan::default();
         for page in 1..=MAX_SCAN_PAGES {
             let url = self.actions_url(&format!("{path}?page={page}&limit={SCAN_PAGE_SIZE}"));
             let value = self.get_value(&url, op).await?;
             let (jobs, total) = parse_jobs(&value, self.server.family)?;
-            let got = jobs.len();
+            let more = scan.more(jobs.len(), total, SCAN_PAGE_SIZE);
             all.extend(jobs);
-            let total_reached = total.is_some_and(|t| all.len() as i64 >= t);
-            if got < SCAN_PAGE_SIZE as usize || total_reached || got == 0 {
+            if !more {
                 break;
             }
         }
@@ -884,9 +954,29 @@ impl ApiActions {
     pub async fn run_artifacts(&self, index: i64) -> eyre::Result<Value> {
         self.require(ApiOp::ListArtifacts)?;
         let run = self.find_run(index).await?;
-        let url = self.actions_url(&format!("/runs/{}/artifacts", run.id));
-        let value = self.get_value(&url, ApiOp::ListArtifacts).await?;
-        Ok(parse_artifacts(&value))
+        // The list is paged (Gitea's default page size is 30). A server that
+        // ignores the paging parameters returns the same items again, which
+        // ends the scan.
+        let mut all: Vec<Value> = Vec::new();
+        let mut scan = PageScan::default();
+        for page in 1..=MAX_SCAN_PAGES {
+            let url = self.actions_url(&format!(
+                "/runs/{}/artifacts?page={page}&limit={SCAN_PAGE_SIZE}",
+                run.id
+            ));
+            let value = self.get_value(&url, ApiOp::ListArtifacts).await?;
+            let batch = parse_artifacts(&value)["artifacts"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let got = batch.len();
+            let before = all.len();
+            merge_artifacts(&mut all, batch);
+            if all.len() == before || !scan.more(got, total_count(&value), SCAN_PAGE_SIZE) {
+                break;
+            }
+        }
+        Ok(serde_json::json!({ "artifacts": all }))
     }
 
     pub async fn open_artifact(
@@ -897,7 +987,11 @@ impl ApiActions {
         self.require(ApiOp::DownloadArtifact)?;
         let artifacts = self.run_artifacts(index).await?;
         let artifact = find_artifact(&artifacts, name_or_id).ok_or_else(|| {
-            eyre!("Run #{index} has no artifact named (or with id) '{name_or_id}'.")
+            let hint = self
+                .artifacts_hint()
+                .map(|h| format!("\n{h}"))
+                .unwrap_or_default();
+            eyre!("Run #{index} has no artifact named (or with id) '{name_or_id}'.{hint}")
         })?;
         let id = artifact
             .get("id")
@@ -908,6 +1002,18 @@ impl ApiActions {
         // and drops the Authorization header if the redirect leaves the host.
         self.send(self.client.http().get(&url), ApiOp::DownloadArtifact)
             .await
+    }
+
+    /// What the REST artifact list leaves out on this server, if anything.
+    pub fn artifacts_hint(&self) -> Option<String> {
+        (self.server.family == ServerFamily::Gitea).then(|| {
+            format!(
+                "note: Gitea's REST API only lists artifacts uploaded with the v4 protocol \
+                 (actions/upload-artifact@v4); v3 uploads need a UI session: \
+                 `fj-ex auth login --host {}` (or --session-cookie-stdin), then rerun with --backend ui.",
+                self.base_url
+            )
+        })
     }
 
     pub async fn list_workflows(&self, page: u32, limit: u32) -> eyre::Result<Vec<String>> {
@@ -1161,6 +1267,12 @@ mod tests {
         assert_eq!(support(&server("", false), ListRuns), Support::Unknown);
         // A Forgejo older than the oldest verified release lacks newer endpoints.
         assert!(no("14.0.2+gitea-1.22.0", RerunRun));
+
+        // `trigger --wait` is refused before dispatch where a wait cannot work.
+        let can_wait = |raw: &str| WAIT_OPS.iter().all(|op| !no(raw, *op));
+        assert!(!can_wait("15.0.11+gitea-1.22.0"));
+        assert!(can_wait("16.0.7+gitea-1.22.0"));
+        assert!(can_wait("1.25.5"));
     }
 
     #[test]
@@ -1227,7 +1339,9 @@ mod tests {
         );
         assert_eq!(g(Some("in_progress"), None).as_deref(), Some("running"));
         assert_eq!(g(Some("queued"), None).as_deref(), Some("waiting"));
-        assert_eq!(g(Some("waiting"), None).as_deref(), Some("waiting"));
+        // Gitea reports its Blocked status as GitHub's `waiting`.
+        assert_eq!(g(Some("waiting"), None).as_deref(), Some("blocked"));
+        assert_eq!(ui_run_status_label("blocked"), "Blocked");
         assert_eq!(
             normalize_status(ServerFamily::Forgejo, Some("Running"), None).as_deref(),
             Some("running")
@@ -1281,6 +1395,51 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn page_scans_survive_servers_that_cap_the_page_size() {
+        // MAX_RESPONSE_ITEMS=30 with 70 items: total_count keeps the scan going.
+        let mut scan = PageScan::default();
+        assert!(scan.more(30, Some(70), 50));
+        assert!(scan.more(30, Some(70), 50));
+        assert!(!scan.more(10, Some(70), 50));
+
+        // Without total_count, a short first page is confirmed with one more
+        // request; later pages end the scan when shorter than the first.
+        let mut scan = PageScan::default();
+        assert!(scan.more(30, None, 50));
+        assert!(scan.more(30, None, 50));
+        assert!(!scan.more(5, None, 50));
+        let mut scan = PageScan::default();
+        assert!(scan.more(3, None, 50));
+        assert!(!scan.more(0, None, 50));
+
+        // A full page without a total keeps going; an empty page always ends.
+        let mut scan = PageScan::default();
+        assert!(scan.more(50, None, 50));
+        assert!(!scan.more(49, None, 50));
+        assert!(!PageScan::default().more(0, Some(10), 50));
+        // The total is reached exactly.
+        let mut scan = PageScan::default();
+        assert!(!scan.more(2, Some(2), 50));
+    }
+
+    #[test]
+    fn artifact_pages_are_merged_by_id() {
+        let mut all = Vec::new();
+        merge_artifacts(
+            &mut all,
+            vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})],
+        );
+        // A server that ignores `page` repeats the first page: nothing is added.
+        merge_artifacts(
+            &mut all,
+            vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})],
+        );
+        assert_eq!(all.len(), 2);
+        merge_artifacts(&mut all, vec![serde_json::json!({"id": 3})]);
+        assert_eq!(all.len(), 3);
     }
 
     #[test]

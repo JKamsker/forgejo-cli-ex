@@ -83,7 +83,11 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             let wait_interval = Duration::from_secs(interval.unwrap_or(2));
 
             let wait_client = if wait {
-                Some(crate::actions_backend::connect(backend, &target, &repo).await?)
+                let client = crate::actions_backend::connect(backend, &target, &repo).await?;
+                // Refuse before dispatching: a failed wait after the dispatch
+                // invites a retry that dispatches the workflow again.
+                client.check_wait_supported()?;
+                Some(client)
             } else {
                 None
             };
@@ -527,8 +531,21 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         )
                         .await?;
                         let job_index_i64 = job_index as i64;
+                        if follow {
+                            // Errors that retrying cannot fix are reported before
+                            // following; inside the loop every open error is taken
+                            // to mean the job has not started yet.
+                            session.check_job_logs_supported()?;
+                            let jobs = session.run_jobs(&repo, run_index).await?;
+                            if let Some(err) =
+                                follow_missing_job_error(&jobs, run_index, job_index_i64)
+                            {
+                                return Err(err);
+                            }
+                        }
                         let mut previous = Vec::new();
                         let mut run_status_tracker = RunStatusTracker::new(run_index);
+                        let mut announced_wait = false;
                         // Set once the run is known to be finished from the job snapshot
                         // fallback: one more log fetch picks up the final bytes.
                         let mut finishing: Option<Option<eyre::Report>> = None;
@@ -551,9 +568,20 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 // following until it starts or the run ends.
                                 Err(err) if follow => {
                                     let run_status =
-                                        session.find_run_status(&repo, run_index).await?.flatten();
-                                    if !follow_should_wait_for_log(run_status.as_deref()) {
+                                        run_status_tracker.poll(&session, &repo).await?;
+                                    if !follow_should_wait_for_log(
+                                        run_status.as_deref(),
+                                        run_status_tracker.is_terminal(),
+                                    ) {
                                         return Err(err);
+                                    }
+                                    if !std::mem::replace(&mut announced_wait, true) {
+                                        eprintln!(
+                                            "waiting for job {job_index_i64} of run #{run_index} to produce a log (run status: {})",
+                                            crate::output::sanitize_line(
+                                                run_status.as_deref().unwrap_or("unknown")
+                                            )
+                                        );
                                     }
                                     tokio::time::sleep(std::time::Duration::from_secs(
                                         follow_interval,
@@ -757,6 +785,11 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         .await?;
 
                         let artifacts = session.run_artifacts(&repo, run_index).await?;
+                        if artifact_items(&artifacts).is_empty() {
+                            if let Some(hint) = session.empty_artifacts_hint() {
+                                eprintln!("{hint}");
+                            }
+                        }
 
                         if json {
                             let items = artifact_items(&artifacts);
@@ -1289,12 +1322,22 @@ fn is_snapshot_wait_target_done(
 
     if let Some(job_index) = job_index {
         if let Some(job) = find_job(jobs, job_index) {
-            return is_job_done(job);
+            return is_snapshot_job_final(jobs, job);
         }
         return is_run_done_from_jobs(jobs);
     }
 
     is_run_done_from_jobs(jobs)
+}
+
+/// Without a run-list status, a `blocked` job is final only when no job of
+/// the run is still in progress (e.g. the run awaits approval); otherwise it
+/// is waiting for its `needs`.
+fn is_snapshot_job_final(
+    jobs: &[crate::ui_actions::JobInfo],
+    job: &crate::ui_actions::JobInfo,
+) -> bool {
+    is_job_finished(job) || (is_job_done(job) && is_run_done_from_jobs(jobs))
 }
 
 fn find_job(
@@ -1324,7 +1367,8 @@ fn is_job_finished(job: &crate::ui_actions::JobInfo) -> bool {
 /// The selected job when its own status is final for this wait result.
 fn finished_wait_job(result: &WaitResult, job_index: i64) -> Option<&crate::ui_actions::JobInfo> {
     find_job(&result.jobs, job_index).filter(|job| {
-        is_job_finished(job) || (result.terminal_run_status.is_none() && is_job_done(job))
+        is_job_finished(job)
+            || (result.terminal_run_status.is_none() && is_snapshot_job_final(&result.jobs, job))
     })
 }
 
@@ -1880,9 +1924,30 @@ fn observed_at_unix_ms() -> u128 {
         .as_millis()
 }
 
-/// `logs job --follow` retries a missing log only while the run is still queued or running.
-fn follow_should_wait_for_log(run_status: Option<&str>) -> bool {
-    run_status_is_terminal(run_status) == Some(false)
+/// `logs job --follow` retries a missing log only while the run is still
+/// queued or running. A terminal status ends the retries only once it has been
+/// stable (`terminal_stable`, see [`observe_terminal_run_status`]).
+fn follow_should_wait_for_log(run_status: Option<&str>, terminal_stable: bool) -> bool {
+    match run_status_is_terminal(run_status) {
+        Some(false) => true,
+        Some(true) => !terminal_stable,
+        None => false,
+    }
+}
+
+/// `logs job --follow` on a job index the run does not have fails at once.
+fn follow_missing_job_error(
+    jobs: &[crate::ui_actions::JobInfo],
+    run_index: i64,
+    job_index: i64,
+) -> Option<eyre::Report> {
+    if jobs.is_empty() || find_job(jobs, job_index).is_some() {
+        return None;
+    }
+    Some(eyre!(
+        "Run #{run_index} has no job index {job_index} (it has {} job(s)).",
+        jobs.len()
+    ))
 }
 
 fn run_status_is_terminal(status: Option<&str>) -> Option<bool> {
@@ -1946,7 +2011,7 @@ impl RunStatusTracker {
         repo: &str,
     ) -> eyre::Result<Option<String>> {
         let Some(status) = session.find_run_status(repo, self.run_index).await? else {
-            self.warn_missing_once();
+            self.warn_missing_once("was not found in the Actions run list");
             observe_terminal_run_status(
                 &mut self.terminal_status,
                 &mut self.terminal_observations,
@@ -1954,6 +2019,9 @@ impl RunStatusTracker {
             );
             return Ok(None);
         };
+        if status.is_none() {
+            self.warn_missing_once("has no recognizable status in the Actions run list");
+        }
         observe_terminal_run_status(
             &mut self.terminal_status,
             &mut self.terminal_observations,
@@ -1962,10 +2030,10 @@ impl RunStatusTracker {
         Ok(status)
     }
 
-    fn warn_missing_once(&mut self) {
+    fn warn_missing_once(&mut self, reason: &str) {
         if !std::mem::replace(&mut self.warned_missing, true) {
             eprintln!(
-                "warning: run #{} was not found in the Actions run list; falling back to the run page's job status, which may lag behind",
+                "warning: run #{} {reason}; falling back to the run page's job status, which may lag behind",
                 self.run_index
             );
         }
@@ -2171,10 +2239,31 @@ mod tests {
 
     #[test]
     fn follow_waits_for_logs_only_while_the_run_is_active() {
-        assert!(follow_should_wait_for_log(Some("Waiting")));
-        assert!(follow_should_wait_for_log(Some("Running")));
-        assert!(!follow_should_wait_for_log(Some("Failure")));
-        assert!(!follow_should_wait_for_log(None));
+        assert!(follow_should_wait_for_log(Some("Waiting"), false));
+        assert!(follow_should_wait_for_log(Some("Running"), false));
+        // A terminal status must be seen twice before it ends the retries.
+        assert!(follow_should_wait_for_log(Some("Failure"), false));
+        assert!(!follow_should_wait_for_log(Some("Failure"), true));
+        assert!(!follow_should_wait_for_log(None, false));
+    }
+
+    #[test]
+    fn follow_rejects_a_job_index_the_run_does_not_have() {
+        let job = |job_index| crate::ui_actions::JobInfo {
+            run_index: 7,
+            job_index,
+            id: None,
+            name: None,
+            status: Some("running".into()),
+            can_rerun: None,
+            duration: None,
+        };
+        let jobs = vec![job(0), job(1)];
+        assert!(super::follow_missing_job_error(&jobs, 7, 1).is_none());
+        let err = super::follow_missing_job_error(&jobs, 7, 5).unwrap();
+        assert!(err.to_string().contains("no job index 5"), "{err}");
+        // An empty snapshot is not conclusive.
+        assert!(super::follow_missing_job_error(&[], 7, 5).is_none());
     }
 }
 
@@ -2314,6 +2403,16 @@ mod wait_tests {
 
         // A run that stays blocked (e.g. awaiting approval) still ends the wait.
         assert!(is_wait_target_done(&jobs, Some(1), Some("Blocked"), true));
+        // Without a run-list status, the job snapshot shows job 0 still
+        // running, so the blocked job 1 is waiting for its needs.
+        assert!(!is_wait_target_done(&jobs, Some(1), None, false));
+        let snapshot = result(None, jobs.clone());
+        assert!(wait_terminal_error(&snapshot, Some(1)).is_none());
+        assert_eq!(wait_target_status(&snapshot, Some(1)), "blocked");
+        // Once nothing else is in progress, a blocked job is final.
+        let stuck = vec![job(0, Some("success")), job(1, Some("blocked"))];
+        assert!(is_wait_target_done(&stuck, Some(1), None, false));
+        assert!(wait_terminal_error(&result(None, stuck), Some(1)).is_some());
         let blocked = result(Some("Blocked"), jobs);
         assert!(wait_terminal_error(&blocked, Some(1)).is_some());
     }

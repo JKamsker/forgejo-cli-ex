@@ -157,6 +157,12 @@ fj-ex actions --backend ui   ...   # always the web UI (password or imported ses
 fj-ex actions --backend api  ...   # always the REST API (token, else basic auth with the stored password)
 ```
 
+`--backend` selects how runs, jobs, logs, artifacts, workflows, `cancel`, `rerun`, `wait` and the
+`--wait` part of `trigger` reach the server. The `trigger` dispatch itself, `secrets`, `variables`
+and `runners` always use the REST API, whatever `--backend` says: dispatch, `secrets` and
+`variables` with the API token, else basic auth with the stored password; `runners` with the API
+token only.
+
 `auto` uses the UI when a password or session login is stored for the host, otherwise the API
 token. When the UI session cannot be established (for example an expired imported session) and a
 token is available, it falls back to the API and prints a warning.
@@ -170,7 +176,7 @@ REST API coverage verified against the servers' `/swagger.v1.json` and live inst
 | `jobs`, `jobs --watch`, `wait` | – | yes | yes | yes | yes | yes |
 | `logs job` (incl. `--follow`), `logs run` | – | yes | yes | yes | yes | yes |
 | `logs job --attempt <older attempt>` | – | yes | yes | – | – | yes |
-| `artifacts list` / `artifacts get` | – | yes | yes | yes | yes | yes |
+| `artifacts list` / `artifacts get` | – | yes | yes | v4 only | v4 only | v4 only |
 | `cancel` | – | yes | yes | – | – | – |
 | `rerun`, `rerun --job-index` | – | – | yes | – | yes | yes |
 | `rerun --failed-only` | – | – | yes (per job) | – | yes | yes |
@@ -179,6 +185,10 @@ REST API coverage verified against the servers' `/swagger.v1.json` and live inst
 
 When an operation has no endpoint on the server, the command fails with an explanation and asks
 for a UI login (`fj-ex auth login`, or `--session-cookie-stdin` for SSO) instead.
+
+Gitea's REST API only lists and downloads artifacts uploaded with the v4 protocol
+(`actions/upload-artifact@v4`). Artifacts uploaded with v3 (`actions/upload-artifact@v3`) are only
+visible to the UI backend; with a token, an empty list or a missing artifact prints a note saying so.
 
 `--run-index` is always the number in the run's web URL. That is the per-repository run number on
 Forgejo and Gitea <= 1.25, and the run id on Gitea >= 1.26; the API backend resolves it to the run
@@ -319,7 +329,8 @@ Flags: `--run-index N` or `--latest` (with optional `--workflow FILE`), `--job-i
 
 Like `actions jobs --watch`, `actions wait` treats a terminal status from the Actions run list
 (observed twice) as authoritative over a lagging job snapshot; if the run cannot be found in the
-run list, it warns once on stderr and falls back to the job statuses. With `--job-index`, the wait
+run list (or its status there is not recognized), it warns once on stderr and falls back to the job
+statuses. In that fallback a `blocked` job only ends the wait once no other job is in progress. With `--job-index`, the wait
 also ends as soon as that job finishes while the rest of the run continues; `cancelling` jobs and
 jobs still `blocked` on their `needs` keep the wait going.
 
@@ -411,7 +422,9 @@ created before the dispatch request returns. The run list can only be filtered b
 name, so for an all-digit `--workflow` id the wait considers new runs of any workflow on the
 dispatched ref. `--interval` controls polling frequency and `--timeout` covers the whole wait. The
 same failure and timeout exit behavior as `actions wait` applies; with `--json`, a single JSON
-document with the final result (including a `trigger` object) is printed.
+document with the final result (including a `trigger` object) is printed. When the backend cannot wait
+on the server (a token on Forgejo 15, whose REST API cannot list a run's jobs), `--wait` fails before
+the workflow is dispatched.
 
 ---
 

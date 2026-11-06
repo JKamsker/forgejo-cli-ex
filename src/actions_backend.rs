@@ -237,6 +237,14 @@ impl ActionsClient {
         }
     }
 
+    /// A note for an empty artifact list, when the backend may not see every artifact.
+    pub fn empty_artifacts_hint(&self) -> Option<String> {
+        match self {
+            Self::Ui(_) => None,
+            Self::Api(api) => api.artifacts_hint(),
+        }
+    }
+
     pub async fn open_artifact(
         &self,
         repo: &str,
@@ -274,12 +282,12 @@ impl ActionsClient {
                 let resp = s
                     .post_json_response(&url, &serde_json::json!({}), true)
                     .await?;
-                if resp.status() != reqwest::StatusCode::OK {
+                if let Some(problem) = ui_post_problem(resp.status(), resp.url(), &url) {
                     return Err(eyre!(
-                        "Failed to cancel run '{}' via '{}'. HTTP {}.",
+                        "Failed to cancel run '{}' via '{}': {}.",
                         run_index,
                         url,
-                        resp.status()
+                        problem
                     ));
                 }
                 Ok(url)
@@ -355,17 +363,31 @@ impl ActionsClient {
                 let resp = s
                     .post_json_response(&url, &serde_json::json!({}), true)
                     .await?;
-                if resp.status() != reqwest::StatusCode::OK {
-                    return Err(eyre!(
-                        "Failed to rerun via '{}'. HTTP {}.",
-                        url,
-                        resp.status()
-                    ));
+                if let Some(problem) = ui_post_problem(resp.status(), resp.url(), &url) {
+                    return Err(eyre!("Failed to rerun via '{}': {}.", url, problem));
                 }
                 let text = resp.text().await.unwrap_or_default();
                 Ok((url, redirect_from_body(&text)))
             }
             Self::Api(api) => Ok((api.rerun(run_index, job_index).await?, None)),
+        }
+    }
+
+    /// Fail early when the backend cannot wait for a run on this server.
+    pub fn check_wait_supported(&self) -> eyre::Result<()> {
+        match self {
+            Self::Ui(_) => Ok(()),
+            Self::Api(api) => crate::api_actions::WAIT_OPS
+                .iter()
+                .try_for_each(|op| api.require(*op)),
+        }
+    }
+
+    /// Fail early when the backend cannot download job logs on this server.
+    pub fn check_job_logs_supported(&self) -> eyre::Result<()> {
+        match self {
+            Self::Ui(_) => Ok(()),
+            Self::Api(api) => api.require(crate::api_actions::ApiOp::JobLogs),
         }
     }
 
@@ -403,6 +425,7 @@ impl ActionsClient {
             Self::Ui(s) => {
                 let mut failures = Vec::new();
                 let mut redirects = Vec::new();
+                let mut accepted = Vec::new();
                 let jobs: Vec<Option<i64>> = failed_job_indexes.iter().copied().map(Some).collect();
                 let urls = self.ui_rerun_urls(s, repo, run_index, &jobs).await?;
                 for (job_index, url) in failed_job_indexes.iter().zip(urls) {
@@ -419,19 +442,25 @@ impl ActionsClient {
                             continue;
                         }
                     };
-                    if resp.status() != reqwest::StatusCode::OK {
-                        failures.push(format!(
-                            "job {}: POST {} -> HTTP {}",
-                            job_index,
-                            url,
-                            resp.status()
-                        ));
+                    if let Some(problem) = ui_post_problem(resp.status(), resp.url(), &url) {
+                        failures.push(format!("job {}: POST {} -> {}", job_index, url, problem));
                         continue;
                     }
                     let text = resp.text().await.unwrap_or_default();
                     if let Some(redirect) = redirect_from_body(&text) {
                         redirects.push(redirect);
                     }
+                    accepted.push(*job_index);
+                }
+                // Gitea answers 200 but skips a job rerun while the run is not
+                // done, which it no longer is after the first rerun. Check that
+                // every accepted job actually left its failed state.
+                if accepted.len() > 1 {
+                    let view = crate::ui_actions::get_run_view_data(s, repo, run_index)
+                        .await
+                        .wrap_err("failed to reload the run view to check the reruns")?;
+                    let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+                    failures.extend(unrerun_jobs(&jobs, &accepted));
                 }
                 Ok(RerunFailedResult {
                     failures,
@@ -447,6 +476,52 @@ impl ActionsClient {
             }
         }
     }
+}
+
+/// Jobs whose rerun the server accepted but that are still failed or cancelled.
+fn unrerun_jobs(jobs: &[JobInfo], accepted: &[i64]) -> Vec<String> {
+    accepted
+        .iter()
+        .filter_map(|job_index| {
+            let job = jobs.iter().find(|j| j.job_index == *job_index)?;
+            let status = job.status.as_deref()?;
+            matches!(
+                status.to_ascii_lowercase().as_str(),
+                "failure" | "cancelled" | "canceled"
+            )
+            .then(|| {
+                format!(
+                    "job {job_index}: the server accepted the rerun but the job is still {}; \
+                     the server skips job reruns while the run is active, so rerun it once the run finishes",
+                    crate::output::sanitize_line(status)
+                )
+            })
+        })
+        .collect()
+}
+
+/// Why a state-changing UI POST did not succeed, if it did not. Success is a
+/// 200 answered by the requested URL itself: a server that rejects the request
+/// (e.g. a failed CSRF check) redirects to another page, which the client
+/// follows to a 200 HTML page.
+fn ui_post_problem(
+    status: reqwest::StatusCode,
+    final_url: &reqwest::Url,
+    request_url: &str,
+) -> Option<String> {
+    if status != reqwest::StatusCode::OK {
+        return Some(format!("HTTP {status}"));
+    }
+    let redirected = reqwest::Url::parse(request_url).is_ok_and(|requested| {
+        requested.origin() != final_url.origin() || requested.path() != final_url.path()
+    });
+    redirected.then(|| {
+        format!(
+            "the server redirected to '{}' instead of answering (the request was rejected, \
+             e.g. by a CSRF check; try `fj-ex auth login` again)",
+            crate::output::sanitize_line(final_url.path())
+        )
+    })
 }
 
 fn redirect_from_body(text: &str) -> Option<String> {
@@ -470,6 +545,52 @@ mod tests {
         assert_eq!(auto_choice(true, false), AutoChoice::Ui);
         assert_eq!(auto_choice(false, true), AutoChoice::Api);
         assert_eq!(auto_choice(false, false), AutoChoice::None);
+    }
+
+    #[test]
+    fn reruns_that_left_the_job_failed_are_reported() {
+        let job = |job_index, status: &str| JobInfo {
+            run_index: 7,
+            job_index,
+            id: None,
+            name: None,
+            status: Some(status.to_string()),
+            can_rerun: None,
+            duration: None,
+        };
+        let jobs = vec![
+            job(0, "waiting"),
+            job(1, "success"),
+            job(2, "failure"),
+            job(3, "blocked"),
+        ];
+        let problems = unrerun_jobs(&jobs, &[0, 2, 3]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].starts_with("job 2:"), "{problems:?}");
+        assert!(unrerun_jobs(&jobs, &[0]).is_empty());
+    }
+
+    #[test]
+    fn ui_posts_that_were_redirected_are_failures() {
+        let url = "http://h/o/r/actions/runs/7/cancel";
+        let at = |u: &str| reqwest::Url::parse(u).unwrap();
+        assert_eq!(
+            ui_post_problem(reqwest::StatusCode::OK, &at(url), url),
+            None
+        );
+        // A rejected CSRF check redirects to the home page, which answers 200.
+        let problem = ui_post_problem(reqwest::StatusCode::OK, &at("http://h/"), url).unwrap();
+        assert!(problem.contains("redirected to '/'"), "{problem}");
+        assert!(ui_post_problem(
+            reqwest::StatusCode::OK,
+            &at("https://h/o/r/actions/runs/7/cancel"),
+            url
+        )
+        .is_some());
+        assert_eq!(
+            ui_post_problem(reqwest::StatusCode::FORBIDDEN, &at(url), url).as_deref(),
+            Some("HTTP 403 Forbidden")
+        );
     }
 
     #[test]

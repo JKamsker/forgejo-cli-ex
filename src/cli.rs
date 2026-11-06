@@ -266,6 +266,7 @@ pub struct ActionsCommand {
     /// How to talk to the server: `ui` (web UI with the stored password login or imported
     /// session), `api` (REST API with an API token), or `auto` (UI when a UI login is stored,
     /// otherwise the API token; falls back to the token when the UI session is unusable).
+    /// The `trigger` dispatch, `secrets`, `variables` and `runners` always use the REST API.
     #[arg(long, value_enum, default_value = "auto", global = true)]
     pub backend: ActionsBackendMode,
 
