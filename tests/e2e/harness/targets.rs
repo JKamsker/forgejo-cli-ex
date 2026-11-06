@@ -27,35 +27,92 @@ impl Family {
     }
 }
 
+/// Whether the server's REST API (used by `fj-ex actions` with only an API
+/// token) has the endpoint for an operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Api {
+    Yes,
+    /// Missing here; added in this release (fj-ex must say so).
+    Since(&'static str),
+    /// No such endpoint in any release of this family.
+    No,
+}
+
 /// Per-target capability flags.
 ///
-/// A flag is `false` only when the server genuinely lacks a feature; the
-/// scenario that needs it then logs the reason (see [`Caps::explain`]) and
-/// the check shows up as SKIPPED in the summary instead of silently passing.
-/// No target currently needs a gate: every feature works on all six.
+/// A flag is off only when the server genuinely lacks a feature. Scenarios
+/// then log the gate (see [`Caps::explain`]) and, for token-only REST calls,
+/// assert that fj-ex refuses with the expected "added in ..." / "no
+/// endpoint" message instead of silently passing.
 #[derive(Clone, Copy, Debug)]
 pub struct Caps {
     /// Listing the runner job queue (`fj-ex actions runners jobs`). Forgejo
     /// serves `/actions/runners/jobs`; on Gitea fj-ex falls back to
     /// `/actions/jobs`. Turn off for a server that has neither.
     pub runner_jobs_api: bool,
+    /// REST: list the jobs of a run (`actions jobs`, `wait`).
+    pub api_jobs: Api,
+    /// REST: download job logs.
+    pub api_logs: Api,
+    /// REST: cancel a run.
+    pub api_cancel: Api,
+    /// REST: rerun failed jobs.
+    pub api_rerun_failed: Api,
+    /// REST: list workflows.
+    pub api_workflows: Api,
+    /// Name of the web session cookie (for `auth login --session-cookie-stdin`).
+    pub session_cookie: &'static str,
 }
 
 impl Caps {
-    pub const ALL: Caps = Caps {
-        runner_jobs_api: true,
-    };
-
     /// Human readable reason for a disabled capability.
     pub fn explain(name: &str) -> &'static str {
         match name {
             "runner_jobs_api" => {
                 "server has neither /actions/runners/jobs (Forgejo) nor /actions/jobs (Gitea)"
             }
+            "api_jobs" => "the REST API cannot list a run's jobs",
+            "api_logs" => "the REST API cannot download job logs",
+            "api_cancel" => "the REST API cannot cancel runs",
+            "api_rerun_failed" => "the REST API cannot rerun failed jobs",
+            "api_workflows" => "the REST API cannot list workflows",
             _ => "capability disabled for this target",
         }
     }
 }
+
+const FORGEJO_15_CAPS: Caps = Caps {
+    runner_jobs_api: true,
+    api_jobs: Api::Since("Forgejo 16"),
+    api_logs: Api::Since("Forgejo 16"),
+    api_cancel: Api::Since("Forgejo 16"),
+    api_rerun_failed: Api::Since("Forgejo 17"),
+    api_workflows: Api::No,
+    session_cookie: "session",
+};
+const FORGEJO_16_CAPS: Caps = Caps {
+    api_jobs: Api::Yes,
+    api_logs: Api::Yes,
+    api_cancel: Api::Yes,
+    ..FORGEJO_15_CAPS
+};
+const FORGEJO_17_CAPS: Caps = Caps {
+    api_rerun_failed: Api::Yes,
+    ..FORGEJO_16_CAPS
+};
+const GITEA_1_25_CAPS: Caps = Caps {
+    runner_jobs_api: true,
+    api_jobs: Api::Yes,
+    api_logs: Api::Yes,
+    api_cancel: Api::No,
+    api_rerun_failed: Api::Since("Gitea 1.26"),
+    api_workflows: Api::Yes,
+    session_cookie: "i_like_gitea",
+};
+const GITEA_1_26_CAPS: Caps = Caps {
+    api_rerun_failed: Api::Yes,
+    ..GITEA_1_25_CAPS
+};
 
 /// One server version under test.
 #[derive(Clone, Copy, Debug)]
@@ -107,12 +164,12 @@ use Family::{Forgejo, Gitea};
 #[rustfmt::skip]
 pub const TARGETS: &[Target] = &[
     //  id            family   version    server image                              runner image          workflow dir  capabilities
-    t("forgejo-15",  Forgejo, "15.0.11", "codeberg.org/forgejo/forgejo:15.0.11",   FORGEJO_RUNNER_IMAGE, ".forgejo",   Caps::ALL),
-    t("forgejo-16",  Forgejo, "16.0.7",  "codeberg.org/forgejo/forgejo:16.0.7",    FORGEJO_RUNNER_IMAGE, ".forgejo",   Caps::ALL),
-    t("forgejo-17",  Forgejo, "17.0.1",  "codeberg.org/forgejo/forgejo:17.0.1",    FORGEJO_RUNNER_IMAGE, ".forgejo",   Caps::ALL),
-    t("gitea-1-25",  Gitea,   "1.25.5",  "docker.gitea.com/gitea:1.25.5",          GITEA_RUNNER_IMAGE,   ".gitea",     Caps::ALL),
-    t("gitea-1-26",  Gitea,   "1.26.4",  "docker.gitea.com/gitea:1.26.4",          GITEA_RUNNER_IMAGE,   ".gitea",     Caps::ALL),
-    t("gitea-1-27",  Gitea,   "1.27.3",  "docker.gitea.com/gitea:1.27.3",          GITEA_RUNNER_IMAGE,   ".gitea",     Caps::ALL),
+    t("forgejo-15",  Forgejo, "15.0.11", "codeberg.org/forgejo/forgejo:15.0.11",   FORGEJO_RUNNER_IMAGE, ".forgejo",   FORGEJO_15_CAPS),
+    t("forgejo-16",  Forgejo, "16.0.7",  "codeberg.org/forgejo/forgejo:16.0.7",    FORGEJO_RUNNER_IMAGE, ".forgejo",   FORGEJO_16_CAPS),
+    t("forgejo-17",  Forgejo, "17.0.1",  "codeberg.org/forgejo/forgejo:17.0.1",    FORGEJO_RUNNER_IMAGE, ".forgejo",   FORGEJO_17_CAPS),
+    t("gitea-1-25",  Gitea,   "1.25.5",  "docker.gitea.com/gitea:1.25.5",          GITEA_RUNNER_IMAGE,   ".gitea",     GITEA_1_25_CAPS),
+    t("gitea-1-26",  Gitea,   "1.26.4",  "docker.gitea.com/gitea:1.26.4",          GITEA_RUNNER_IMAGE,   ".gitea",     GITEA_1_26_CAPS),
+    t("gitea-1-27",  Gitea,   "1.27.3",  "docker.gitea.com/gitea:1.27.3",          GITEA_RUNNER_IMAGE,   ".gitea",     GITEA_1_26_CAPS),
 ];
 
 /// Image used for job containers (`runs-on: ubuntu-latest`). It only needs

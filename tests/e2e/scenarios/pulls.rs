@@ -248,47 +248,32 @@ pub async fn run(ctx: &Ctx<'_>) -> Result<()> {
     );
 
     ctx.step("pulls merge with the current head commit");
-    // The server may re-run its mergeability check (e.g. after the rejected
-    // stale merge) and answer 405 "Please try again later" meanwhile.
-    let merge_args = ctx.pulls(
-        &repo,
-        &[
-            "merge",
-            "--index",
-            &index_s,
-            "--head-commit",
-            &head_sha,
-            "--title",
-            &title,
-        ],
-    );
-    let transient = std::sync::atomic::AtomicUsize::new(0);
-    let out = util::poll(
-        "the PR merge to be accepted",
-        Duration::from_secs(60),
-        Duration::from_secs(2),
-        || {
-            let args = merge_args.clone();
-            let transient = &transient;
-            async move {
-                let out = ctx.fj.cmd(&args).output().await?;
-                if out.success() {
-                    return Ok(Some(out));
-                }
-                if out.stderr.contains("try again later") {
-                    transient.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Ok(None);
-                }
-                Err(eyre!("merge failed:\n{}", out.stderr))
-            }
-        },
-    )
-    .await?;
-    let transient = transient.into_inner();
-    if transient > 0 {
-        ctx.note(&format!(
-            "pulls merge got {transient} transient 405 \"Please try again later\" answer(s); fj-ex reports these as a permission problem"
-        ));
+    // fj-ex itself retries the transient 405 "Please try again later" that the
+    // server answers while it re-checks mergeability (e.g. after the stale merge).
+    let out = ctx
+        .fj
+        .cmd(&ctx.pulls(
+            &repo,
+            &[
+                "merge",
+                "--index",
+                &index_s,
+                "--head-commit",
+                &head_sha,
+                "--title",
+                &title,
+            ],
+        ))
+        .ok()
+        .await?;
+    if out.stderr.contains("merged on attempt") {
+        ctx.note(
+            out.stderr
+                .lines()
+                .find(|l| l.contains("merged on attempt"))
+                .unwrap_or_default()
+                .trim_start_matches("note: "),
+        );
     }
     ensure!(
         out.stdout

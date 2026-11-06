@@ -14,6 +14,7 @@ mod misc;
 mod pulls;
 mod runners;
 mod settings;
+mod token_auth;
 mod tokens;
 mod watch;
 
@@ -176,6 +177,16 @@ pub async fn run_all(stack: &Stack) -> Result<()> {
         outcomes.push(scenario(&ctx, "smoke-test", misc::smoke_test(&ctx)).await);
         outcomes.push(scenario(&ctx, "remote-inference", misc::remote_inference(&ctx)).await);
         outcomes.push(scenario(&ctx, "trigger", dispatch::run(&ctx)).await);
+        outcomes.push(
+            scenario(
+                &ctx,
+                "token-only-actions",
+                token_auth::token_only_actions(&ctx),
+            )
+            .await,
+        );
+        outcomes.push(scenario(&ctx, "token-login", token_auth::stored_tokens(&ctx)).await);
+        outcomes.push(scenario(&ctx, "session-import", token_auth::session_import(&ctx)).await);
         outcomes.push(scenario(&ctx, "follow-watch", watch::follow_and_watch(&ctx)).await);
         outcomes.push(scenario(&ctx, "cancel", control::cancel(&ctx)).await);
         outcomes.push(scenario(&ctx, "rerun", control::rerun(&ctx)).await);

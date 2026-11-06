@@ -65,6 +65,7 @@ impl FjEx {
             fj: self,
             args: args.iter().map(|a| a.as_ref().to_string()).collect(),
             stdin: None,
+            envs: Vec::new(),
             cwd: None,
             timeout: DEFAULT_TIMEOUT,
         }
@@ -76,12 +77,19 @@ pub struct Invocation<'a> {
     args: Vec<String>,
     stdin: Option<Vec<u8>>,
     cwd: Option<PathBuf>,
+    envs: Vec<(String, String)>,
     timeout: Duration,
 }
 
 impl Invocation<'_> {
     pub fn stdin(mut self, data: impl Into<Vec<u8>>) -> Self {
         self.stdin = Some(data.into());
+        self
+    }
+
+    /// Set an environment variable for this invocation (e.g. `FJ_EX_TOKEN`).
+    pub fn env(mut self, key: &str, value: &str) -> Self {
+        self.envs.push((key.to_string(), value.to_string()));
         self
     }
 
@@ -96,7 +104,9 @@ impl Invocation<'_> {
     }
 
     fn display(&self) -> String {
-        let mut s = String::from("fj-ex");
+        // Env values may be tokens: show names only.
+        let mut s: String = self.envs.iter().map(|(k, _)| format!("{k}=*** ")).collect();
+        s.push_str("fj-ex");
         for a in &self.args {
             if a.is_empty() || a.contains(char::is_whitespace) {
                 s.push_str(&format!(" '{a}'"));
@@ -121,6 +131,9 @@ impl Invocation<'_> {
             .env_remove("FJ_USER")
             .env_remove("FJ_PASS")
             .env_remove("FJ_OTP")
+            .env_remove("FJ_EX_TOKEN")
+            .env_remove("FORGEJO_TOKEN")
+            .env_remove("GITEA_TOKEN")
             .stdin(if self.stdin.is_some() {
                 Stdio::piped()
             } else {
@@ -129,6 +142,7 @@ impl Invocation<'_> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        cmd.envs(self.envs.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         if let Some(dir) = &self.cwd {
             cmd.current_dir(dir);
         }

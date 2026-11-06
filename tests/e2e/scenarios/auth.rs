@@ -155,13 +155,12 @@ pub async fn two_factor(ctx: &Ctx<'_>) -> Result<()> {
         .stdin(format!("{password}\n"))
         .fails()
         .await?;
-    let stderr = out.stderr.to_ascii_lowercase();
-    if !(stderr.contains("passcode") || stderr.contains("two-factor") || stderr.contains("otp")) {
-        // Without a TTY the passcode prompt fails with a bare OS error.
-        ctx.note(&format!(
-            "2FA login without --otp and without a TTY fails without a passcode hint: {}",
-            out.stderr.lines().next().unwrap_or_default()
-        ));
+    for hint in ["two-factor passcode", "--otp-stdin", "--otp", "FJ_OTP"] {
+        ensure!(
+            out.stderr.contains(hint),
+            "no-TTY 2FA error lacks {hint:?}:\n{}",
+            out.stderr
+        );
     }
     let status = fj
         .cmd(&["auth", "status", "--host", base, "--json", "--no-relogin"])
@@ -223,15 +222,27 @@ pub async fn logout(ctx: &Ctx<'_>) -> Result<()> {
         !has_login(&list, base),
         "logout left {base} in auth list: {list}"
     );
+    // The UI backend needs the removed login ...
+    let repo = ctx.repo("ci-artifacts");
     let out = ctx
         .fj
-        .cmd(&ctx.actions(&ctx.repo("ci-artifacts"), &["runs", "--latest"]))
+        .cmd(&ctx.actions(&repo, &["--backend", "ui", "runs", "--latest"]))
         .fails()
         .await?;
     ensure!(
-        out.stderr.contains("auth login") || out.stderr.to_ascii_lowercase().contains("creds"),
+        out.stderr.contains("auth login"),
         "expected a login hint after logout:\n{}",
         out.stderr
+    );
+    // ... while `auto` falls back to the API token left in fj's keys.json.
+    let v = ctx
+        .fj
+        .cmd(&ctx.actions(&repo, &["runs", "--latest", "--json"]))
+        .json()
+        .await?;
+    ensure!(
+        v["runs"].as_array().is_some_and(|r| r.len() == 1),
+        "token fallback after logout: {v}"
     );
     Ok(())
 }

@@ -20,9 +20,22 @@ The single source of truth is the table in
 | `gitea-1-27` | `docker.gitea.com/gitea:1.27.3`        | `gitea/runner:5.4.1`                     | `.gitea`     |
 
 Each row also carries capability flags (`Caps`). A flag is off only when a
-server genuinely lacks a feature; the affected check is then logged as
-`SKIPPED ... capability ... is off` in the run summary. No target needs a
-gate today.
+server genuinely lacks a feature; the affected check is then logged in the run
+summary instead of passing silently. Today the gates are all about the REST
+API that `fj-ex actions` uses with only an API token (the web-UI backend
+supports everything on every target). For a gated operation the suite asserts
+that fj-ex refuses with the expected message and logs `GATED <capability>`:
+
+| REST operation (token only)   | Forgejo 15     | Forgejo 16     | Forgejo 17 | Gitea 1.25     | Gitea 1.26 / 1.27 |
+|-------------------------------|----------------|----------------|------------|----------------|-------------------|
+| `runs`                        | yes            | yes            | yes        | yes            | yes               |
+| `jobs`, `logs job`            | added in 16    | yes            | yes        | yes            | yes               |
+| `cancel`                      | added in 16    | yes            | yes        | no endpoint    | no endpoint       |
+| `rerun --failed-only`         | added in 17    | added in 17    | yes        | added in 1.26  | yes               |
+| `workflows`                   | no endpoint    | no endpoint    | no endpoint| yes            | yes               |
+
+`session_cookie` names the web session cookie used by the session-import
+scenario (`session` on Forgejo, `i_like_gitea` on Gitea).
 
 Job containers use `buildpack-deps:bookworm-curl` (`runs-on: ubuntu-latest`).
 The demo workflows use no remote actions (the artifact upload speaks the
@@ -62,6 +75,17 @@ Accounts: admin `e2e` / `e2e-password-1234`, reviewer `e2e-reviewer` /
 token-auth scenarios). The 2FA scenario creates `e2e-otp` and enrolls TOTP
 through the web UI (`harness::ui::WebSession`).
 
+Token and session scenarios ([`scenarios/token_auth.rs`](scenarios/token_auth.rs))
+mint scoped tokens (`read:repository,write:repository,read:user`) and cover:
+token-only `actions` (`FJ_EX_TOKEN` and a fresh store; `runIndex` equals the
+number in the run URL, i.e. the run id on Gitea 1.26+), `auth login
+--token-stdin` / `--token` (stored-token status, `(token)` in `auth list`, no
+token in any output, 401 for a wrong token, warning for a token without
+`read:user`), token precedence (stored > `FJ_EX_TOKEN` > `FORGEJO_TOKEN` /
+`GITEA_TOKEN`), and `auth login --session-cookie-stdin` with a cookie taken
+from a web form login, including the "has expired" error after a server-side
+logout and the fallback to `FJ_EX_TOKEN`.
+
 ## Running
 
 Requirements: Linux (job containers use host networking), Docker, `git`.
@@ -79,8 +103,8 @@ FJ_EX_E2E=1 cargo test --locked --test e2e_docker -- --ignored --nocapture --tes
 
 Test names: `e2e_forgejo_15_docker`, `e2e_forgejo_16_docker`,
 `e2e_forgejo_17_docker`, `e2e_gitea_1_25_docker`, `e2e_gitea_1_26_docker`,
-`e2e_gitea_1_27_docker`. A target run takes about one minute once the images
-are pulled. Tests that `FJ_EX_E2E_TARGET` does not select print a skip message
+`e2e_gitea_1_27_docker`. A target run takes about 75-100 seconds once the
+images are pulled. Tests that `FJ_EX_E2E_TARGET` does not select print a skip message
 and pass.
 
 Environment variables:
@@ -91,6 +115,10 @@ Environment variables:
 | `FJ_EX_E2E_TARGET`    | comma separated target ids to run (default: all) |
 | `FJ_EX_E2E_KEEP=1`    | keep containers and the work dir after the run; remove later with `down.sh` |
 | `FJ_EX_E2E_LOG_DIR`   | on failure, also write full server/runner/job container logs to `<dir>/<stack id>/` |
+
+The fj-ex driver removes `FJ_EX_TOKEN`, `FORGEJO_TOKEN`, `GITEA_TOKEN`,
+`FJ_USER`, `FJ_PASS`, `FJ_OTP` and `FJ_FALLBACK_HOST` from the environment of
+every command; scenarios set token variables explicitly where they test them.
 
 ### Isolation and cleanup
 
@@ -141,7 +169,8 @@ tests/e2e/harness/            shared with examples/e2e_stack.rs
   seed.rs, fixtures.rs        demo repository seeding and templating
   api.rs, git.rs, ui.rs       REST API, system git, web UI (2FA enrollment)
   docker.rs, totp.rs, util.rs
-tests/e2e/scenarios/          auth, tokens, runners, secrets/variables, runs/jobs/wait,
+tests/e2e/scenarios/          auth, tokens, token_auth (token-only REST, stored tokens,
+                              session import), runners, secrets/variables, runs/jobs/wait,
                               logs, artifacts, trigger, follow/watch, cancel/rerun,
                               pulls, smoke-test, remote inference
 tests/e2e/fixtures/repos/     demo repositories
