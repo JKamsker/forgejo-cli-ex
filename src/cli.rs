@@ -403,7 +403,9 @@ impl ReviewEvent {
     pub fn as_api_value(self) -> &'static str {
         match self {
             Self::Comment => "COMMENT",
-            Self::Approve => "APPROVE",
+            // Forgejo/Gitea expect the review *state* name; "APPROVE" (GitHub's
+            // spelling) is silently stored as a PENDING review.
+            Self::Approve => "APPROVED",
             Self::RequestChanges => "REQUEST_CHANGES",
         }
     }

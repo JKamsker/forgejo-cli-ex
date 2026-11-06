@@ -500,6 +500,7 @@ mod tests {
         assert_eq!(PullState::Open.as_str(), "open");
         assert_eq!(PullState::All.as_str(), "all");
         assert_eq!(ReviewEvent::Comment.as_api_value(), "COMMENT");
+        assert_eq!(ReviewEvent::Approve.as_api_value(), "APPROVED");
         assert_eq!(
             ReviewEvent::RequestChanges.as_api_value(),
             "REQUEST_CHANGES"
