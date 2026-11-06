@@ -987,11 +987,21 @@ async fn run_repository_actions_value(
         value_field.to_string(),
         serde_json::Value::String(actions_value),
     );
-    let response = auth
-        .apply(client.put(url).json(&body))?
+    let mut response = auth
+        .apply(client.put(&url).json(&body))?
         .send()
         .await
         .wrap_err("Actions secret update request failed")?;
+
+    // Forgejo/Gitea create-or-update secrets with PUT, but PUT on a variable
+    // only updates an existing one (404 otherwise); variables are created with POST.
+    if resource_path == "variables" && response.status() == reqwest::StatusCode::NOT_FOUND {
+        response = auth
+            .apply(client.post(&url).json(&body))?
+            .send()
+            .await
+            .wrap_err("Actions variable create request failed")?;
+    }
 
     if !matches!(
         response.status(),
