@@ -407,7 +407,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         );
 
                         if should_print {
-                            if interactive && watch && !json {
+                            // Clearing the screen is for the human table only; it would
+                            // corrupt a JSON Lines stream read from a terminal.
+                            if interactive && watch && !json && !json_lines {
                                 use std::io::Write;
                                 print!("\x1B[2J\x1B[H");
                                 let _ = std::io::stdout().flush();
@@ -436,7 +438,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                             "duration": j.duration,
                                         })).collect::<Vec<_>>(),
                                     });
-                                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                                    println!("{}", format_jobs_snapshot(&payload, json_lines)?);
                                 }
                             } else {
                                 let show_header =
@@ -2066,6 +2068,17 @@ fn should_print_jobs_snapshot(
     !watch || done || (interactive && changed) || (json_lines && changed)
 }
 
+/// `--json-lines` needs exactly one compact JSON object per line; `--json`
+/// keeps the human-friendly pretty layout.
+fn format_jobs_snapshot(payload: &serde_json::Value, json_lines: bool) -> eyre::Result<String> {
+    let formatted = if json_lines {
+        serde_json::to_string(payload)?
+    } else {
+        serde_json::to_string_pretty(payload)?
+    };
+    Ok(formatted)
+}
+
 fn workflow_filter_for_wait(workflow: &str) -> Option<&str> {
     let workflow = workflow.trim();
     if workflow.chars().all(|ch| ch.is_ascii_digit()) {
@@ -2142,9 +2155,26 @@ fn run_terminal_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        artifact_items, log_delta, observe_terminal_run_status, run_status_is_terminal,
-        should_print_jobs_snapshot, validate_actions_name,
+        artifact_items, format_jobs_snapshot, log_delta, observe_terminal_run_status,
+        run_status_is_terminal, should_print_jobs_snapshot, validate_actions_name,
     };
+
+    #[test]
+    fn json_lines_snapshots_are_single_compact_lines() {
+        let payload = serde_json::json!({
+            "runIndex": 7,
+            "jobs": [{"jobIndex": 0, "name": "build\nstep", "status": "running"}],
+        });
+        let line = format_jobs_snapshot(&payload, true).unwrap();
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&line).unwrap(),
+            payload
+        );
+
+        let pretty = format_jobs_snapshot(&payload, false).unwrap();
+        assert!(pretty.contains("\n  \"jobs\""));
+    }
 
     #[test]
     fn terminal_run_status_overrides_a_stale_job_snapshot() {
