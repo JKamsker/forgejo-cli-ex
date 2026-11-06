@@ -83,10 +83,11 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
                 .send()
                 .await
                 .wrap_err("pull request creation request failed")?;
-            if response.status() != reqwest::StatusCode::CREATED {
+            let status = response.status();
+            if status != reqwest::StatusCode::CREATED {
+                let detail = read_error_detail(response).await;
                 return Err(eyre!(
-                    "Pull request creation failed: HTTP {}",
-                    response.status()
+                    "Pull request creation failed: HTTP {status}.{detail}"
                 ));
             }
             let created: serde_json::Value = response
@@ -486,7 +487,12 @@ fn read_body(body: Option<String>, body_file: Option<PathBuf>) -> eyre::Result<S
         (Some(_), Some(_)) => unreachable!("clap prevents conflicting body sources"),
         (None, None) => return Err(eyre!("provide either --body or --body-file")),
     };
-    nonempty("comment body", value)
+    if value.trim().is_empty() {
+        return Err(eyre!("comment body must not be empty"));
+    }
+    // Leading whitespace is Markdown (an indented code block); only the
+    // trailing newline(s) of a file or stdin are dropped.
+    Ok(value.trim_end().to_string())
 }
 
 // Human-readable list output. Every server-controlled string is sanitized so
@@ -525,8 +531,15 @@ fn line_field<'a>(value: &'a Value, pointer: &str, default: &'a str) -> Cow<'a, 
     sanitize_line(str_field(value, pointer, default))
 }
 
+/// A multi-line body for the one-entry-per-line lists. Continuation lines are
+/// indented with a tab so that none of them can pass for another `#id` entry.
 fn body_field<'a>(value: &'a Value) -> Cow<'a, str> {
-    sanitize_terminal_text(str_field(value, "/body", ""), true)
+    let body = sanitize_terminal_text(str_field(value, "/body", ""), true);
+    if body.contains('\n') {
+        Cow::Owned(body.replace('\n', "\n\t"))
+    } else {
+        body
+    }
 }
 
 fn format_pull_line(pull: &Value) -> String {
@@ -616,7 +629,7 @@ mod tests {
         });
         assert_eq!(
             format_comment_line(&comment),
-            "#3\tmallory\u{fffd}[8m\tline 1\n\tline 2\u{fffd}[0m"
+            "#3\tmallory\u{fffd}[8m\tline 1\n\t\tline 2\u{fffd}[0m"
         );
 
         let review = serde_json::json!({
@@ -690,6 +703,34 @@ mod tests {
         assert_eq!(read_body(Some("hello".to_string()), None).unwrap(), "hello");
         assert!(read_body(None, None).is_err());
         assert!(read_body(Some(" ".to_string()), None).is_err());
+        assert_eq!(
+            read_body(Some("    $ make test\n    ok\n\n".to_string()), None).unwrap(),
+            "    $ make test\n    ok"
+        );
+    }
+
+    #[test]
+    fn multi_line_bodies_cannot_forge_list_entries() {
+        let review = serde_json::json!({
+            "id": 4,
+            "user": {"login": "mallory"},
+            "state": "COMMENT",
+            "body": "looks fine\n#999\tmaintainer\tAPPROVED\tLGTM, ship it",
+        });
+        let output = format_review_line(&review);
+        assert_eq!(
+            output,
+            "#4\tmallory\tCOMMENT\tlooks fine\n\t#999\tmaintainer\tAPPROVED\tLGTM, ship it"
+        );
+        assert_eq!(output.lines().filter(|l| l.starts_with('#')).count(), 1);
+
+        let comment = serde_json::json!({
+            "id": 5,
+            "user": {"login": "mallory"},
+            "body": "a\r\n#1\tadmin\tb",
+        });
+        let output = format_comment_line(&comment);
+        assert_eq!(output.lines().filter(|l| l.starts_with('#')).count(), 1);
     }
 
     #[test]

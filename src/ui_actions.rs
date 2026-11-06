@@ -316,12 +316,10 @@ pub async fn get_run_view_data(
     // report a completed step as running for one polling cycle, so prefer the
     // UI's live state endpoint and retain the embedded value only for Forgejo
     // versions that do not expose its CSRF metadata.
-    let view = match fetch_live_run_state(session, &html_s, run_index).await? {
-        Some(view) => view,
-        None => embedded_view.ok_or_else(|| {
-            eyre!("Unable to determine live or embedded run state from run view HTML ({url}).")
-        })?,
-    };
+    let live = fetch_live_run_state(session, &html_s, run_index).await;
+    let view = choose_run_state(live, embedded_view).wrap_err_with(|| {
+        format!("Unable to determine live or embedded run state from run view HTML ({url}).")
+    })?;
     let artifacts: Option<Value> = match initial_artifacts_json {
         Some(s) if !s.trim().is_empty() => Some(
             serde_json::from_str(&s)
@@ -349,6 +347,22 @@ pub async fn get_run_view_data(
         view,
         artifacts,
     })
+}
+
+/// Prefers the live run state, falling back to the page's embedded snapshot
+/// when the live request failed (transport error, redirect to an HTML page,
+/// a body that is not JSON) or was refused. The live error is reported only
+/// when there is no snapshot to use instead.
+fn choose_run_state(
+    live: eyre::Result<Option<Value>>,
+    embedded: Option<Value>,
+) -> eyre::Result<Value> {
+    match (live, embedded) {
+        (Ok(Some(view)), _) => Ok(view),
+        (Ok(None), Some(view)) | (Err(_), Some(view)) => Ok(view),
+        (Err(err), None) => Err(err),
+        (Ok(None), None) => Err(eyre!("the server returned no run state")),
+    }
 }
 
 /// Whether a run view page belongs to a server that uses id-based Actions URLs.
@@ -668,9 +682,10 @@ fn locate_run_on_page(runs: &[RunRef], run_index: i64, page_size: u32) -> RunPag
     RunPagePosition::Missing
 }
 
-/// Predicts the page holding `run_index`, given that `page` ends with the run
-/// `oldest` (> `run_index`). At most `oldest - run_index - 1` runs separate the
-/// two, so the prediction is exact without deletions and never too early.
+/// Bounds the page holding `run_index`, given that the full page `page` ends
+/// with the run `oldest` (> `run_index`). At most `oldest - run_index - 1`
+/// runs separate the two, whether the numbers are per-repository indexes or
+/// instance-wide run ids, so the target is never on a later page.
 fn predicted_run_page(page: u32, oldest: i64, run_index: i64, page_size: u32) -> u32 {
     let runs_between = oldest.saturating_sub(run_index).saturating_sub(1).max(0);
     let pages_between =
@@ -678,27 +693,127 @@ fn predicted_run_page(page: u32, oldest: i64, run_index: i64, page_size: u32) ->
     page.saturating_add(1).saturating_add(pages_between)
 }
 
-/// Finds a run in the Actions run list by its index, however old it is.
+/// Estimates the page holding `run_index` from the density of run numbers on
+/// the full page `page` (newest first). Per-repository indexes are dense, so
+/// this equals [`predicted_run_page`]; instance-wide run ids (Gitea >= 1.26)
+/// leave gaps for other repositories' runs, which the density accounts for.
+fn estimated_run_page(page: u32, runs: &[RunRef], run_index: i64, page_size: u32) -> u32 {
+    let (Some(newest), Some(oldest)) = (runs.first(), runs.last()) else {
+        return page.saturating_add(1);
+    };
+    let span = i128::from(newest.run_index) - i128::from(oldest.run_index);
+    let gap = (i128::from(oldest.run_index) - i128::from(run_index) - 1).max(0);
+    let listed = i128::try_from(runs.len().saturating_sub(1)).unwrap_or(i128::MAX);
+    let runs_between = if span > 0 && listed < span {
+        gap * listed / span
+    } else {
+        gap
+    };
+    let pages_between =
+        u32::try_from(runs_between / i128::from(page_size.max(1))).unwrap_or(u32::MAX);
+    page.saturating_add(1).saturating_add(pages_between)
+}
+
+/// Next step of a [`find_run`] search.
+#[derive(Debug, PartialEq, Eq)]
+enum RunSearchStep {
+    Found(usize),
+    Absent,
+    Fetch(u32),
+}
+
+/// The page bookkeeping of [`find_run`], separate from the HTTP requests.
+#[derive(Debug)]
+struct RunSearch {
+    run_index: i64,
+    /// The size of a full page as the server serves it; an instance
+    /// configured with a smaller maximum page size returns fewer runs than
+    /// requested.
+    page_size: u32,
+    /// Pages that may still contain the run: `lowest..=highest`.
+    lowest: u32,
+    highest: u32,
+    page: u32,
+    /// Distance from `lowest` of the next probe after reading past the end
+    /// of the list; doubles with each such probe.
+    gallop: u32,
+}
+
+impl RunSearch {
+    fn new(run_index: i64) -> Self {
+        Self {
+            run_index,
+            page_size: RUN_LOOKUP_PAGE_SIZE,
+            lowest: 1,
+            highest: u32::MAX,
+            page: 1,
+            gallop: 0,
+        }
+    }
+
+    /// Consumes the runs listed on `self.page` and decides what to do next.
+    fn step(&mut self, runs: &[RunRef]) -> RunSearchStep {
+        match locate_run_on_page(runs, self.run_index, self.page_size) {
+            RunPagePosition::Found(pos) => RunSearchStep::Found(pos),
+            RunPagePosition::Missing => RunSearchStep::Absent,
+            RunPagePosition::OnLaterPage => {
+                let oldest = runs.last().map_or(self.run_index, |run| run.run_index);
+                self.lowest = self.page.saturating_add(1);
+                self.highest = self.highest.min(predicted_run_page(
+                    self.page,
+                    oldest,
+                    self.run_index,
+                    self.page_size,
+                ));
+                if self.lowest > self.highest {
+                    return RunSearchStep::Absent;
+                }
+                self.page = estimated_run_page(self.page, runs, self.run_index, self.page_size)
+                    .clamp(self.lowest, self.highest);
+                RunSearchStep::Fetch(self.page)
+            }
+            RunPagePosition::OnEarlierPage => {
+                self.highest = self.page.saturating_sub(1);
+                if self.lowest > self.highest {
+                    return RunSearchStep::Absent;
+                }
+                let range = self.highest - self.lowest;
+                self.page = if runs.is_empty() {
+                    // The estimate went past the end of the list by an unknown
+                    // amount (sparse ids after a dense page): search forward
+                    // from the last known page with growing steps instead of
+                    // bisecting a possibly huge range.
+                    let step = self.gallop.min(range);
+                    self.gallop = self.gallop.saturating_mul(2).max(1);
+                    self.lowest + step
+                } else {
+                    self.lowest + range / 2
+                };
+                RunSearchStep::Fetch(self.page)
+            }
+        }
+    }
+}
+
+/// Finds a run in the Actions run list by the number in its URL, however old
+/// it is.
 ///
 /// The run list (not the run page) carries the authoritative run status, but
-/// it is paginated. Run indexes are allocated sequentially per repository, so
-/// the distance to the target index predicts its page exactly unless runs were
-/// deleted; in that case the prediction overshoots and is corrected by a
-/// bounded binary search.
+/// it is paginated. Per-repository run indexes are allocated sequentially, so
+/// the distance to the target predicts its page exactly unless runs were
+/// deleted. Instance-wide run ids (Gitea >= 1.26) also grow monotonically but
+/// with gaps, so the page is estimated from the density of ids on the page
+/// just read. Either way the distance bounds the page from above, and a
+/// bounded binary search corrects an overshoot.
 pub async fn find_run(
     session: &UiSession,
     repo: &str,
     run_index: i64,
 ) -> eyre::Result<Option<RunRef>> {
-    // The size of a full page as the server serves it; an instance configured
-    // with a smaller maximum page size returns fewer runs than requested.
-    let mut page_size = RUN_LOOKUP_PAGE_SIZE;
-    // Pages that may still contain the run: lowest..=highest.
-    let mut lowest: u32 = 1;
-    let mut highest: u32 = u32::MAX;
-    let mut page: u32 = 1;
+    let mut search = RunSearch::new(run_index);
 
     for _ in 0..RUN_LOOKUP_MAX_REQUESTS {
+        let page = search.page;
         let mut runs = list_runs(session, repo, None, page, RUN_LOOKUP_PAGE_SIZE).await?;
         let short_first_page = page == 1
             && !runs.is_empty()
@@ -715,24 +830,13 @@ pub async fn find_run(
             {
                 return Ok(None);
             }
-            page_size = u32::try_from(runs.len()).unwrap_or(RUN_LOOKUP_PAGE_SIZE);
+            search.page_size = u32::try_from(runs.len()).unwrap_or(RUN_LOOKUP_PAGE_SIZE);
         }
 
-        match locate_run_on_page(&runs, run_index, page_size) {
-            RunPagePosition::Found(pos) => return Ok(Some(runs.swap_remove(pos))),
-            RunPagePosition::Missing => return Ok(None),
-            RunPagePosition::OnLaterPage => {
-                lowest = page.saturating_add(1);
-                let oldest = runs.last().map_or(run_index, |run| run.run_index);
-                page = predicted_run_page(page, oldest, run_index, page_size).min(highest);
-            }
-            RunPagePosition::OnEarlierPage => {
-                highest = page.saturating_sub(1);
-                if lowest > highest {
-                    return Ok(None);
-                }
-                page = lowest + (highest - lowest) / 2;
-            }
+        match search.step(&runs) {
+            RunSearchStep::Found(pos) => return Ok(Some(runs.swap_remove(pos))),
+            RunSearchStep::Absent => return Ok(None),
+            RunSearchStep::Fetch(_) => {}
         }
     }
 
@@ -991,6 +1095,98 @@ mod tests {
         assert_eq!(predicted_run_page(1, 101, 50, 50), 3);
         assert_eq!(predicted_run_page(1, 101, 1, 50), 3);
         assert_eq!(predicted_run_page(2, 51, 1, 50), 3);
+    }
+
+    /// Runs [`RunSearch`] against a newest-first run list served in pages of
+    /// `page_size`, returning the found run number and the pages requested.
+    fn simulate_find_run(all: &[i64], page_size: usize, target: i64) -> (Option<i64>, Vec<u32>) {
+        let mut search = RunSearch::new(target);
+        search.page_size = u32::try_from(page_size).unwrap();
+        let mut fetched = Vec::new();
+        for _ in 0..RUN_LOOKUP_MAX_REQUESTS {
+            let page = search.page;
+            fetched.push(page);
+            let start = (page as usize - 1).saturating_mul(page_size);
+            let listed = runs(all.iter().copied().skip(start).take(page_size));
+            match search.step(&listed) {
+                RunSearchStep::Found(pos) => return (Some(listed[pos].run_index), fetched),
+                RunSearchStep::Absent => return (None, fetched),
+                RunSearchStep::Fetch(next) => assert_eq!(next, search.page),
+            }
+        }
+        (None, fetched)
+    }
+
+    #[test]
+    fn find_run_jumps_straight_to_the_page_of_a_dense_index() {
+        let all: Vec<i64> = (1..=150).rev().collect();
+        assert_eq!(simulate_find_run(&all, 50, 120), (Some(120), vec![1]));
+        assert_eq!(simulate_find_run(&all, 50, 75), (Some(75), vec![1, 2]));
+        assert_eq!(simulate_find_run(&all, 50, 1), (Some(1), vec![1, 3]));
+    }
+
+    #[test]
+    fn find_run_stops_once_the_gap_between_pages_is_known() {
+        // Runs 200..=151 were deleted; 175 cannot be listed anywhere.
+        let all: Vec<i64> = (251..=300)
+            .rev()
+            .chain((201..=250).rev())
+            .chain((101..=150).rev())
+            .collect();
+        let (found, fetched) = simulate_find_run(&all, 50, 175);
+        assert_eq!(found, None);
+        assert_eq!(fetched, vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn find_run_finds_sparse_instance_wide_run_ids_on_later_pages() {
+        // Gitea >= 1.26: 60 runs of this repository, with ids spread over
+        // 600000 runs of the whole instance.
+        let all: Vec<i64> = (0..60).map(|i| 900_000 - i * 10_000).collect();
+        let target = all[55];
+        let (found, fetched) = simulate_find_run(&all, 50, target);
+        assert_eq!(found, Some(target));
+        assert_eq!(fetched, vec![1, 2]);
+
+        // A burst of ids on the first page still finds the run within the
+        // request budget.
+        let all: Vec<i64> = (900_001..=900_050)
+            .rev()
+            .chain((0..60).map(|i| 300_000 - i * 1_000))
+            .collect();
+        for target in [300_000, all[80], *all.last().unwrap()] {
+            let (found, fetched) = simulate_find_run(&all, 50, target);
+            assert_eq!(found, Some(target), "pages requested: {fetched:?}");
+        }
+        let (found, _) = simulate_find_run(&all, 50, 300_001);
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn run_state_falls_back_to_the_embedded_snapshot_when_the_live_post_fails() {
+        let live = serde_json::json!({ "source": "live" });
+        let embedded = serde_json::json!({ "source": "embedded" });
+        assert_eq!(
+            choose_run_state(Ok(Some(live.clone())), Some(embedded.clone())).unwrap(),
+            live
+        );
+        assert_eq!(
+            choose_run_state(Ok(None), Some(embedded.clone())).unwrap(),
+            embedded
+        );
+        // e.g. the POST was redirected to an HTML page.
+        assert_eq!(
+            choose_run_state(
+                Err(eyre!("failed to parse live run/job json")),
+                Some(embedded.clone())
+            )
+            .unwrap(),
+            embedded
+        );
+        let err =
+            choose_run_state(Err(eyre!("failed to parse live run/job json")), None).unwrap_err();
+        assert!(format!("{err:#}").contains("failed to parse live run/job json"));
+        assert!(choose_run_state(Ok(None), None).is_err());
     }
 
     #[test]

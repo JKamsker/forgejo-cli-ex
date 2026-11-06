@@ -478,8 +478,9 @@ fj-ex actions runners jobs --repo owner/name --waiting
 fj-ex actions runners jobs --scope global --label self-hosted --label linux
 ```
 
-Gitea has no runner job queue endpoint; there `runners jobs` reads Gitea's `/actions/jobs`
-listing instead, reports queued jobs as `waiting` and applies `--label` client-side.
+Gitea has no runner job queue endpoint; there `runners jobs` reads the queued jobs of Gitea's
+`/actions/jobs` listing instead (up to 1000), reports them as `waiting` and applies `--label`
+client-side with Forgejo's rule: a job is listed when every one of its `runs-on` labels is given.
 
 If you get a "No Forgejo API token found" error, provide a token:
 

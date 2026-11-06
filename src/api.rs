@@ -164,10 +164,11 @@ impl ApiClient {
     /// Runner job queue.
     ///
     /// Forgejo serves `.../actions/runners/jobs` (and answers `null` for an
-    /// empty queue). Gitea has no such route (404) but lists jobs at
-    /// `.../actions/jobs` in a GitHub-compatible shape; those are mapped to
-    /// Forgejo's vocabulary (`queued` -> `waiting`, `labels` -> `runs_on`) and
-    /// `labels` is applied client-side.
+    /// empty queue): the waiting jobs a runner with `labels` could pick up.
+    /// Gitea has no such route (404) but lists jobs at `.../actions/jobs` in
+    /// a GitHub-compatible shape; there the queued jobs are read page by page,
+    /// mapped to Forgejo's vocabulary (`queued` -> `waiting`, `labels` ->
+    /// `runs_on`), and `labels` is applied client-side with Forgejo's rule.
     pub async fn runner_jobs(
         &self,
         url: &str,
@@ -198,16 +199,26 @@ impl ApiClient {
             return Ok(jobs.unwrap_or_default());
         }
 
-        let gitea_url = format!("{}?limit=50", gitea_url.unwrap_or_default());
-        let listed: GiteaWorkflowJobs = self.get_json(&gitea_url).await?;
-        Ok(listed
-            .jobs
-            .into_iter()
-            .map(GiteaWorkflowJob::into_runner_job)
-            .filter(|job| {
-                labels.is_empty() || job.runs_on.iter().any(|l| labels.iter().any(|f| f == l))
-            })
-            .collect())
+        let gitea_url = gitea_url.unwrap_or_default();
+        let mut jobs = Vec::new();
+        for page in 1..=GITEA_QUEUE_MAX_PAGES {
+            let url =
+                format!("{gitea_url}?status=queued&page={page}&limit={GITEA_QUEUE_PAGE_SIZE}");
+            let listed: GiteaWorkflowJobs = self.get_json(&url).await?;
+            let count = listed.jobs.len();
+            jobs.extend(
+                listed
+                    .jobs
+                    .into_iter()
+                    .map(GiteaWorkflowJob::into_runner_job)
+                    .filter(|job| job.status.as_deref() == Some("waiting"))
+                    .filter(|job| runner_could_take(job, labels)),
+            );
+            if count < GITEA_QUEUE_PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(jobs)
     }
 
     pub async fn get_json_with_basic_auth<T: DeserializeOwned>(
@@ -294,6 +305,18 @@ fn gitea_jobs_url(forgejo_jobs_url: &str) -> Option<String> {
     }
     base.strip_suffix("/actions/runners/jobs")
         .map(|prefix| format!("{prefix}/actions/jobs"))
+}
+
+/// Gitea serves at most 50 items per API page by default.
+const GITEA_QUEUE_PAGE_SIZE: usize = 50;
+/// Upper bound on queue pages read from Gitea by one `runners jobs` call.
+const GITEA_QUEUE_MAX_PAGES: usize = 20;
+
+/// Forgejo's queue rule: with labels given, a job is listed only when a
+/// runner with exactly those labels could run it, i.e. every `runs_on` label
+/// is among them.
+fn runner_could_take(job: &ActionRunJob, labels: &[String]) -> bool {
+    labels.is_empty() || (!job.runs_on.is_empty() && job.runs_on.iter().all(|l| labels.contains(l)))
 }
 
 /// One item of Gitea's `GET .../actions/jobs` (GitHub-compatible shape).
@@ -442,6 +465,26 @@ mod tests {
         assert_eq!(jobs[0].runs_on, vec!["fjex-no-such-runner"]);
         assert_eq!(jobs[0].extra.get("run_id"), Some(&serde_json::json!(3)));
         assert_eq!(jobs[1].status.as_deref(), Some("success"));
+    }
+
+    #[test]
+    fn gitea_queue_labels_follow_forgejo_subset_rule() {
+        let job = |runs_on: &[&str]| ActionRunJob {
+            id: 1,
+            name: "queued".to_string(),
+            status: Some("waiting".to_string()),
+            runs_on: runs_on.iter().map(|l| l.to_string()).collect(),
+            extra: BTreeMap::new(),
+        };
+        let linux = vec!["linux".to_string()];
+        assert!(runner_could_take(&job(&["linux"]), &linux));
+        assert!(!runner_could_take(&job(&["linux", "gpu"]), &linux));
+        assert!(!runner_could_take(&job(&[]), &linux));
+        assert!(runner_could_take(
+            &job(&["linux"]),
+            &["linux".to_string(), "gpu".to_string()]
+        ));
+        assert!(runner_could_take(&job(&["linux", "gpu"]), &[]));
     }
 
     #[test]
