@@ -695,6 +695,68 @@ fn empty_token_and_empty_session_are_rejected() {
     .is_err());
 }
 
+#[cfg(unix)]
+fn file_mode(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+#[cfg(unix)]
+#[test]
+fn new_store_dir_and_files_are_owner_only() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_store_paths(&temp.path().join("data"));
+
+    set_api_token_with_paths(&paths, "https://forge.example.com", "tok-1", None).unwrap();
+
+    assert_eq!(file_mode(&paths.dir), 0o700);
+    assert_eq!(file_mode(&paths.path), 0o600);
+    let lock = paths.dir.join("ui-creds.json.lock");
+    assert_eq!(file_mode(&lock), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn rewriting_a_world_readable_store_makes_it_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_store_paths(temp.path());
+    set_ui_creds_with_paths(&paths, "https://forge.example.com", "alice", "pw").unwrap();
+    std::fs::set_permissions(&paths.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    set_api_token_with_paths(&paths, "https://forge.example.com", "tok-1", None).unwrap();
+
+    assert_eq!(file_mode(&paths.path), 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn repair_backup_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_store_paths(temp.path());
+    std::fs::write(
+        &paths.path,
+        r#"{"forge.example.com": {"baseUrl": "https://forge.example.com", "username": "alice", "password": "pw", "#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&paths.path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let store = read_creds_store_with_paths(&paths).unwrap();
+    assert!(store.contains_key("forge.example.com"));
+
+    let backups = std::fs::read_dir(temp.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().contains(".bad."))
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(file_mode(&backups[0]), 0o600);
+    assert_eq!(file_mode(&paths.path), 0o600);
+}
+
 fn test_store_paths(dir: &Path) -> StorePaths {
     StorePaths {
         dir: dir.to_path_buf(),
