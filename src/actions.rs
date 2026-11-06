@@ -1117,7 +1117,7 @@ async fn run_runners(
                 resolve_runner_endpoint_url(&client, scope, org, target, "jobs")?;
 
             let url = format!("{base_jobs_url}{labels_query}");
-            let mut jobs: Vec<crate::api::ActionRunJob> = client.get_json(&url).await?;
+            let mut jobs: Vec<crate::api::ActionRunJob> = client.get_json::<Option<_>>(&url).await?.unwrap_or_default();
 
             if waiting {
                 jobs.retain(|j| {
