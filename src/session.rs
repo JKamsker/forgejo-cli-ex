@@ -157,7 +157,7 @@ impl UiSession {
             .await
             .wrap_err("failed to probe session")?;
 
-        if is_auth_challenge_url(resp.url()) {
+        if is_auth_challenge_url(self.request_base_url(), resp.url()) {
             return Ok(false);
         }
         if resp.status().as_u16() >= 400 {
@@ -249,7 +249,7 @@ impl UiSession {
             .await
             .wrap_err("failed to post login form")?;
 
-        if is_two_factor_url(login_resp.url()) {
+        if is_two_factor_url(self.request_base_url(), login_resp.url()) {
             let Some(passcode) = otp else {
                 return Ok(LoginResult::TwoFactorRequired);
             };
@@ -292,13 +292,13 @@ impl UiSession {
             .await
             .wrap_err("failed to post two-factor form")?;
 
-        if is_two_factor_url(resp.url()) {
+        if is_two_factor_url(self.request_base_url(), resp.url()) {
             return Err(eyre!(
                 "Two-factor passcode was rejected for '{}'.",
                 self.base_url
             ));
         }
-        if is_login_url(resp.url()) {
+        if is_login_url(self.request_base_url(), resp.url()) {
             return Err(eyre!(
                 "Login failed for '{}' after two-factor validation.",
                 self.base_url
@@ -419,7 +419,7 @@ impl UiSession {
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> eyre::Result<reqwest::Response> {
         let resp = build().send().await.wrap_err("request failed")?;
-        if retry_on_logout && is_auth_challenge_url(resp.url()) {
+        if retry_on_logout && is_auth_challenge_url(self.request_base_url(), resp.url()) {
             self.relogin_from_store().await?;
             let resp = build().send().await.wrap_err("request failed")?;
             self.persist_cookie_jar_required().await?;
@@ -431,19 +431,46 @@ impl UiSession {
     }
 }
 
-fn is_auth_challenge_url(url: &Url) -> bool {
-    is_login_url(url) || is_two_factor_url(url)
+fn is_auth_challenge_url(base_url: &str, url: &Url) -> bool {
+    is_login_url(base_url, url) || is_two_factor_url(base_url, url)
 }
 
-/// Matches `/user/login` at the instance root or below a sub-path (e.g. `/gitea/user/login`).
-fn is_login_url(url: &Url) -> bool {
-    let path = url.path().trim_end_matches('/');
-    path == "/user/login" || path.ends_with("/user/login")
+/// Matches `/user/login` relative to the instance base path, so both
+/// `https://host/user/login` and `https://host/gitea/user/login` (for a
+/// `https://host/gitea` instance) are detected, but repository pages such as
+/// `/gitea/owner/repo/src/branch/main/user/login` are not.
+fn is_login_url(base_url: &str, url: &Url) -> bool {
+    path_is_or_under(instance_relative_path(base_url, url), "/user/login")
 }
 
-fn is_two_factor_url(url: &Url) -> bool {
+/// Matches `/user/two_factor` (and its sub-pages such as `/user/two_factor/scratch`)
+/// relative to the instance base path.
+fn is_two_factor_url(base_url: &str, url: &Url) -> bool {
+    path_is_or_under(instance_relative_path(base_url, url), "/user/two_factor")
+}
+
+/// Returns `url`'s path relative to the base path of `base_url`
+/// (`/gitea/user/login` -> `/user/login` for `https://host/gitea`). URLs outside
+/// the base path are returned unchanged so a redirect to a root-level login page
+/// is still recognized.
+fn instance_relative_path<'a>(base_url: &str, url: &'a Url) -> &'a str {
     let path = url.path();
-    path.starts_with("/user/two_factor") || path.contains("/user/two_factor")
+    let base_path = Url::parse(base_url)
+        .map(|base| base.path().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+    if base_path.is_empty() {
+        return path;
+    }
+
+    match path.strip_prefix(base_path.as_str()) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
+        _ => path,
+    }
+}
+
+fn path_is_or_under(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -452,12 +479,36 @@ mod tests {
 
     #[test]
     fn login_and_two_factor_urls_are_auth_challenges() {
-        let login = Url::parse("https://forge.example.com/user/login").unwrap();
+        let base = "https://forge.example.com";
+        let login = Url::parse("https://forge.example.com/user/login?redirect_to=%2F").unwrap();
         let two_factor = Url::parse("https://forge.example.com/user/two_factor").unwrap();
+        let scratch = Url::parse("https://forge.example.com/user/two_factor/scratch").unwrap();
         let settings = Url::parse("https://forge.example.com/user/settings").unwrap();
 
-        assert!(is_auth_challenge_url(&login));
-        assert!(is_auth_challenge_url(&two_factor));
-        assert!(!is_auth_challenge_url(&settings));
+        assert!(is_auth_challenge_url(base, &login));
+        assert!(is_auth_challenge_url(base, &two_factor));
+        assert!(is_auth_challenge_url(base, &scratch));
+        assert!(!is_auth_challenge_url(base, &settings));
+    }
+
+    #[test]
+    fn auth_challenge_detection_is_relative_to_the_base_path() {
+        let base = "https://apps.example.com/gitea";
+        let login = Url::parse("https://apps.example.com/gitea/user/login").unwrap();
+        let two_factor = Url::parse("https://apps.example.com/gitea/user/two_factor").unwrap();
+        let root_login = Url::parse("https://apps.example.com/user/login").unwrap();
+        let repo_file =
+            Url::parse("https://apps.example.com/gitea/owner/repo/src/branch/main/user/login")
+                .unwrap();
+        let repo_two_factor =
+            Url::parse("https://apps.example.com/gitea/owner/repo/user/two_factor").unwrap();
+        let lookalike = Url::parse("https://apps.example.com/gitea/user/loginx").unwrap();
+
+        assert!(is_login_url(base, &login));
+        assert!(is_two_factor_url(base, &two_factor));
+        assert!(is_login_url(base, &root_login));
+        assert!(!is_auth_challenge_url(base, &repo_file));
+        assert!(!is_auth_challenge_url(base, &repo_two_factor));
+        assert!(!is_auth_challenge_url(base, &lookalike));
     }
 }
