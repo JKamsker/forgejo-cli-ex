@@ -212,6 +212,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     &repo,
                     wait_workflow_filter,
                     previous_latest_run,
+                    &dispatch_ref,
                     wait_interval,
                     wait_timeout,
                 )
@@ -1172,6 +1173,7 @@ async fn wait_for_new_run_index(
     repo: &str,
     workflow: Option<&str>,
     previous_latest_run: Option<i64>,
+    dispatch_ref: &str,
     interval: Duration,
     timeout: Option<Duration>,
 ) -> eyre::Result<i64> {
@@ -1179,12 +1181,8 @@ async fn wait_for_new_run_index(
 
     loop {
         let runs = crate::ui_actions::list_runs(session, repo, workflow, 1, 20).await?;
-        if let Some(run) = runs
-            .iter()
-            .filter(|run| previous_latest_run.map_or(true, |previous| run.run_index > previous))
-            .max_by_key(|run| run.run_index)
-        {
-            return Ok(run.run_index);
+        if let Some(run_index) = select_dispatched_run(&runs, previous_latest_run, dispatch_ref) {
+            return Ok(run_index);
         }
 
         if has_timed_out(started_at, timeout) {
@@ -1198,6 +1196,36 @@ async fn wait_for_new_run_index(
 
         tokio::time::sleep(interval).await;
     }
+}
+
+/// Picks the run created by a `workflow_dispatch`: a run newer than the latest
+/// run seen before dispatching, whose ref label (when the run list shows one)
+/// matches the dispatched ref. Of several candidates the oldest is chosen:
+/// Forgejo creates the dispatched run before the dispatch request returns, so
+/// runs started concurrently afterwards receive higher indexes.
+fn select_dispatched_run(
+    runs: &[crate::ui_actions::RunRef],
+    previous_latest_run: Option<i64>,
+    dispatch_ref: &str,
+) -> Option<i64> {
+    runs.iter()
+        .filter(|run| previous_latest_run.is_none_or(|previous| run.run_index > previous))
+        .filter(|run| run_ref_matches_dispatch(run.branch.as_deref(), dispatch_ref))
+        .map(|run| run.run_index)
+        .min()
+}
+
+/// The run list labels runs with a short ref (`main`, `v1.0`), while dispatch
+/// uses a full ref (`refs/heads/main`). A run without a label is not excluded.
+fn run_ref_matches_dispatch(run_ref: Option<&str>, dispatch_ref: &str) -> bool {
+    let Some(run_ref) = run_ref.map(str::trim).filter(|run_ref| !run_ref.is_empty()) else {
+        return true;
+    };
+    let short_ref = dispatch_ref
+        .strip_prefix("refs/heads/")
+        .or_else(|| dispatch_ref.strip_prefix("refs/tags/"))
+        .unwrap_or(dispatch_ref);
+    run_ref == short_ref || run_ref == dispatch_ref
 }
 
 async fn wait_for_run_completion(
@@ -2402,5 +2430,70 @@ mod wait_tests {
     fn workflow_filter_for_wait_omits_numeric_dispatch_ids() {
         assert_eq!(workflow_filter_for_wait("12345"), None);
         assert_eq!(workflow_filter_for_wait("ci.yml"), Some("ci.yml"));
+    }
+
+    fn run(run_index: i64, branch: Option<&str>) -> crate::ui_actions::RunRef {
+        crate::ui_actions::RunRef {
+            run_index,
+            url: format!("https://forge.example/o/r/actions/runs/{run_index}"),
+            status: Some("Waiting".to_string()),
+            branch: branch.map(str::to_string),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn dispatched_run_must_be_newer_than_the_pre_dispatch_latest() {
+        let runs = vec![run(41, Some("main")), run(40, Some("main"))];
+        assert_eq!(
+            select_dispatched_run(&runs, Some(40), "refs/heads/main"),
+            Some(41)
+        );
+        assert_eq!(
+            select_dispatched_run(&runs, Some(41), "refs/heads/main"),
+            None
+        );
+        assert_eq!(
+            select_dispatched_run(&runs, None, "refs/heads/main"),
+            Some(40)
+        );
+    }
+
+    #[test]
+    fn numeric_workflow_wait_ignores_concurrent_runs_for_other_refs() {
+        // `--workflow 12345` cannot filter the run list, so concurrent runs of
+        // other workflows are candidates too; the dispatched ref narrows them.
+        assert_eq!(workflow_filter_for_wait("12345"), None);
+        let runs = vec![
+            run(52, Some("main")),
+            run(51, Some("feature/x")),
+            run(50, Some("main")),
+        ];
+        assert_eq!(
+            select_dispatched_run(&runs, Some(50), "refs/heads/feature/x"),
+            Some(51)
+        );
+        // Of several matching new runs, the oldest one is the dispatched run.
+        assert_eq!(
+            select_dispatched_run(&runs, Some(50), "refs/heads/main"),
+            Some(52)
+        );
+        let concurrent = vec![run(53, Some("main")), run(52, Some("main"))];
+        assert_eq!(
+            select_dispatched_run(&concurrent, Some(51), "main"),
+            Some(52)
+        );
+    }
+
+    #[test]
+    fn dispatch_ref_matching_accepts_short_labels_and_unlabeled_runs() {
+        assert!(run_ref_matches_dispatch(Some("main"), "refs/heads/main"));
+        assert!(run_ref_matches_dispatch(Some("v1.2"), "refs/tags/v1.2"));
+        assert!(run_ref_matches_dispatch(
+            Some("refs/heads/main"),
+            "refs/heads/main"
+        ));
+        assert!(run_ref_matches_dispatch(None, "refs/heads/main"));
+        assert!(!run_ref_matches_dispatch(Some("dev"), "refs/heads/main"));
     }
 }
