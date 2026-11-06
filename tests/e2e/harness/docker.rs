@@ -99,6 +99,12 @@ pub fn is_running(container: &str) -> bool {
     run(&["inspect", "-f", "{{.State.Running}}", container]).is_ok_and(|s| s == "true")
 }
 
+/// True only when Docker positively reports the container as not running
+/// (a failed `docker inspect` is not taken as an exit).
+pub fn has_exited(container: &str) -> bool {
+    run(&["inspect", "-f", "{{.State.Running}}", container]).is_ok_and(|s| s == "false")
+}
+
 /// Container ids (all states) carrying `label=value`.
 pub fn containers_with_label(label: &str, value: Option<&str>) -> Vec<String> {
     let filter = match value {
