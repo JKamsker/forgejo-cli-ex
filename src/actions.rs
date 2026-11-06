@@ -527,8 +527,21 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         )
                         .await?;
                         let job_index_i64 = job_index as i64;
+                        if follow {
+                            // Errors that retrying cannot fix are reported before
+                            // following; inside the loop every open error is taken
+                            // to mean the job has not started yet.
+                            session.check_job_logs_supported()?;
+                            let jobs = session.run_jobs(&repo, run_index).await?;
+                            if let Some(err) =
+                                follow_missing_job_error(&jobs, run_index, job_index_i64)
+                            {
+                                return Err(err);
+                            }
+                        }
                         let mut previous = Vec::new();
                         let mut run_status_tracker = RunStatusTracker::new(run_index);
+                        let mut announced_wait = false;
                         // Set once the run is known to be finished from the job snapshot
                         // fallback: one more log fetch picks up the final bytes.
                         let mut finishing: Option<Option<eyre::Report>> = None;
@@ -551,9 +564,20 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 // following until it starts or the run ends.
                                 Err(err) if follow => {
                                     let run_status =
-                                        session.find_run_status(&repo, run_index).await?.flatten();
-                                    if !follow_should_wait_for_log(run_status.as_deref()) {
+                                        run_status_tracker.poll(&session, &repo).await?;
+                                    if !follow_should_wait_for_log(
+                                        run_status.as_deref(),
+                                        run_status_tracker.is_terminal(),
+                                    ) {
                                         return Err(err);
+                                    }
+                                    if !std::mem::replace(&mut announced_wait, true) {
+                                        eprintln!(
+                                            "waiting for job {job_index_i64} of run #{run_index} to produce a log (run status: {})",
+                                            crate::output::sanitize_line(
+                                                run_status.as_deref().unwrap_or("unknown")
+                                            )
+                                        );
                                     }
                                     tokio::time::sleep(std::time::Duration::from_secs(
                                         follow_interval,
@@ -1885,9 +1909,30 @@ fn observed_at_unix_ms() -> u128 {
         .as_millis()
 }
 
-/// `logs job --follow` retries a missing log only while the run is still queued or running.
-fn follow_should_wait_for_log(run_status: Option<&str>) -> bool {
-    run_status_is_terminal(run_status) == Some(false)
+/// `logs job --follow` retries a missing log only while the run is still
+/// queued or running. A terminal status ends the retries only once it has been
+/// stable (`terminal_stable`, see [`observe_terminal_run_status`]).
+fn follow_should_wait_for_log(run_status: Option<&str>, terminal_stable: bool) -> bool {
+    match run_status_is_terminal(run_status) {
+        Some(false) => true,
+        Some(true) => !terminal_stable,
+        None => false,
+    }
+}
+
+/// `logs job --follow` on a job index the run does not have fails at once.
+fn follow_missing_job_error(
+    jobs: &[crate::ui_actions::JobInfo],
+    run_index: i64,
+    job_index: i64,
+) -> Option<eyre::Report> {
+    if jobs.is_empty() || find_job(jobs, job_index).is_some() {
+        return None;
+    }
+    Some(eyre!(
+        "Run #{run_index} has no job index {job_index} (it has {} job(s)).",
+        jobs.len()
+    ))
 }
 
 fn run_status_is_terminal(status: Option<&str>) -> Option<bool> {
@@ -2176,10 +2221,31 @@ mod tests {
 
     #[test]
     fn follow_waits_for_logs_only_while_the_run_is_active() {
-        assert!(follow_should_wait_for_log(Some("Waiting")));
-        assert!(follow_should_wait_for_log(Some("Running")));
-        assert!(!follow_should_wait_for_log(Some("Failure")));
-        assert!(!follow_should_wait_for_log(None));
+        assert!(follow_should_wait_for_log(Some("Waiting"), false));
+        assert!(follow_should_wait_for_log(Some("Running"), false));
+        // A terminal status must be seen twice before it ends the retries.
+        assert!(follow_should_wait_for_log(Some("Failure"), false));
+        assert!(!follow_should_wait_for_log(Some("Failure"), true));
+        assert!(!follow_should_wait_for_log(None, false));
+    }
+
+    #[test]
+    fn follow_rejects_a_job_index_the_run_does_not_have() {
+        let job = |job_index| crate::ui_actions::JobInfo {
+            run_index: 7,
+            job_index,
+            id: None,
+            name: None,
+            status: Some("running".into()),
+            can_rerun: None,
+            duration: None,
+        };
+        let jobs = vec![job(0), job(1)];
+        assert!(super::follow_missing_job_error(&jobs, 7, 1).is_none());
+        let err = super::follow_missing_job_error(&jobs, 7, 5).unwrap();
+        assert!(err.to_string().contains("no job index 5"), "{err}");
+        // An empty snapshot is not conclusive.
+        assert!(super::follow_missing_job_error(&[], 7, 5).is_none());
     }
 }
 

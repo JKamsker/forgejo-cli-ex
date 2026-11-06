@@ -377,6 +377,14 @@ impl ActionsClient {
         }
     }
 
+    /// Fail early when the backend cannot download job logs on this server.
+    pub fn check_job_logs_supported(&self) -> eyre::Result<()> {
+        match self {
+            Self::Ui(_) => Ok(()),
+            Self::Api(api) => api.require(crate::api_actions::ApiOp::JobLogs),
+        }
+    }
+
     /// Fail early when the backend cannot rerun failed jobs on this server.
     pub fn check_rerun_failed_supported(&self) -> eyre::Result<()> {
         match self {
