@@ -452,7 +452,12 @@ impl Stack {
     /// Dump server and runner logs: a tail to stderr and the full logs to
     /// `<work_dir>/logs/` (and `$FJ_EX_E2E_LOG_DIR/<stack id>/` when set).
     pub fn dump_logs(&self) {
-        let mut dirs = vec![self.work_dir.join("logs")];
+        let mut dirs = Vec::new();
+        // A temp work dir is deleted with the stack, so only keep logs there
+        // when the stack itself is kept.
+        if self.keep || self.temp.is_none() {
+            dirs.push(self.work_dir.join("logs"));
+        }
         if let Some(dir) = std::env::var_os("FJ_EX_E2E_LOG_DIR") {
             dirs.push(PathBuf::from(dir).join(&self.id));
         }
@@ -486,6 +491,12 @@ impl Stack {
                 "[{}] full container logs written to {}",
                 self.target.id,
                 dir.display()
+            );
+        }
+        if dirs.is_empty() {
+            eprintln!(
+                "[{}] set FJ_EX_E2E_LOG_DIR=<dir> (or FJ_EX_E2E_KEEP=1) to keep the full container logs",
+                self.target.id
             );
         }
     }
