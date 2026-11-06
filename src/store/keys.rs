@@ -51,11 +51,27 @@ pub fn get_fj_api_token_for_base_url(base_url: &str) -> eyre::Result<Option<Stri
     get_fj_api_token_for_base_url_from_store(&keys, base_url)
 }
 
+/// Looks up the token for `base_url`. A sub-path instance (`https://host/gitea`)
+/// is scoped to host+path first; tokens stored under the bare host (as before
+/// sub-path support) are used as a fallback for backward compatibility. Both
+/// lookups follow aliases.
 fn get_fj_api_token_for_base_url_from_store(
     keys: &KeysStore,
     base_url: &str,
 ) -> eyre::Result<Option<String>> {
-    let mut lookup_key = token_lookup_key(base_url)?;
+    let lookup_key = token_lookup_key(base_url)?;
+    if let Some(token) = resolve_token(keys, lookup_key.clone())? {
+        return Ok(Some(token));
+    }
+
+    let host_key = crate::target::normalize_host_key(&lookup_key)?;
+    if host_key == lookup_key {
+        return Ok(None);
+    }
+    resolve_token(keys, host_key)
+}
+
+fn resolve_token(keys: &KeysStore, mut lookup_key: String) -> eyre::Result<Option<String>> {
     let mut seen = std::collections::HashSet::new();
 
     // Follow aliases a few times to avoid accidental loops.
@@ -177,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn fj_keys_store_path_token_lookup_does_not_fall_back_to_host_key() {
+    fn fj_keys_store_path_token_lookup_falls_back_to_host_key() {
         let raw = r#"
 {
   "hosts": {
@@ -190,7 +206,39 @@ mod tests {
         let token =
             get_fj_api_token_for_base_url_from_store(&keys, "https://forge.example.com/gitea")
                 .unwrap();
-        assert_eq!(token, None);
+        assert_eq!(token.as_deref(), Some("root-token"));
+        let other_host =
+            get_fj_api_token_for_base_url_from_store(&keys, "https://other.example.com/gitea")
+                .unwrap();
+        assert_eq!(other_host, None);
+    }
+
+    #[test]
+    fn fj_keys_store_path_token_lookup_falls_back_to_host_aliases() {
+        let raw = r#"
+{
+  "hosts": {
+    "forge.example.com": { "token": "real-token" },
+    "https://other.example.com/gitea": { "token": "other-gitea-token" }
+  },
+  "aliases": {
+    "alias.example.com": "forge.example.com",
+    "https://alias.example.com/gitea": "https://other.example.com/gitea"
+  }
+}
+"#;
+
+        let keys: KeysStore = serde_json::from_str(raw).unwrap();
+        // A path-scoped alias wins over the host alias.
+        let token =
+            get_fj_api_token_for_base_url_from_store(&keys, "https://alias.example.com/gitea")
+                .unwrap();
+        assert_eq!(token.as_deref(), Some("other-gitea-token"));
+        // Without a path-scoped entry, the host alias is used.
+        let token =
+            get_fj_api_token_for_base_url_from_store(&keys, "https://alias.example.com/forgejo")
+                .unwrap();
+        assert_eq!(token.as_deref(), Some("real-token"));
     }
 
     #[test]
