@@ -114,24 +114,44 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
             }
             let head_commit = nonempty("--head-commit", head_commit)?;
             let title = nonempty("--title", title)?;
-            let response =
-                client
+            let body = serde_json::json!({
+                "Do": "merge",
+                "head_commit_id": head_commit,
+                "MergeTitleField": title,
+                "MergeMessageField": "",
+                "force_merge": force,
+                "merge_when_checks_succeed": false,
+            });
+            let mut attempt = 1;
+            let (status, detail) = loop {
+                let request = client
                     .post(format!("{api_root}/pulls/{index}/merge"))
-                    .json(&serde_json::json!({
-                        "Do": "merge",
-                        "head_commit_id": head_commit,
-                        "MergeTitleField": title,
-                        "MergeMessageField": "",
-                        "force_merge": force,
-                        "merge_when_checks_succeed": false,
-                    }));
-            let response = authenticate_request(response, &credentials)?
-                .send()
-                .await
-                .wrap_err("pull request merge request failed")?;
-            if response.status() != reqwest::StatusCode::OK {
+                    .json(&body);
+                let response = authenticate_request(request, &credentials)?
+                    .send()
+                    .await
+                    .wrap_err("pull request merge request failed")?;
                 let status = response.status();
+                if status == reqwest::StatusCode::OK {
+                    break (status, String::new());
+                }
                 let detail = read_error_detail(response).await;
+                if !is_transient_merge_refusal(status, &detail) || attempt >= MERGE_ATTEMPTS {
+                    break (status, detail);
+                }
+                // The server is (re)computing mergeability, e.g. right after
+                // the PR was created or its head changed.
+                tokio::time::sleep(MERGE_RETRY_DELAY * attempt).await;
+                attempt += 1;
+            };
+            if status != reqwest::StatusCode::OK {
+                if is_transient_merge_refusal(status, &detail) {
+                    return Err(eyre!(
+                        "Pull request merge not accepted: the server is still checking whether #{index} can be merged \
+                         (HTTP {status} \"Please try again later\" on all {MERGE_ATTEMPTS} attempts). Retry in a moment.{}",
+                        detail,
+                    ));
+                }
                 if status == reqwest::StatusCode::METHOD_NOT_ALLOWED {
                     return Err(eyre!(
                         "Pull request merge rejected: HTTP {status}. Forgejo uses 405 when the caller cannot merge the current PR state. \
@@ -146,6 +166,11 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
                     credentials.source_label(),
                     detail,
                 ));
+            }
+            if attempt > 1 {
+                eprintln!(
+                    "note: the server asked to retry the merge while it checked mergeability; merged on attempt {attempt}."
+                );
             }
             println!("Merged pull request #{index}.");
         }
@@ -364,6 +389,18 @@ fn complete_utf8_prefix_len(bytes: &[u8]) -> usize {
 
 /// Reads an error response body incrementally and returns its clipped detail
 /// without buffering an arbitrarily large body.
+/// Merge attempts while the server answers "Please try again later".
+const MERGE_ATTEMPTS: u32 = 6;
+const MERGE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Forgejo/Gitea answer a merge with 405 "Please try again later" while the
+/// PR's mergeability is still being checked. That is transient, unlike the
+/// permission/branch-protection 405s.
+fn is_transient_merge_refusal(status: reqwest::StatusCode, detail: &str) -> bool {
+    status == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        && detail.to_ascii_lowercase().contains("try again later")
+}
+
 pub(crate) async fn read_error_detail(mut response: Response) -> String {
     let mut prefix = BodyPrefix::new(ERROR_BODY_MAX_BYTES);
     // A body that fails mid-read still yields whatever arrived before.
@@ -526,8 +563,8 @@ fn format_review_line(review: &Value) -> String {
 mod tests {
     use super::{
         complete_utf8_prefix_len, format_comment_line, format_pull_line, format_review_line,
-        nonempty, read_body, request_base, response_detail, BodyPrefix, ERROR_BODY_MAX_BYTES,
-        ERROR_DETAIL_MAX_CHARS,
+        is_transient_merge_refusal, nonempty, read_body, request_base, response_detail, BodyPrefix,
+        ERROR_BODY_MAX_BYTES, ERROR_DETAIL_MAX_CHARS,
     };
     use crate::cli::{PullState, ReviewEvent};
 
@@ -631,6 +668,21 @@ mod tests {
         assert_eq!(complete_utf8_prefix_len(&"😀".as_bytes()[..3]), 0);
         assert_eq!(complete_utf8_prefix_len("😀".as_bytes()), 4);
         assert_eq!(complete_utf8_prefix_len(b""), 0);
+    }
+
+    #[test]
+    fn only_please_try_again_later_405s_are_retried() {
+        use reqwest::StatusCode;
+        let later = r#" Response: {"message":"Please try again later","url":"x"}"#;
+        assert!(is_transient_merge_refusal(
+            StatusCode::METHOD_NOT_ALLOWED,
+            later
+        ));
+        assert!(!is_transient_merge_refusal(
+            StatusCode::METHOD_NOT_ALLOWED,
+            r#" Response: {"message":"User not allowed to merge PR"}"#
+        ));
+        assert!(!is_transient_merge_refusal(StatusCode::CONFLICT, later));
     }
 
     #[test]
