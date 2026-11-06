@@ -175,6 +175,9 @@ impl ApiOp {
     }
 }
 
+/// What `wait` (and `trigger --wait`) need: the run's status and its jobs.
+pub const WAIT_OPS: &[ApiOp] = &[ApiOp::ListRuns, ApiOp::ListJobs];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Support {
     Yes,
@@ -1264,6 +1267,12 @@ mod tests {
         assert_eq!(support(&server("", false), ListRuns), Support::Unknown);
         // A Forgejo older than the oldest verified release lacks newer endpoints.
         assert!(no("14.0.2+gitea-1.22.0", RerunRun));
+
+        // `trigger --wait` is refused before dispatch where a wait cannot work.
+        let can_wait = |raw: &str| WAIT_OPS.iter().all(|op| !no(raw, *op));
+        assert!(!can_wait("15.0.11+gitea-1.22.0"));
+        assert!(can_wait("16.0.7+gitea-1.22.0"));
+        assert!(can_wait("1.25.5"));
     }
 
     #[test]

@@ -415,7 +415,9 @@ created before the dispatch request returns. The run list can only be filtered b
 name, so for an all-digit `--workflow` id the wait considers new runs of any workflow on the
 dispatched ref. `--interval` controls polling frequency and `--timeout` covers the whole wait. The
 same failure and timeout exit behavior as `actions wait` applies; with `--json`, a single JSON
-document with the final result (including a `trigger` object) is printed.
+document with the final result (including a `trigger` object) is printed. When the backend cannot wait
+on the server (a token on Forgejo 15, whose REST API cannot list a run's jobs), `--wait` fails before
+the workflow is dispatched.
 
 ---
 

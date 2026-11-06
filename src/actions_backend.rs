@@ -377,6 +377,16 @@ impl ActionsClient {
         }
     }
 
+    /// Fail early when the backend cannot wait for a run on this server.
+    pub fn check_wait_supported(&self) -> eyre::Result<()> {
+        match self {
+            Self::Ui(_) => Ok(()),
+            Self::Api(api) => crate::api_actions::WAIT_OPS
+                .iter()
+                .try_for_each(|op| api.require(*op)),
+        }
+    }
+
     /// Fail early when the backend cannot download job logs on this server.
     pub fn check_job_logs_supported(&self) -> eyre::Result<()> {
         match self {

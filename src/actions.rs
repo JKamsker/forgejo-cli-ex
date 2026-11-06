@@ -83,7 +83,11 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             let wait_interval = Duration::from_secs(interval.unwrap_or(2));
 
             let wait_client = if wait {
-                Some(crate::actions_backend::connect(backend, &target, &repo).await?)
+                let client = crate::actions_backend::connect(backend, &target, &repo).await?;
+                // Refuse before dispatching: a failed wait after the dispatch
+                // invites a retry that dispatches the workflow again.
+                client.check_wait_supported()?;
+                Some(client)
             } else {
                 None
             };
