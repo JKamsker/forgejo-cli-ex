@@ -38,10 +38,32 @@ pub fn env_flag(name: &str) -> bool {
     )
 }
 
+/// Marker for an error [`poll`] must not retry (e.g. the container exited).
+#[derive(Debug)]
+pub struct Fatal(pub String);
+
+impl std::fmt::Display for Fatal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Fatal {}
+
+/// An error that makes [`poll`] stop at once instead of retrying.
+pub fn fatal(msg: impl Into<String>) -> eyre::Report {
+    eyre::Report::new(Fatal(msg.into()))
+}
+
+fn is_fatal(e: &eyre::Report) -> bool {
+    e.chain().any(|c| c.is::<Fatal>())
+}
+
 /// Poll `check` until it returns `Ok(Some(_))` or `timeout` elapses.
 ///
 /// `Ok(None)` means "not yet"; an `Err` is remembered and reported on timeout
-/// (transient errors are expected while servers start up).
+/// (transient errors are expected while servers start up). An error made with
+/// [`fatal`] is returned at once.
 pub async fn poll<T, F, Fut>(
     what: &str,
     timeout: Duration,
@@ -58,6 +80,9 @@ where
         match check().await {
             Ok(Some(v)) => return Ok(v),
             Ok(None) => {}
+            Err(e) if is_fatal(&e) => {
+                return Err(e.wrap_err(format!("gave up waiting for {what}")));
+            }
             Err(e) => last_err = Some(e),
         }
         if started.elapsed() >= timeout {
@@ -116,6 +141,50 @@ mod tests {
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
         assert_eq!(base64(b"e2e:secret"), "ZTJlOnNlY3JldA==");
+    }
+
+    #[tokio::test]
+    async fn poll_returns_fatal_errors_at_once() {
+        let mut calls = 0u32;
+        let started = Instant::now();
+        let res: Result<()> = poll(
+            "a dead thing",
+            Duration::from_secs(30),
+            Duration::from_millis(10),
+            || {
+                calls += 1;
+                async { Err(fatal("container exited")) }
+            },
+        )
+        .await;
+        let err = res.expect_err("fatal error must fail the poll");
+        assert_eq!(calls, 1);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(format!("{err:?}").contains("container exited"));
+    }
+
+    #[tokio::test]
+    async fn poll_retries_ordinary_errors_until_success() {
+        let mut calls = 0u32;
+        let v = poll(
+            "a flaky thing",
+            Duration::from_secs(30),
+            Duration::from_millis(1),
+            || {
+                calls += 1;
+                let n = calls;
+                async move {
+                    if n < 3 {
+                        Err(eyre!("not yet"))
+                    } else {
+                        Ok(Some(n))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(v, 3);
     }
 
     #[test]

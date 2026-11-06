@@ -112,7 +112,7 @@ Environment variables:
 | variable              | effect |
 |-----------------------|--------|
 | `FJ_EX_E2E=1`         | enable the suite (otherwise every test is a no-op) |
-| `FJ_EX_E2E_TARGET`    | comma separated target ids to run (default: all) |
+| `FJ_EX_E2E_TARGET`    | comma separated target ids to run (default: all); an unknown id fails every test |
 | `FJ_EX_E2E_KEEP=1`    | keep containers and the work dir after the run; remove later with `down.sh` |
 | `FJ_EX_E2E_LOG_DIR`   | on failure, also write full server/runner/job container logs to `<dir>/<stack id>/` |
 

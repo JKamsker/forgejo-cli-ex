@@ -3,6 +3,7 @@
 use eyre::{ensure, eyre, Result};
 
 use super::Ctx;
+use crate::e2e::cli::redact_json;
 use crate::e2e::harness::api::Auth;
 
 pub async fn run(ctx: &Ctx<'_>) -> Result<()> {
@@ -15,23 +16,25 @@ pub async fn run(ctx: &Ctx<'_>) -> Result<()> {
         .cmd(&["token", "mint", "nuget", "--host", base, "--json"])
         .json()
         .await?;
+    // Assertion messages show the document with the API key masked.
+    let shown = redact_json(&minted);
     ensure!(
         minted["baseUrl"] == base && minted["owner"] == user.as_str(),
-        "mint: {minted}"
+        "mint: {shown}"
     );
     ensure!(
         minted["username"] == user.as_str(),
-        "mint username: {minted}"
+        "mint username: {shown}"
     );
     ensure!(
         minted["registryUrl"] == format!("{base}/api/packages/{user}/nuget/index.json").as_str(),
-        "registry url: {minted}"
+        "registry url: {shown}"
     );
-    ensure!(minted["scope"] == "write:package", "scope: {minted}");
+    ensure!(minted["scope"] == "write:package", "scope: {shown}");
     let api_key = minted["apiKey"]
         .as_str()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| eyre!("no apiKey: {minted}"))?;
+        .ok_or_else(|| eyre!("no apiKey: {shown}"))?;
     let write_name = minted["tokenName"]
         .as_str()
         .ok_or_else(|| eyre!("no tokenName"))?

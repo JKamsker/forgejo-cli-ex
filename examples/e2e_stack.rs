@@ -21,7 +21,7 @@ use std::process::ExitCode;
 
 use eyre::{eyre, Result};
 
-use harness::stack::{write_fj_keys_json, write_private, Stack, StackOptions};
+use harness::stack::{is_work_dir_of, write_fj_keys_json, write_private, Stack, StackOptions};
 use harness::{docker, targets};
 
 const USAGE: &str = "\
@@ -226,7 +226,7 @@ fn down(args: &[String]) -> Result<()> {
         for dir in work_dirs.iter().take(1) {
             let path = Path::new(dir);
             // Only delete directories the harness created for this stack.
-            if path.file_name().is_some_and(|n| n == id.as_str()) && path.is_dir() {
+            if is_work_dir_of(path, &id) && path.is_dir() {
                 std::fs::remove_dir_all(path)?;
                 println!("{id}: removed {}", path.display());
             }

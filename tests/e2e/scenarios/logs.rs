@@ -145,9 +145,17 @@ pub async fn run(ctx: &Ctx<'_>) -> Result<()> {
         .ok()
         .await?;
     ensure!(
-        !out.stderr.contains("== job 1"),
-        "--max-jobs 1 printed job 1:\n{}",
+        out.stderr.contains("== job 0") && !out.stderr.contains("== job 1"),
+        "--max-jobs 1 must print exactly job 0:\n{}",
         out.stderr
+    );
+    // Job 0's log is printed, and only one job's log.
+    let pass = out.stdout.contains("fj-ex-e2e: pass job ok");
+    let fail = out.stdout.contains("fj-ex-e2e: failing on purpose");
+    ensure!(
+        pass != fail,
+        "--max-jobs 1 must print exactly one job log (pass={pass}, fail={fail}):\n{}",
+        out.stdout
     );
     Ok(())
 }

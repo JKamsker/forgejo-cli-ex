@@ -225,11 +225,11 @@ impl Stack {
                 let api = api.clone();
                 let container = container.clone();
                 async move {
-                    if !docker::is_running(&container) {
-                        return Err(eyre!(
+                    if docker::has_exited(&container) {
+                        return Err(util::fatal(format!(
                             "server container exited:\n{}",
                             docker::logs(&container, Some(80))
-                        ));
+                        )));
                     }
                     Ok(api.version().await)
                 }
@@ -415,8 +415,11 @@ impl Stack {
                     if declared {
                         return Ok(Some(()));
                     }
-                    if !docker::is_running(&runner) {
-                        return Err(eyre!("runner container exited:\n{}", util::tail(&logs, 60)));
+                    if docker::has_exited(&runner) {
+                        return Err(util::fatal(format!(
+                            "runner container exited:\n{}",
+                            util::tail(&logs, 60)
+                        )));
                     }
                     Ok(None)
                 }
@@ -569,6 +572,23 @@ impl Drop for Stack {
     }
 }
 
+/// Whether `path` is a work directory the harness created for stack `id`:
+/// `<work-root>/<id>` (manual stacks) or the `<id>-XXXXXX` temp directory a
+/// kept automated run leaves behind (`FJ_EX_E2E_KEEP=1`).
+pub fn is_work_dir_of(path: &Path, id: &str) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if id.is_empty() {
+        return false;
+    }
+    name == id
+        || name
+            .strip_prefix(id)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|rand| !rand.is_empty() && rand.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
 /// Write a file readable only by the current user.
 pub fn write_private(path: &Path, contents: &str) -> Result<()> {
     #[cfg(unix)]
@@ -611,4 +631,47 @@ pub fn write_fj_keys_json(appdata: &Path, base_url: &str, token: &str) -> Result
     });
     write_private(&path, &serde_json::to_string_pretty(&json)?)?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_dir_matches_manual_and_kept_temp_dirs() {
+        let id = "fjex-e2e-forgejo-17-0a1b2c3d";
+        assert!(is_work_dir_of(
+            Path::new("/w/fjex-e2e-forgejo-17-0a1b2c3d"),
+            id
+        ));
+        // tempfile::Builder::prefix("{id}-") adds a random alphanumeric suffix.
+        assert!(is_work_dir_of(
+            Path::new("/tmp/fjex-e2e-forgejo-17-0a1b2c3d-Xy12Zq"),
+            id
+        ));
+    }
+
+    #[test]
+    fn work_dir_rejects_other_directories() {
+        let id = "fjex-e2e-forgejo-17-0a1b2c3d";
+        assert!(!is_work_dir_of(Path::new("/tmp"), id));
+        assert!(!is_work_dir_of(
+            Path::new("/tmp/fjex-e2e-forgejo-17-0a1b2c3d-"),
+            id
+        ));
+        assert!(!is_work_dir_of(
+            Path::new("/tmp/fjex-e2e-forgejo-17-0a1b2c3d-a/b"),
+            id
+        ));
+        assert!(!is_work_dir_of(
+            Path::new("/tmp/fjex-e2e-forgejo-17-0a1b2c3dX"),
+            id
+        ));
+        assert!(!is_work_dir_of(
+            Path::new("/tmp/fjex-e2e-forgejo-17-0a1b2c3d-x.y"),
+            id
+        ));
+        assert!(!is_work_dir_of(Path::new("/"), id));
+        assert!(!is_work_dir_of(Path::new("/tmp/x"), ""));
+    }
 }

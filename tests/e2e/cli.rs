@@ -104,18 +104,7 @@ impl Invocation<'_> {
     }
 
     fn display(&self) -> String {
-        // Env values may be tokens: show names only.
-        let mut s: String = self.envs.iter().map(|(k, _)| format!("{k}=*** ")).collect();
-        s.push_str("fj-ex");
-        for a in &self.args {
-            if a.is_empty() || a.contains(char::is_whitespace) {
-                s.push_str(&format!(" '{a}'"));
-            } else {
-                s.push(' ');
-                s.push_str(a);
-            }
-        }
-        s
+        display_command(&self.envs, &self.args)
     }
 
     /// Run and return the output regardless of the exit status.
@@ -210,6 +199,62 @@ impl Invocation<'_> {
     }
 }
 
+/// Options whose value is a secret; [`display_command`] masks it.
+const SECRET_OPTIONS: &[&str] = &["--token", "--password", "--otp", "--totp-secret"];
+
+/// JSON object keys whose values are secrets; [`redact_json`] masks them.
+const SECRET_KEYS: &[&str] = &["apiKey", "token", "password", "secret", "sha1"];
+
+/// The command line as logged: env values and secret option values are
+/// masked, since they may be tokens or passwords.
+fn display_command(envs: &[(String, String)], args: &[String]) -> String {
+    let mut s: String = envs.iter().map(|(k, _)| format!("{k}=*** ")).collect();
+    s.push_str("fj-ex");
+    let mut mask_next = false;
+    for a in args {
+        let shown = if mask_next {
+            mask_next = false;
+            "***".to_string()
+        } else if let Some((opt, _)) = a
+            .split_once('=')
+            .filter(|(opt, _)| SECRET_OPTIONS.contains(opt))
+        {
+            format!("{opt}=***")
+        } else {
+            mask_next = SECRET_OPTIONS.contains(&a.as_str());
+            a.clone()
+        };
+        if shown.is_empty() || shown.contains(char::is_whitespace) {
+            s.push_str(&format!(" '{shown}'"));
+        } else {
+            s.push(' ');
+            s.push_str(&shown);
+        }
+    }
+    s
+}
+
+/// A copy of `value` with secret fields (API keys, tokens, passwords) masked,
+/// for use in assertion messages.
+pub fn redact_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| {
+                    let v = if SECRET_KEYS.contains(&k.as_str()) && !v.is_null() {
+                        Value::String("***".into())
+                    } else {
+                        redact_json(v)
+                    };
+                    (k.clone(), v)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_json).collect()),
+        other => other.clone(),
+    }
+}
+
 pub fn clip(s: &str) -> String {
     const MAX: usize = 6000;
     if s.len() <= MAX {
@@ -220,4 +265,62 @@ pub fn clip(s: &str) -> String {
         cut += 1;
     }
     format!("…{}", &s[cut..])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn display_masks_secret_option_values_and_env_values() {
+        let envs = vec![("FJ_EX_TOKEN".to_string(), "envsecret".to_string())];
+        let args = strings(&[
+            "auth",
+            "login",
+            "--host",
+            "http://127.0.0.1:3000",
+            "--token",
+            "abc123secret",
+            "--password=pw secret",
+            "--json",
+        ]);
+        let shown = display_command(&envs, &args);
+        assert!(!shown.contains("abc123secret"), "{shown}");
+        assert!(!shown.contains("pw secret"), "{shown}");
+        assert!(!shown.contains("envsecret"), "{shown}");
+        assert_eq!(
+            shown,
+            "FJ_EX_TOKEN=*** fj-ex auth login --host http://127.0.0.1:3000 --token *** --password=*** --json"
+        );
+    }
+
+    #[test]
+    fn display_keeps_non_secret_flags() {
+        let args = strings(&["token", "list", "--token-stdin", "--name", "a b"]);
+        assert_eq!(
+            display_command(&[], &args),
+            "fj-ex token list --token-stdin --name 'a b'"
+        );
+    }
+
+    #[test]
+    fn redact_json_masks_nested_secret_fields() {
+        let v = json!({
+            "apiKey": "k1",
+            "owner": "e2e",
+            "nested": [{"token": "t1", "name": "n"}],
+            "password": null
+        });
+        let r = redact_json(&v);
+        let text = r.to_string();
+        assert!(!text.contains("k1") && !text.contains("t1"), "{text}");
+        assert_eq!(r["owner"], "e2e");
+        assert_eq!(r["nested"][0]["name"], "n");
+        assert!(r["password"].is_null());
+    }
 }

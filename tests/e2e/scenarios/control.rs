@@ -4,9 +4,11 @@
 use std::time::Duration;
 
 use eyre::{ensure, eyre, Result};
+use serde_json::Value;
 
 use super::common::{self, status_of};
 use super::Ctx;
+use crate::e2e::harness::api::Auth;
 
 pub async fn cancel(ctx: &Ctx<'_>) -> Result<()> {
     let repo = ctx.repo("slow-job");
@@ -253,6 +255,7 @@ pub async fn rerun(ctx: &Ctx<'_>) -> Result<()> {
             .is_some_and(|u| u.ends_with("/rerun") && u.contains("/jobs/")),
         "job rerun url: {v}"
     );
+    let before = api_run(ctx, &ci, ci_run).await?;
     let v = ctx
         .fj
         .cmd(&ctx.actions(
@@ -262,9 +265,10 @@ pub async fn rerun(ctx: &Ctx<'_>) -> Result<()> {
         .json()
         .await?;
     ensure!(v["requested"] == true, "job rerun: {v}");
-    rerun_settles(ctx, &ci, ci_run).await?;
+    rerun_settles(ctx, &ci, ci_run, &before).await?;
 
     ctx.step("rerun (whole run)");
+    let before = api_run(ctx, &ci, ci_run).await?;
     let out = ctx
         .fj
         .cmd(&ctx.actions(&ci, &["rerun", "--run-index", &ci_s]))
@@ -276,17 +280,48 @@ pub async fn rerun(ctx: &Ctx<'_>) -> Result<()> {
         "rerun output:\n{}",
         out.stdout
     );
-    rerun_settles(ctx, &ci, ci_run).await?;
+    rerun_settles(ctx, &ci, ci_run, &before).await?;
     Ok(())
 }
 
-/// After a rerun request the run must leave its old terminal state and reach success again.
-async fn rerun_settles(ctx: &Ctx<'_>, repo: &str, run: i64) -> Result<()> {
-    common::wait_jobs(ctx, repo, run, "picked up again or finished", |jobs| {
-        jobs.iter().all(|j| status_of(j) == "success")
-            || jobs.iter().any(|j| !common::is_terminal(&status_of(j)))
-    })
-    .await?;
+/// The run as the server's REST API reports it (read with the admin token,
+/// independent of fj-ex), matched by the number in its web URL.
+async fn api_run(ctx: &Ctx<'_>, repo: &str, run: i64) -> Result<Value> {
+    let list = ctx
+        .stack
+        .api
+        .get(
+            &format!("/repos/{repo}/actions/runs?limit=50"),
+            Auth::Token(&ctx.stack.admin.token),
+        )
+        .await?;
+    find_run_by_web_number(&list, run)
+        .ok_or_else(|| eyre!("run #{run} of {repo} is not in the API run list"))
+}
+
+/// The entry of a Forgejo/Gitea run list whose `html_url` ends in `/actions/runs/{run}`.
+fn find_run_by_web_number(list: &Value, run: i64) -> Option<Value> {
+    let items = list
+        .get("workflow_runs")
+        .or(Some(list))
+        .and_then(Value::as_array)?;
+    let suffix = format!("/actions/runs/{run}");
+    items
+        .iter()
+        .find(|r| {
+            r["html_url"]
+                .as_str()
+                .is_some_and(|u| u.trim_end_matches('/').ends_with(&suffix))
+        })
+        .cloned()
+}
+
+/// After a rerun request the run must really run again and reach success.
+///
+/// `before` is the server's record of the run (see [`api_run`]) taken before
+/// the request. A rerun resets and then re-records the run's start/stop times
+/// (and attempt, where reported), so an unchanged record means nothing reran.
+async fn rerun_settles(ctx: &Ctx<'_>, repo: &str, run: i64, before: &Value) -> Result<()> {
     let v = ctx
         .fj
         .cmd(&ctx.actions(
@@ -304,5 +339,37 @@ async fn rerun_settles(ctx: &Ctx<'_>, repo: &str, run: i64) -> Result<()> {
         .json()
         .await?;
     ensure!(v["status"] == "success", "rerun did not succeed: {v}");
+    let after = api_run(ctx, repo, run).await?;
+    ensure!(
+        &after != before,
+        "run #{run} of {repo} is unchanged after the rerun request (nothing was rerun): {after}"
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_runs_by_web_url_number() {
+        let forgejo: Value = serde_json::from_str(include_str!(
+            "../../../src/fixtures/api/forgejo-15-runs.json"
+        ))
+        .unwrap();
+        // Forgejo: web URL uses the per-repo index (id 3, index 2).
+        assert_eq!(find_run_by_web_number(&forgejo, 2).unwrap()["id"], 3);
+        assert!(find_run_by_web_number(&forgejo, 3).is_none());
+        let gitea: Value = serde_json::from_str(include_str!(
+            "../../../src/fixtures/api/gitea-1.27-runs.json"
+        ))
+        .unwrap();
+        // Gitea >= 1.26: web URL uses the run id.
+        assert_eq!(find_run_by_web_number(&gitea, 3).unwrap()["run_number"], 2);
+        assert_eq!(find_run_by_web_number(&gitea, 1).unwrap()["id"], 1);
+        assert!(find_run_by_web_number(&gitea, 2).is_none());
+        // `/runs/1` must not match `/runs/11`.
+        let list = serde_json::json!([{"html_url": "http://h/o/r/actions/runs/11"}]);
+        assert!(find_run_by_web_number(&list, 1).is_none());
+    }
 }

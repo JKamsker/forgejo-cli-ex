@@ -68,42 +68,78 @@ async fn expect_api(
             );
             Ok(Some(out))
         }
-        Api::Since(release) => {
-            ensure!(
-                !out.success(),
-                "{capability}: expected a refusal, got:\n{}",
-                out.stdout
-            );
-            let needle = format!("added in {release}");
-            ensure!(
-                out.stderr.contains(&needle),
-                "{capability}: expected {needle:?} in:\n{}",
-                out.stderr
-            );
-            ctx.note(&format!(
-                "GATED {capability}: {} has no REST endpoint (added in {release}); fj-ex refused as expected",
-                ctx.stack.target.label()
-            ));
-            Ok(None)
-        }
-        Api::No => {
-            ensure!(
-                !out.success(),
-                "{capability}: expected a refusal, got:\n{}",
-                out.stdout
-            );
-            ensure!(
-                out.stderr.contains("no endpoint for"),
-                "{capability}: expected \"no endpoint for\" in:\n{}",
-                out.stderr
-            );
-            ctx.note(&format!(
-                "GATED {capability}: {} REST API has no such endpoint; fj-ex refused as expected",
-                ctx.stack.target.label()
-            ));
+        gated => {
+            expect_refusal(ctx, capability, gated, &out)?;
             Ok(None)
         }
     }
+}
+
+/// Assert that fj-ex refused a token-only command the target's REST API
+/// cannot serve, with the "added in <release>" / "no endpoint for" message.
+fn expect_refusal(ctx: &Ctx<'_>, capability: &str, support: Api, out: &Output) -> Result<()> {
+    ensure!(
+        !out.success(),
+        "{capability}: expected a refusal, got:\n{}",
+        out.stdout
+    );
+    let needle = match support {
+        Api::Yes => return Err(eyre!("{capability}: supported, no refusal expected")),
+        Api::Since(release) => format!("added in {release}"),
+        Api::No => "no endpoint for".to_string(),
+    };
+    ensure!(
+        out.stderr.contains(&needle),
+        "{capability}: expected {needle:?} in:\n{}",
+        out.stderr
+    );
+    ctx.note(&match support {
+        Api::Since(release) => format!(
+            "GATED {capability}: {} has no REST endpoint (added in {release}); fj-ex refused as expected",
+            ctx.stack.target.label()
+        ),
+        _ => format!(
+            "GATED {capability}: {} REST API has no such endpoint; fj-ex refused as expected",
+            ctx.stack.target.label()
+        ),
+    });
+    Ok(())
+}
+
+/// Cancel a queued run (waiting.yml: no runner has its label) with only the
+/// token, and check that the server really canceled it.
+async fn token_cancel(ctx: &Ctx<'_>, fj: &FjEx, token: &str, repo: &str) -> Result<()> {
+    let before = common::latest_run_index(ctx, repo, "waiting.yml").await?;
+    ctx.fj
+        .cmd(&ctx.actions(
+            repo,
+            &["trigger", "--workflow", "waiting.yml", "--ref", "main"],
+        ))
+        .ok()
+        .await?;
+    let run = common::wait_new_run(ctx, repo, "waiting.yml", before).await?;
+    let out = fj
+        .cmd(&ctx.actions(repo, &["cancel", "--run-index", &run.to_string(), "--json"]))
+        .env("FJ_EX_TOKEN", token)
+        .output()
+        .await?;
+    ensure!(
+        !out.stdout.contains(token) && !out.stderr.contains(token),
+        "output leaked the API token"
+    );
+    ensure!(
+        out.success(),
+        "token-only cancel failed:\n{}\n{}",
+        out.stdout,
+        out.stderr
+    );
+    let v = out.json()?;
+    ensure!(v["canceled"] == true, "token cancel: {v}");
+    common::wait_run_status(ctx, repo, run, "canceled", Duration::from_secs(60), |s| {
+        s == "canceled"
+    })
+    .await?;
+    Ok(())
 }
 
 fn run_url_number(url: &str) -> Option<i64> {
@@ -251,7 +287,10 @@ pub async fn token_only_actions(ctx: &Ctx<'_>) -> Result<()> {
         );
     }
 
-    ctx.step("cancel --dry-run with only a token");
+    ctx.step("cancel with only a token");
+    if caps.api_cancel == Api::Yes {
+        token_cancel(ctx, &fj, &token, &dispatch).await?;
+    }
     if let Some(out) = expect_api(
         ctx,
         &fj,
@@ -290,6 +329,10 @@ pub async fn token_only_actions(ctx: &Ctx<'_>) -> Result<()> {
         .env("FJ_EX_TOKEN", &token)
         .fails()
         .await?;
+    ensure!(
+        !out.stdout.contains(&token) && !out.stderr.contains(&token),
+        "output leaked the API token"
+    );
     if caps.api_jobs == Api::Yes {
         ensure!(
             out.stderr.contains("failure"),
@@ -297,11 +340,8 @@ pub async fn token_only_actions(ctx: &Ctx<'_>) -> Result<()> {
             out.stderr
         );
     } else {
-        ctx.note(&format!(
-            "token-only wait on {} fails because jobs cannot be listed: {}",
-            ctx.stack.target.label(),
-            out.stderr.lines().next().unwrap_or_default()
-        ));
+        // `wait` needs the run's jobs: it must be refused like `jobs`, not fail otherwise.
+        expect_refusal(ctx, "api_jobs (wait)", caps.api_jobs, &out)?;
     }
 
     ctx.step("rerun --failed-only with only a token raises the attempt");

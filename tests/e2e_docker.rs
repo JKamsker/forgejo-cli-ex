@@ -29,14 +29,15 @@ e2e_target!(e2e_gitea_1_27_docker, "gitea-1-27");
 /// Every target in the table has a test above and a well-formed definition.
 #[test]
 fn target_table_is_consistent() {
-    use e2e::harness::targets::{Family, TARGETS};
+    use e2e::harness::targets::{test_name, Family, TARGETS};
     let source = include_str!("e2e_docker.rs");
     let mut ids = std::collections::HashSet::new();
     for t in TARGETS {
         assert!(ids.insert(t.id), "duplicate target id {}", t.id);
+        let line = format!("e2e_target!({}, \"{}\");", test_name(t.id), t.id);
         assert!(
-            source.contains(&format!("\"{}\")", t.id)),
-            "target {} has no e2e_target! test in tests/e2e_docker.rs",
+            source.lines().any(|l| l.trim() == line),
+            "target {} needs `{line}` in tests/e2e_docker.rs",
             t.id
         );
         assert!(
@@ -58,10 +59,47 @@ fn target_table_is_consistent() {
             t.id
         );
     }
+    // Every e2e_target! line names a target from the table.
+    for l in source.lines().map(str::trim) {
+        if let Some(rest) = l.strip_prefix("e2e_target!(") {
+            let id = rest.split('"').nth(1).unwrap_or_default();
+            assert!(
+                TARGETS.iter().any(|t| t.id == id),
+                "`{l}` names no target in TARGETS"
+            );
+        }
+    }
+    // CI matrix: each `target:` is a known id and is followed by its own `test_name:`.
     let ci = include_str!("../.github/workflows/ci.yml");
+    let lines: Vec<&str> = ci.lines().map(str::trim).collect();
+    let mut matrix = std::collections::HashMap::new();
+    for (i, l) in lines.iter().enumerate() {
+        let Some(id) = l.strip_prefix("target: ") else {
+            continue;
+        };
+        let id = id.trim();
+        assert!(
+            TARGETS.iter().any(|t| t.id == id),
+            "CI matrix target {id:?} is not in TARGETS"
+        );
+        let name = lines[i + 1..]
+            .iter()
+            .take_while(|l| !l.starts_with("- "))
+            .find_map(|l| l.strip_prefix("test_name: "))
+            .map(str::trim);
+        assert_eq!(
+            name,
+            Some(test_name(id).as_str()),
+            "CI matrix entry for {id} must run its own test"
+        );
+        assert!(
+            matrix.insert(id.to_string(), ()).is_none(),
+            "duplicate CI matrix target {id}"
+        );
+    }
     for t in TARGETS {
         assert!(
-            ci.contains(&format!("target: {}", t.id)),
+            matrix.contains_key(t.id),
             "target {} is missing from the CI e2e matrix",
             t.id
         );

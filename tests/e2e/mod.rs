@@ -23,7 +23,7 @@ pub async fn run_target(id: &str) -> Result<()> {
         eprintln!("skipping e2e {id}: set FJ_EX_E2E=1 to enable");
         return Ok(());
     }
-    if !targets::is_selected(id) {
+    if !targets::is_selected(id)? {
         eprintln!("skipping e2e {id}: not selected by FJ_EX_E2E_TARGET");
         return Ok(());
     }
