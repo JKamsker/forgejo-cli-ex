@@ -17,22 +17,38 @@ pub struct ApiClient {
 }
 
 impl ApiClient {
-    pub fn new(base_url: &str, token: &str) -> eyre::Result<Self> {
-        Self::new_with_socket(base_url, token, None)
-    }
-
     pub fn new_with_socket(
         base_url: &str,
         token: &str,
+        unix_socket: Option<&Path>,
+    ) -> eyre::Result<Self> {
+        let mut auth_value = HeaderValue::from_str(&format!("token {token}"))
+            .wrap_err("invalid api token for Authorization header")?;
+        auth_value.set_sensitive(true);
+        Self::build(base_url, Some(auth_value), unix_socket)
+    }
+
+    /// Client that authenticates every request with `auth` (token or basic).
+    pub fn from_auth(
+        base_url: &str,
+        auth: &crate::credentials::ApiAuth,
+        unix_socket: Option<&Path>,
+    ) -> eyre::Result<Self> {
+        Self::build(base_url, Some(auth.header_value()?), unix_socket)
+    }
+
+    fn build(
+        base_url: &str,
+        auth_value: Option<HeaderValue>,
         unix_socket: Option<&Path>,
     ) -> eyre::Result<Self> {
         let base_url = crate::target::normalize_base_url(base_url)?;
         let base_url = base_url.trim_end_matches('/').to_string();
 
         let mut headers = HeaderMap::new();
-        let auth_value = HeaderValue::from_str(&format!("token {token}"))
-            .wrap_err("invalid api token for Authorization header")?;
-        headers.insert(AUTHORIZATION, auth_value);
+        if let Some(auth_value) = auth_value {
+            headers.insert(AUTHORIZATION, auth_value);
+        }
 
         let mut builder = reqwest::Client::builder()
             .user_agent(USER_AGENT)
@@ -43,10 +59,17 @@ impl ApiClient {
         if let Some(socket_path) = unix_socket {
             builder = builder.unix_socket(socket_path);
         }
+        #[cfg(not(unix))]
+        let _ = unix_socket;
 
         let client = builder.build().wrap_err("failed to build http client")?;
 
         Ok(Self { base_url, client })
+    }
+
+    /// The underlying HTTP client (requests carry the configured credential).
+    pub fn http(&self) -> &reqwest::Client {
+        &self.client
     }
 
     pub fn api_v1_url(&self, path: &str) -> String {

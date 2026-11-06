@@ -1,7 +1,10 @@
 mod actions;
+mod actions_backend;
 mod api;
+mod api_actions;
 mod auth;
 mod cli;
+mod credentials;
 mod html;
 mod login;
 mod output;
@@ -69,7 +72,18 @@ fn is_broken_pipe_payload(payload: &(dyn Any + Send)) -> bool {
         .downcast_ref::<String>()
         .map(String::as_str)
         .or_else(|| payload.downcast_ref::<&str>().copied());
-    message.is_some_and(|message| message.contains("Broken pipe"))
+    message.is_some_and(is_stdio_broken_pipe_message)
+}
+
+/// Matches only the panic raised by `print!`/`eprint!` (and friends) when the
+/// reader of a standard stream has gone away, e.g.
+/// `failed printing to stdout: Broken pipe (os error 32)`. Unrelated panics
+/// that merely mention a broken pipe must still surface as failures.
+fn is_stdio_broken_pipe_message(message: &str) -> bool {
+    ["failed printing to stdout: ", "failed printing to stderr: "]
+        .iter()
+        .filter_map(|prefix| message.strip_prefix(prefix))
+        .any(|io_error| io_error.starts_with("Broken pipe"))
 }
 
 #[cfg(test)]
@@ -81,6 +95,23 @@ mod tests {
         let payload: Box<dyn std::any::Any + Send> =
             Box::new("failed printing to stdout: Broken pipe (os error 32)".to_string());
         assert!(is_broken_pipe_payload(payload.as_ref()));
+        assert!(is_broken_pipe_payload(
+            &"failed printing to stderr: Broken pipe (os error 32)"
+        ));
         assert!(!is_broken_pipe_payload(&"other panic"));
+    }
+
+    #[test]
+    fn ignores_unrelated_panics_that_mention_broken_pipe() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new(
+            "called `Result::unwrap()` on an `Err` value: Broken pipe (os error 32)".to_string(),
+        );
+        assert!(!is_broken_pipe_payload(payload.as_ref()));
+        assert!(!is_broken_pipe_payload(
+            &"failed writing cache: Broken pipe (os error 32)"
+        ));
+        assert!(!is_broken_pipe_payload(
+            &"failed printing to stdout: formatter error"
+        ));
     }
 }
