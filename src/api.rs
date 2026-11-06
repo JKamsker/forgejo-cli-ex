@@ -96,6 +96,97 @@ impl ApiClient {
         })
     }
 
+    /// Fetch a runner registration token from the first of `urls` that serves one.
+    ///
+    /// Forgejo and Gitea <= 1.26 answer `GET`; Gitea 1.27 removed the `GET`
+    /// routes in favour of `POST`. A 404/405 moves on to the next method/URL.
+    pub async fn registration_token(&self, urls: &[String]) -> eyre::Result<RegistrationToken> {
+        let mut attempts = Vec::new();
+        for url in urls {
+            for method in [reqwest::Method::GET, reqwest::Method::POST] {
+                let resp = self
+                    .client
+                    .request(method.clone(), url)
+                    .send()
+                    .await
+                    .wrap_err_with(|| format!("{method} {url} failed"))?;
+                let status = resp.status();
+                if registration_token_route_missing(status) {
+                    attempts.push(format!("{method} {url}: HTTP {status}"));
+                    continue;
+                }
+                let body = resp.bytes().await.wrap_err_with(|| {
+                    format!("failed to read response body from {method} {url}")
+                })?;
+                if !status.is_success() {
+                    return Err(eyre!(
+                        "{method} {url} failed: HTTP {status} (body_length={})",
+                        body.len()
+                    ));
+                }
+                return serde_json::from_slice(&body).wrap_err_with(|| {
+                    format!(
+                        "failed to decode JSON from {method} {url} (body_length={})",
+                        body.len()
+                    )
+                });
+            }
+        }
+        Err(eyre!(
+            "No runner registration token endpoint found:\n - {}",
+            attempts.join("\n - ")
+        ))
+    }
+
+    /// Runner job queue.
+    ///
+    /// Forgejo serves `.../actions/runners/jobs` (and answers `null` for an
+    /// empty queue). Gitea has no such route (404) but lists jobs at
+    /// `.../actions/jobs` in a GitHub-compatible shape; those are mapped to
+    /// Forgejo's vocabulary (`queued` -> `waiting`, `labels` -> `runs_on`) and
+    /// `labels` is applied client-side.
+    pub async fn runner_jobs(
+        &self,
+        url: &str,
+        base_jobs_url: &str,
+        labels: &[String],
+    ) -> eyre::Result<Vec<ActionRunJob>> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .wrap_err_with(|| format!("GET {url} failed"))?;
+        let gitea_url = gitea_jobs_url(base_jobs_url);
+        if resp.status() != reqwest::StatusCode::NOT_FOUND || gitea_url.is_none() {
+            let status = resp.status();
+            let body = resp
+                .bytes()
+                .await
+                .wrap_err_with(|| format!("failed to read response body from GET {url}"))?;
+            if !status.is_success() {
+                return Err(eyre!(
+                    "GET {url} failed: HTTP {status} (body_length={})",
+                    body.len()
+                ));
+            }
+            let jobs: Option<Vec<ActionRunJob>> = serde_json::from_slice(&body)
+                .wrap_err_with(|| format!("failed to decode JSON from GET {url}"))?;
+            return Ok(jobs.unwrap_or_default());
+        }
+
+        let gitea_url = format!("{}?limit=50", gitea_url.unwrap_or_default());
+        let listed: GiteaWorkflowJobs = self.get_json(&gitea_url).await?;
+        Ok(listed
+            .jobs
+            .into_iter()
+            .map(GiteaWorkflowJob::into_runner_job)
+            .filter(|job| {
+                labels.is_empty() || job.runs_on.iter().any(|l| labels.iter().any(|f| f == l))
+            })
+            .collect())
+    }
+
     pub async fn get_json_with_basic_auth<T: DeserializeOwned>(
         &self,
         url: &str,
@@ -169,6 +260,68 @@ impl ApiClient {
     }
 }
 
+/// Gitea's equivalent of a Forgejo `.../runners/jobs` URL.
+fn gitea_jobs_url(forgejo_jobs_url: &str) -> Option<String> {
+    let base = forgejo_jobs_url
+        .split('?')
+        .next()
+        .unwrap_or(forgejo_jobs_url);
+    if let Some(prefix) = base.strip_suffix("/admin/runners/jobs") {
+        return Some(format!("{prefix}/admin/actions/jobs"));
+    }
+    base.strip_suffix("/actions/runners/jobs")
+        .map(|prefix| format!("{prefix}/actions/jobs"))
+}
+
+/// One item of Gitea's `GET .../actions/jobs` (GitHub-compatible shape).
+#[derive(Deserialize, Debug)]
+struct GiteaWorkflowJob {
+    id: i64,
+    #[serde(default)]
+    name: String,
+    status: Option<String>,
+    conclusion: Option<String>,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Deserialize, Debug)]
+struct GiteaWorkflowJobs {
+    #[serde(default)]
+    jobs: Vec<GiteaWorkflowJob>,
+}
+
+impl GiteaWorkflowJob {
+    fn into_runner_job(self) -> ActionRunJob {
+        let status = match self.status.as_deref() {
+            Some("queued") | Some("waiting") | Some("pending") => Some("waiting".to_string()),
+            Some("in_progress") => Some("running".to_string()),
+            Some("completed") => self.conclusion.clone().or(self.status.clone()),
+            _ => self.status.clone(),
+        };
+        let mut extra = self.extra;
+        if let Some(conclusion) = self.conclusion {
+            extra.insert("conclusion".to_string(), Value::String(conclusion));
+        }
+        ActionRunJob {
+            id: self.id,
+            name: self.name,
+            status,
+            runs_on: self.labels,
+            extra,
+        }
+    }
+}
+
+fn registration_token_route_missing(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+    )
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RegistrationToken {
     pub token: String,
@@ -226,6 +379,58 @@ impl ActionRunJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gitea_jobs_urls_mirror_forgejo_runner_job_urls() {
+        assert_eq!(
+            gitea_jobs_url("http://h/api/v1/repos/o/r/actions/runners/jobs").as_deref(),
+            Some("http://h/api/v1/repos/o/r/actions/jobs")
+        );
+        assert_eq!(
+            gitea_jobs_url("http://h/api/v1/orgs/o/actions/runners/jobs?labels=a").as_deref(),
+            Some("http://h/api/v1/orgs/o/actions/jobs")
+        );
+        assert_eq!(
+            gitea_jobs_url("http://h/api/v1/user/actions/runners/jobs").as_deref(),
+            Some("http://h/api/v1/user/actions/jobs")
+        );
+        assert_eq!(
+            gitea_jobs_url("http://h/api/v1/admin/runners/jobs").as_deref(),
+            Some("http://h/api/v1/admin/actions/jobs")
+        );
+        assert_eq!(gitea_jobs_url("http://h/api/v1/other"), None);
+    }
+
+    #[test]
+    fn gitea_workflow_jobs_map_to_runner_jobs() {
+        let raw = r#"{"total_count": 2, "jobs": [
+            {"id": 4, "name": "queued", "status": "queued", "conclusion": null,
+             "labels": ["fjex-no-such-runner"], "run_id": 3},
+            {"id": 5, "name": "build", "status": "completed", "conclusion": "success",
+             "labels": ["ubuntu-latest"]}
+        ]}"#;
+        let listed: GiteaWorkflowJobs = serde_json::from_str(raw).unwrap();
+        let jobs: Vec<ActionRunJob> = listed
+            .jobs
+            .into_iter()
+            .map(GiteaWorkflowJob::into_runner_job)
+            .collect();
+        assert_eq!(jobs[0].status.as_deref(), Some("waiting"));
+        assert_eq!(jobs[0].runs_on, vec!["fjex-no-such-runner"]);
+        assert_eq!(jobs[0].extra.get("run_id"), Some(&serde_json::json!(3)));
+        assert_eq!(jobs[1].status.as_deref(), Some("success"));
+    }
+
+    #[test]
+    fn registration_token_falls_through_only_for_missing_routes() {
+        use reqwest::StatusCode;
+        assert!(registration_token_route_missing(StatusCode::NOT_FOUND));
+        assert!(registration_token_route_missing(
+            StatusCode::METHOD_NOT_ALLOWED
+        ));
+        assert!(!registration_token_route_missing(StatusCode::FORBIDDEN));
+        assert!(!registration_token_route_missing(StatusCode::OK));
+    }
 
     #[test]
     fn registration_token_deserializes() {

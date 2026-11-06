@@ -1688,7 +1688,12 @@ async fn run_runners(
             let (org_out, repo_out, url) =
                 resolve_runner_endpoint_url(&client, scope, org, target, "registration-token")?;
 
-            let reg: crate::api::RegistrationToken = client.get_json(&url).await?;
+            let mut urls = vec![url];
+            if scope == RunnerScope::Global {
+                // Gitea serves the global token under /admin/actions/runners.
+                urls.push(client.api_v1_url("/admin/actions/runners/registration-token"));
+            }
+            let reg = client.registration_token(&urls).await?;
 
             if json {
                 let payload = serde_json::json!({
@@ -1742,10 +1747,7 @@ async fn run_runners(
                 resolve_runner_endpoint_url(&client, scope, org, target, "jobs")?;
 
             let url = format!("{base_jobs_url}{labels_query}");
-            let mut jobs: Vec<crate::api::ActionRunJob> = client
-                .get_json::<Option<_>>(&url)
-                .await?
-                .unwrap_or_default();
+            let mut jobs = client.runner_jobs(&url, &base_jobs_url, &labels).await?;
 
             if waiting {
                 jobs.retain(|j| {
