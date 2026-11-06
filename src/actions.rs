@@ -1322,12 +1322,22 @@ fn is_snapshot_wait_target_done(
 
     if let Some(job_index) = job_index {
         if let Some(job) = find_job(jobs, job_index) {
-            return is_job_done(job);
+            return is_snapshot_job_final(jobs, job);
         }
         return is_run_done_from_jobs(jobs);
     }
 
     is_run_done_from_jobs(jobs)
+}
+
+/// Without a run-list status, a `blocked` job is final only when no job of
+/// the run is still in progress (e.g. the run awaits approval); otherwise it
+/// is waiting for its `needs`.
+fn is_snapshot_job_final(
+    jobs: &[crate::ui_actions::JobInfo],
+    job: &crate::ui_actions::JobInfo,
+) -> bool {
+    is_job_finished(job) || (is_job_done(job) && is_run_done_from_jobs(jobs))
 }
 
 fn find_job(
@@ -1357,7 +1367,8 @@ fn is_job_finished(job: &crate::ui_actions::JobInfo) -> bool {
 /// The selected job when its own status is final for this wait result.
 fn finished_wait_job(result: &WaitResult, job_index: i64) -> Option<&crate::ui_actions::JobInfo> {
     find_job(&result.jobs, job_index).filter(|job| {
-        is_job_finished(job) || (result.terminal_run_status.is_none() && is_job_done(job))
+        is_job_finished(job)
+            || (result.terminal_run_status.is_none() && is_snapshot_job_final(&result.jobs, job))
     })
 }
 
@@ -2000,7 +2011,7 @@ impl RunStatusTracker {
         repo: &str,
     ) -> eyre::Result<Option<String>> {
         let Some(status) = session.find_run_status(repo, self.run_index).await? else {
-            self.warn_missing_once();
+            self.warn_missing_once("was not found in the Actions run list");
             observe_terminal_run_status(
                 &mut self.terminal_status,
                 &mut self.terminal_observations,
@@ -2008,6 +2019,9 @@ impl RunStatusTracker {
             );
             return Ok(None);
         };
+        if status.is_none() {
+            self.warn_missing_once("has no recognizable status in the Actions run list");
+        }
         observe_terminal_run_status(
             &mut self.terminal_status,
             &mut self.terminal_observations,
@@ -2016,10 +2030,10 @@ impl RunStatusTracker {
         Ok(status)
     }
 
-    fn warn_missing_once(&mut self) {
+    fn warn_missing_once(&mut self, reason: &str) {
         if !std::mem::replace(&mut self.warned_missing, true) {
             eprintln!(
-                "warning: run #{} was not found in the Actions run list; falling back to the run page's job status, which may lag behind",
+                "warning: run #{} {reason}; falling back to the run page's job status, which may lag behind",
                 self.run_index
             );
         }
@@ -2389,6 +2403,16 @@ mod wait_tests {
 
         // A run that stays blocked (e.g. awaiting approval) still ends the wait.
         assert!(is_wait_target_done(&jobs, Some(1), Some("Blocked"), true));
+        // Without a run-list status, the job snapshot shows job 0 still
+        // running, so the blocked job 1 is waiting for its needs.
+        assert!(!is_wait_target_done(&jobs, Some(1), None, false));
+        let snapshot = result(None, jobs.clone());
+        assert!(wait_terminal_error(&snapshot, Some(1)).is_none());
+        assert_eq!(wait_target_status(&snapshot, Some(1)), "blocked");
+        // Once nothing else is in progress, a blocked job is final.
+        let stuck = vec![job(0, Some("success")), job(1, Some("blocked"))];
+        assert!(is_wait_target_done(&stuck, Some(1), None, false));
+        assert!(wait_terminal_error(&result(None, stuck), Some(1)).is_some());
         let blocked = result(Some("Blocked"), jobs);
         assert!(wait_terminal_error(&blocked, Some(1)).is_some());
     }

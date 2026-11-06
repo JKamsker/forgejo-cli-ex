@@ -323,7 +323,8 @@ Flags: `--run-index N` or `--latest` (with optional `--workflow FILE`), `--job-i
 
 Like `actions jobs --watch`, `actions wait` treats a terminal status from the Actions run list
 (observed twice) as authoritative over a lagging job snapshot; if the run cannot be found in the
-run list, it warns once on stderr and falls back to the job statuses. With `--job-index`, the wait
+run list (or its status there is not recognized), it warns once on stderr and falls back to the job
+statuses. In that fallback a `blocked` job only ends the wait once no other job is in progress. With `--job-index`, the wait
 also ends as soon as that job finishes while the rest of the run continues; `cancelling` jobs and
 jobs still `blocked` on their `needs` keep the wait going.
 
