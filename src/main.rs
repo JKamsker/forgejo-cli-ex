@@ -44,6 +44,9 @@ fn main() -> ExitCode {
 
     match panic::catch_unwind(AssertUnwindSafe(|| runtime.block_on(run()))) {
         Ok(Ok(())) => ExitCode::SUCCESS,
+        // Streamed output (job logs) is written with async writes, which
+        // report a closed pipe as an error instead of panicking.
+        Ok(Err(error)) if is_closed_output_error(&error) => ExitCode::SUCCESS,
         Ok(Err(error)) => {
             eprintln!("{error:?}");
             ExitCode::FAILURE
@@ -67,6 +70,21 @@ async fn run() -> eyre::Result<()> {
     }
 }
 
+/// Whether an error is a broken pipe from writing our own output, as opposed
+/// to an HTTP connection (whose I/O errors are wrapped in `reqwest::Error`).
+fn is_closed_output_error(error: &eyre::Report) -> bool {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
+    {
+        return false;
+    }
+    error
+        .root_cause()
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+}
+
 fn is_broken_pipe_payload(payload: &(dyn Any + Send)) -> bool {
     let message = payload
         .downcast_ref::<String>()
@@ -88,7 +106,21 @@ fn is_stdio_broken_pipe_message(message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_broken_pipe_payload;
+    use super::{is_broken_pipe_payload, is_closed_output_error};
+    use eyre::WrapErr;
+
+    #[test]
+    fn treats_a_closed_output_pipe_as_success() {
+        let broken_pipe = || std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        assert!(is_closed_output_error(&eyre::Report::new(broken_pipe())));
+        let wrapped: eyre::Result<()> =
+            Err(broken_pipe()).wrap_err("failed to write response body chunk");
+        assert!(is_closed_output_error(&wrapped.unwrap_err()));
+
+        let other = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(!is_closed_output_error(&eyre::Report::new(other)));
+        assert!(!is_closed_output_error(&eyre::eyre!("Broken pipe")));
+    }
 
     #[test]
     fn detects_stdio_broken_pipe_panic() {
