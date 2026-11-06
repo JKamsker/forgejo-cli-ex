@@ -11,11 +11,13 @@ See the main [README](../README.md) for install and quickstart.
 fj-ex auth login --host forge.example.com                      # interactive
 fj-ex auth login --host forge.example.com --username my-user --password-stdin
 fj-ex auth login --host forge.example.com --username my-user --password-stdin --otp-stdin
+fj-ex auth login --host forge.example.com --token-stdin          # API token (automation, SSO)
+fj-ex auth login --host forge.example.com --session-cookie-stdin # SSO browser session
 fj-ex auth status --host forge.example.com
 fj-ex auth list
 fj-ex auth show   --host forge.example.com
-fj-ex auth logout --host forge.example.com
-fj-ex auth clear-cookies --host forge.example.com
+fj-ex auth logout --host forge.example.com          # removes password, session and stored token
+fj-ex auth clear-cookies --host forge.example.com   # keeps password/token; removes an imported session
 ```
 
 Password via stdin (preferred over `--password`):
@@ -39,11 +41,67 @@ Environment variable fallbacks:
 
 Legacy alias: `fj-ex login --host forge.example.com`
 
+### API token login
+
+Store a Forgejo/Gitea personal access token instead of (or in addition to) a password:
+
+```sh
+printf '%s\n' "$TOKEN" | fj-ex auth login --host forge.example.com --token-stdin
+fj-ex auth login --host forge.example.com --token-stdin          # prompts without echo on a terminal
+fj-ex auth login --host forge.example.com --token "$TOKEN"       # works, but warns: visible in the process list
+```
+
+The token is validated with `GET /api/v1/user` before it is stored. A token without the
+`read:user` scope is accepted with a warning (the username is then unknown). A stored password or
+imported session for the same host is kept; the token is added next to it.
+
+Instead of storing a token, commands also read one from the environment. Token precedence:
+
+1. token stored by `fj-ex auth login --token-stdin` / `--token` for the base URL
+2. `FJ_EX_TOKEN`, then `FORGEJO_TOKEN`, then `GITEA_TOKEN`
+3. the official `fj` CLI's `keys.json` token for the host
+
+Recommended scopes: `read:repository` (runs, jobs, logs, artifacts), plus `write:repository` for
+cancel/rerun/dispatch/secrets/variables. `read:user` is optional (lets `auth status` show the user).
+
+### SSO accounts: import a browser session
+
+Accounts that sign in through OAuth2/OIDC/SAML have no password. Use a token (above), or import the
+session cookie of a logged-in browser tab:
+
+```sh
+fj-ex auth login --host forge.example.com --session-cookie-stdin                 # paste when prompted (no echo)
+printf '%s\n' "$COOKIE_VALUE" | fj-ex auth login --host forge.example.com --session-cookie-stdin
+printf '%s\n' 'session=abc; persistent=def' | fj-ex auth login --host forge.example.com --session-cookie-stdin
+printf '%s\n' "$COOKIE_VALUE" | fj-ex auth login --host forge.example.com --session-cookie-stdin --cookie-name my_cookie
+```
+
+Accepted input: a bare cookie value, `name=value`, or a full `Cookie:` header. For a bare value the
+names `session` (current Forgejo), `i_like_gitea` (Gitea, older Forgejo) and `i_like_forgejo` are
+tried; pass `--cookie-name` for a custom `[session] COOKIE_NAME`. The session is validated by
+loading `/user/settings`; it is stored as a `session` login and used for UI commands. It cannot be
+renewed automatically: once it expires, commands fail with "The imported browser session … has
+expired" and suggest re-importing it or using a token. Including the remember-me cookie
+(`persistent` on Forgejo, `gitea_incredible` on Gitea) lets the server re-create sessions until
+that cookie expires. `auth clear-cookies` removes an imported session.
+
+### Inspecting logins
+
+```sh
+fj-ex auth status --host forge.example.com --json   # credentialKind, sessionOk, tokenSource, tokenOk
+fj-ex auth list                                    # e.g. alice@forge.example.com (password + token)
+```
+
+`auth status` checks the UI session (re-logging in with a stored password unless `--no-relogin`)
+and validates any API token (stored, environment, or `fj` keys.json). It succeeds when at least one
+credential works and warns about the others. Secrets are never printed.
+
 ---
 
 ## token mint nuget
 
-Create a NuGet API key using the stored `fj` API token plus the stored `fj-ex` username/password:
+Create a NuGet API key using the stored `fj-ex` username/password (Forgejo only creates access
+tokens through the API with basic auth; SSO accounts create package tokens in the web UI):
 
 ```sh
 fj-ex token mint nuget --host forge.example.com --owner my-org
@@ -78,8 +136,48 @@ fj-ex token list --host forge.example.com --json
 
 Default behavior:
 
-- Resolves the authenticated user from the stored `fj` API token
+- Resolves the authenticated user from the API token (stored by `fj-ex auth login --token-stdin`,
+  `FJ_EX_TOKEN`/`FORGEJO_TOKEN`/`GITEA_TOKEN`, or `fj`'s keys.json)
 - Lists token id, name, last eight characters, and scopes
+
+---
+
+## actions backends (`--backend`)
+
+`fj-ex actions …` can use the web UI (cookie session) or the REST API (API token):
+
+```sh
+fj-ex actions --backend auto ...   # default
+fj-ex actions --backend ui   ...   # always the web UI (password or imported session)
+fj-ex actions --backend api  ...   # always the REST API (token, else basic auth with the stored password)
+```
+
+`auto` uses the UI when a password or session login is stored for the host, otherwise the API
+token. When the UI session cannot be established (for example an expired imported session) and a
+token is available, it falls back to the API and prints a warning.
+
+REST API coverage verified against the servers' `/swagger.v1.json` and live instances:
+
+| Operation (token only) | Forgejo 15 | Forgejo 16 | Forgejo 17 | Gitea 1.25 | Gitea 1.26 | Gitea 1.27 |
+|---|---|---|---|---|---|---|
+| `runs` (incl. `--workflow`, `--latest`) | yes | yes | yes | yes | yes | yes |
+| `trigger` (dispatch; `--wait` needs `jobs`) | yes | yes | yes | yes | yes | yes |
+| `jobs`, `jobs --watch`, `wait` | – | yes | yes | yes | yes | yes |
+| `logs job` (incl. `--follow`), `logs run` | – | yes | yes | yes | yes | yes |
+| `logs job --attempt <older attempt>` | – | yes | yes | – | – | yes |
+| `artifacts list` / `artifacts get` | – | yes | yes | yes | yes | yes |
+| `cancel` | – | yes | yes | – | – | – |
+| `rerun`, `rerun --job-index` | – | – | yes | – | yes | yes |
+| `rerun --failed-only` | – | – | yes (per job) | – | yes | yes |
+| `workflows` | – | – | – | yes | yes | yes |
+| `smoke-test` | UI only | UI only | UI only | UI only | UI only | UI only |
+
+When an operation has no endpoint on the server, the command fails with an explanation and asks
+for a UI login (`fj-ex auth login`, or `--session-cookie-stdin` for SSO) instead.
+
+`--run-index` is always the number in the run's web URL. That is the per-repository run number on
+Forgejo and Gitea <= 1.25, and the run id on Gitea >= 1.26; the API backend resolves it to the run
+id automatically. `--job-index` is the 0-based position in the run's job list (web UI order).
 
 ---
 
@@ -96,11 +194,11 @@ fj-ex actions runs --repo owner/name --workflow ci.yml
 
 ## pulls
 
-All pull commands use the stored `fj` API token when available and otherwise
-fall back to the `fj-ex` UI login's Basic credentials. Error output never
-prints either credential. Human-readable output replaces control characters in
-server-provided text (titles, refs, user names, bodies); `--json` output is the
-unmodified API response.
+All pull commands use an API token when available (see the token precedence
+under `auth`) and otherwise fall back to the `fj-ex` password login's Basic
+credentials. Error output never prints either credential. Human-readable output
+replaces control characters in server-provided text (titles, refs, user names,
+bodies); `--json` output is the unmodified API response.
 
 | Command | Flags |
 |---|---|
@@ -332,8 +430,9 @@ On failure only the HTTP status is reported, never the server's response body.
 
 ## actions runners
 
-These commands use the Forgejo REST API and require being authenticated via the official `fj` CLI
-(API token stored by `fj`).
+These commands use the Forgejo REST API and require an API token: one stored with
+`fj-ex auth login --token-stdin`, `FJ_EX_TOKEN` / `FORGEJO_TOKEN` / `GITEA_TOKEN`, or the token
+stored by the official `fj` CLI.
 
 Runner registration tokens:
 
@@ -361,9 +460,11 @@ fj-ex actions runners jobs --repo owner/name --waiting
 fj-ex actions runners jobs --scope global --label self-hosted --label linux
 ```
 
-If you get a "No Forgejo API token found" error, authenticate via `fj`:
+If you get a "No Forgejo API token found" error, provide a token:
 
 ```sh
+printf '%s\n' "$TOKEN" | fj-ex auth login --host forge.example.com --token-stdin
+# or authenticate via `fj`
 fj --host forge.example.com auth login
 fj --host forge.example.com auth add-key <USER>
 ```

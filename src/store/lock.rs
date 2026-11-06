@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ffi::OsString,
     fs::{File, OpenOptions},
     io::ErrorKind,
@@ -17,7 +18,20 @@ const REQUIRED_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const OPTIONAL_LOCK_TIMEOUT: Duration = Duration::from_millis(0);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
 
-static CREDS_STORE_PROCESS_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+// One in-process mutex per store file. Production uses a single store; keying by
+// path keeps independent stores (e.g. parallel tests) from contending, which
+// would make best-effort (optional) saves skip spuriously.
+static CREDS_STORE_PROCESS_MUTEXES: LazyLock<Mutex<HashMap<PathBuf, &'static Mutex<()>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn process_mutex_for(store_path: &Path) -> &'static Mutex<()> {
+    let mut mutexes = CREDS_STORE_PROCESS_MUTEXES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    mutexes
+        .entry(store_path.to_path_buf())
+        .or_insert_with(|| Box::leak(Box::new(Mutex::new(()))))
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(super) enum StoreLockMode {
@@ -95,9 +109,10 @@ fn acquire_process_lock(
     mode: StoreLockMode,
     timeout: Duration,
 ) -> eyre::Result<Option<MutexGuard<'static, ()>>> {
+    let mutex = process_mutex_for(store_path);
     let start = Instant::now();
     loop {
-        match CREDS_STORE_PROCESS_MUTEX.try_lock() {
+        match mutex.try_lock() {
             Ok(guard) => return Ok(Some(guard)),
             Err(TryLockError::WouldBlock) => {
                 if start.elapsed() >= timeout {

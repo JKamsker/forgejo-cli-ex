@@ -33,6 +33,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
         args.target.repo.as_ref(),
         args.target.remote.as_deref(),
     )?;
+    let backend = args.backend;
 
     match args.command {
         ActionsSubcommand::Secrets { command } => {
@@ -81,22 +82,17 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             let wait_timeout = parse_optional_duration(timeout.as_deref())?;
             let wait_interval = Duration::from_secs(interval.unwrap_or(2));
 
-            let wait_session = if wait {
-                Some(
-                    crate::session::UiSession::from_store_with_socket(
-                        &target.base_url,
-                        false,
-                        target.unix_socket.as_deref(),
-                    )
-                    .await?,
-                )
+            let wait_client = if wait {
+                Some(crate::actions_backend::connect(backend, &target, &repo).await?)
             } else {
                 None
             };
 
             let wait_workflow_filter = workflow_filter_for_wait(workflow);
-            let previous_latest_run = if let Some(session) = wait_session.as_ref() {
-                latest_run_index_optional(session, &repo, wait_workflow_filter).await?
+            let previous_latest_run = if let Some(client) = wait_client.as_ref() {
+                client
+                    .latest_run_index_optional(&repo, wait_workflow_filter)
+                    .await?
             } else {
                 None
             };
@@ -142,14 +138,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 return Ok(());
             }
 
-            let creds = crate::store::get_ui_creds(&target.base_url)
+            let auth = crate::credentials::resolve_api_auth(&target.base_url)
                 .await?
-                .ok_or_else(|| {
-                    eyre!(
-                        "No stored UI creds for '{}'. Run `fj-ex auth login` first.",
-                        target.base_url
-                    )
-                })?;
+                .ok_or_else(|| crate::credentials::missing_api_auth_error(&target.base_url))?;
 
             let mut builder = reqwest::Client::builder()
                 .user_agent(concat!(
@@ -166,10 +157,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
 
             let client = builder.build().wrap_err("failed to build http client")?;
 
-            let resp = client
-                .post(&url)
-                .basic_auth(&creds.username, Some(&creds.password))
-                .json(&body)
+            let resp = auth
+                .apply(client.post(&url).json(&body))?
                 .send()
                 .await
                 .wrap_err("trigger request failed")?;
@@ -179,8 +168,18 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 && status != reqwest::StatusCode::OK
                 && status != reqwest::StatusCode::CREATED
             {
-                let detail = crate::pulls::read_error_detail(resp).await;
-                return Err(eyre!("Trigger failed: HTTP {status}.{detail}"));
+                // The response body is not included: it may echo request data.
+                return Err(eyre!(
+                    "Trigger failed: HTTP {} (authenticated with the {}).{}",
+                    status,
+                    auth.source_label(),
+                    match status.as_u16() {
+                        401 => " The credential was rejected.",
+                        403 => " The credential lacks permission (tokens need the write:repository scope).",
+                        404 => " Check the repository and workflow file name.",
+                        _ => "",
+                    }
+                ));
             }
 
             if json {
@@ -203,9 +202,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
             }
 
             if wait {
-                let session = wait_session
+                let session = wait_client
                     .as_ref()
-                    .expect("wait session must exist when --wait is set");
+                    .expect("wait client must exist when --wait is set");
                 let wait_started_at = Instant::now();
                 let run_index = wait_for_new_run_index(
                     session,
@@ -244,19 +243,30 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 }
             }
         }
+        ActionsSubcommand::SmokeTest(args) => {
+            // The smoke test exercises the web UI endpoints and builds its own session.
+            let repo = require_repo_owned(&target)?;
+            let cmd = crate::cli::SmokeTestCommand {
+                target: crate::cli::TargetArgs {
+                    host: Some(target.base_url.clone()),
+                    repo: Some(
+                        repo.parse::<crate::target::RepoArg>()
+                            .map_err(|e| eyre!(e))?,
+                    ),
+                    remote: None,
+                },
+                opts: args,
+            };
+            crate::smoke_test::run(cmd).await?;
+        }
         command => {
             let repo = require_repo_owned(&target)?;
-            let session = crate::session::UiSession::from_store_with_socket(
-                &target.base_url,
-                false,
-                target.unix_socket.as_deref(),
-            )
-            .await?;
+            let client = crate::actions_backend::connect(backend, &target, &repo).await?;
+            let session = &client;
 
             match command {
                 ActionsSubcommand::Workflows { page, limit, json } => {
-                    let workflows =
-                        crate::ui_actions::list_workflows(&session, &repo, page, limit).await?;
+                    let workflows = session.list_workflows(&repo, page, limit).await?;
                     if json {
                         let payload = serde_json::json!({
                             "baseUrl": target.base_url,
@@ -286,14 +296,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                 } => {
                     let page = if latest { 1 } else { page };
                     let limit = if latest { 1 } else { limit };
-                    let mut runs = crate::ui_actions::list_runs(
-                        &session,
-                        &repo,
-                        workflow.as_deref(),
-                        page,
-                        limit,
-                    )
-                    .await?;
+                    let mut runs = session
+                        .list_runs(&repo, workflow.as_deref(), page, limit)
+                        .await?;
 
                     if let Some(filter) = status.as_deref() {
                         let filter = normalize_run_status_filter(filter)?;
@@ -361,7 +366,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     json_lines,
                 } => {
                     let run_index =
-                        resolve_run_index(&session, &repo, run_index, latest, workflow.as_deref())
+                        resolve_run_index(session, &repo, run_index, latest, workflow.as_deref())
                             .await?;
 
                     if watch && watch_interval == 0 {
@@ -376,10 +381,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         // The job state embedded in a run page can lag behind the Actions
                         // list. The list is the authoritative source for a terminal run.
                         let run_status = run_status_tracker.poll(&session, &repo).await?;
-                        let view = crate::ui_actions::get_run_view_data(&session, &repo, run_index)
-                            .await
-                            .wrap_err("failed to load run view")?;
-                        let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+                        let jobs = session.run_jobs(&repo, run_index).await?;
 
                         let sig = jobs
                             .iter()
@@ -490,14 +492,14 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     json,
                 } => {
                     let run_index =
-                        resolve_run_index(&session, &repo, run_index, latest, workflow.as_deref())
+                        resolve_run_index(session, &repo, run_index, latest, workflow.as_deref())
                             .await?;
                     let timeout = parse_optional_duration(timeout.as_deref())?;
                     let interval = Duration::from_secs(interval);
                     let job_index = job_index.map(i64::from);
 
                     let result = wait_for_run_completion(
-                        &session, &repo, run_index, job_index, interval, timeout,
+                        session, &repo, run_index, job_index, interval, timeout,
                     )
                     .await?;
                     print_wait_result(&target.base_url, &repo, &result, job_index, json, None)?;
@@ -517,7 +519,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         follow_interval,
                     } => {
                         let run_index = resolve_run_index(
-                            &session,
+                            session,
                             &repo,
                             run_index,
                             latest,
@@ -534,24 +536,12 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             let attempt = match attempt {
                                 Some(a) => a.get() as i64,
                                 None => {
-                                    crate::ui_actions::get_job_view_meta(
-                                        &session,
-                                        &repo,
-                                        run_index,
-                                        job_index_i64,
-                                    )
-                                    .await?
-                                    .attempt_number
+                                    session.job_attempt(&repo, run_index, job_index_i64).await?
                                 }
                             };
-                            let resp = crate::ui_actions::open_job_logs(
-                                &session,
-                                &repo,
-                                run_index,
-                                job_index_i64,
-                                attempt,
-                            )
-                            .await?;
+                            let resp = session
+                                .open_job_logs(&repo, run_index, job_index_i64, attempt)
+                                .await?;
 
                             if !follow {
                                 if let Some(out_file) = out_file.as_ref() {
@@ -604,12 +594,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 break;
                             }
                             if run_status.is_none() {
-                                let view = crate::ui_actions::get_run_view_data(
-                                    &session, &repo, run_index,
-                                )
-                                .await
-                                .wrap_err("failed to load run view")?;
-                                let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+                                let jobs = session.run_jobs(&repo, run_index).await?;
                                 if is_run_done_from_jobs(&jobs) {
                                     finishing = Some(run_terminal_error(run_index, None, &jobs));
                                     continue;
@@ -627,7 +612,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         max_jobs,
                     } => {
                         let run_index = resolve_run_index(
-                            &session,
+                            session,
                             &repo,
                             run_index,
                             latest,
@@ -635,10 +620,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         )
                         .await?;
 
-                        let view = crate::ui_actions::get_run_view_data(&session, &repo, run_index)
-                            .await
-                            .wrap_err("failed to load run view")?;
-                        let mut jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+                        let mut jobs = session.run_jobs(&repo, run_index).await?;
 
                         if let Some(max_jobs) = max_jobs {
                             if max_jobs == 0 {
@@ -660,26 +642,22 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 let out_file =
                                     out_dir.join(format!("job-{job_index}-{safe_name}.log"));
 
-                                let attempt = match crate::ui_actions::get_job_view_meta(
-                                    &session, &repo, run_index, job_index,
-                                )
-                                .await
-                                {
-                                    Ok(m) => m.attempt_number,
-                                    Err(e) => {
-                                        let msg = format!(
-                                            "Job {job_index} ({}): {e}",
-                                            crate::output::sanitize_line(job_name)
-                                        );
-                                        eprintln!("warn: {msg}");
-                                        failures.push(msg);
-                                        continue;
-                                    }
-                                };
-                                match crate::ui_actions::open_job_logs(
-                                    &session, &repo, run_index, job_index, attempt,
-                                )
-                                .await
+                                let attempt =
+                                    match session.job_attempt(&repo, run_index, job_index).await {
+                                        Ok(attempt) => attempt,
+                                        Err(e) => {
+                                            let msg = format!(
+                                                "Job {job_index} ({}): {e}",
+                                                crate::output::sanitize_line(job_name)
+                                            );
+                                            eprintln!("warn: {msg}");
+                                            failures.push(msg);
+                                            continue;
+                                        }
+                                    };
+                                match session
+                                    .open_job_logs(&repo, run_index, job_index, attempt)
+                                    .await
                                 {
                                     Ok(resp) => {
                                         let mut file = tokio::fs::File::create(&out_file).await?;
@@ -719,11 +697,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                             let job_index = job.job_index;
                             let job_name = job.name.as_deref().unwrap_or("");
 
-                            let attempt = crate::ui_actions::get_job_view_meta(
-                                &session, &repo, run_index, job_index,
-                            )
-                            .await?
-                            .attempt_number;
+                            let attempt = session.job_attempt(&repo, run_index, job_index).await?;
 
                             eprintln!(
                                 "== job {} (attempt {}) :: {} ==",
@@ -731,10 +705,9 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                                 attempt,
                                 crate::output::sanitize_line(job_name)
                             );
-                            let resp = crate::ui_actions::open_job_logs(
-                                &session, &repo, run_index, job_index, attempt,
-                            )
-                            .await?;
+                            let resp = session
+                                .open_job_logs(&repo, run_index, job_index, attempt)
+                                .await?;
 
                             let mut stdout = tokio::io::stdout();
                             crate::ui_actions::copy_response_body(resp, &mut stdout).await?;
@@ -754,7 +727,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         json,
                     } => {
                         let run_index = resolve_run_index(
-                            &session,
+                            session,
                             &repo,
                             run_index,
                             latest,
@@ -762,9 +735,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         )
                         .await?;
 
-                        let artifacts =
-                            crate::ui_actions::get_run_artifacts(&session, &repo, run_index)
-                                .await?;
+                        let artifacts = session.run_artifacts(&repo, run_index).await?;
 
                         if json {
                             let items = artifact_items(&artifacts);
@@ -813,16 +784,14 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         out_file,
                     } => {
                         let run_index = resolve_run_index(
-                            &session,
+                            session,
                             &repo,
                             run_index,
                             latest,
                             workflow.as_deref(),
                         )
                         .await?;
-                        let resp =
-                            crate::ui_actions::open_artifact(&session, &repo, run_index, &artifact)
-                                .await?;
+                        let resp = session.open_artifact(&repo, run_index, &artifact).await?;
                         if let Some(parent) = out_file.parent() {
                             tokio::fs::create_dir_all(parent).await?;
                         }
@@ -832,20 +801,6 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         println!("{}", out_file.display());
                     }
                 },
-                ActionsSubcommand::SmokeTest(args) => {
-                    let cmd = crate::cli::SmokeTestCommand {
-                        target: crate::cli::TargetArgs {
-                            host: Some(target.base_url.clone()),
-                            repo: Some(
-                                repo.parse::<crate::target::RepoArg>()
-                                    .map_err(|e| eyre!(e))?,
-                            ),
-                            remote: None,
-                        },
-                        opts: args,
-                    };
-                    crate::smoke_test::run(cmd).await?;
-                }
                 ActionsSubcommand::Cancel {
                     run_index,
                     latest,
@@ -854,15 +809,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     json,
                 } => {
                     let run_index =
-                        resolve_run_index(&session, &repo, run_index, latest, workflow.as_deref())
+                        resolve_run_index(session, &repo, run_index, latest, workflow.as_deref())
                             .await?;
-                    let repo_path = repo.trim_matches('/');
-                    let url = format!(
-                        "{}/{repo_path}/actions/runs/{run_index}/cancel",
-                        session.base_url()
-                    );
-
                     if dry_run {
+                        let url = session.cancel_url(&repo, run_index).await?;
                         if json {
                             let payload = serde_json::json!({
                                 "baseUrl": target.base_url,
@@ -878,16 +828,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         return Ok(());
                     }
 
-                    let body = serde_json::json!({});
-                    let resp = session.post_json_response(&url, &body, true).await?;
-                    if resp.status() != reqwest::StatusCode::OK {
-                        return Err(eyre!(
-                            "Failed to cancel run '{}' via '{}'. HTTP {}.",
-                            run_index,
-                            url,
-                            resp.status()
-                        ));
-                    }
+                    let url = session.cancel(&repo, run_index).await?;
 
                     if json {
                         let payload = serde_json::json!({
@@ -913,13 +854,11 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                     json,
                 } => {
                     let run_index =
-                        resolve_run_index(&session, &repo, run_index, latest, workflow.as_deref())
+                        resolve_run_index(session, &repo, run_index, latest, workflow.as_deref())
                             .await?;
-                    let repo_path = repo.trim_matches('/');
-
                     if failed_only {
                         return rerun_failed_jobs(
-                            &session,
+                            session,
                             target.base_url.as_str(),
                             &repo,
                             run_index,
@@ -929,18 +868,10 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         .await;
                     }
 
-                    let url = match job_index {
-                        Some(job_index) => format!(
-                            "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
-                            session.base_url()
-                        ),
-                        None => format!(
-                            "{}/{repo_path}/actions/runs/{run_index}/rerun",
-                            session.base_url()
-                        ),
-                    };
+                    let job_index_i64 = job_index.map(i64::from);
 
                     if dry_run {
+                        let url = session.rerun_url(&repo, run_index, job_index_i64).await?;
                         if json {
                             let payload = serde_json::json!({
                                 "baseUrl": target.base_url,
@@ -957,25 +888,7 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         return Ok(());
                     }
 
-                    let body = serde_json::json!({});
-                    let resp = session.post_json_response(&url, &body, true).await?;
-                    if resp.status() != reqwest::StatusCode::OK {
-                        return Err(eyre!(
-                            "Failed to rerun via '{}'. HTTP {}.",
-                            url,
-                            resp.status()
-                        ));
-                    }
-
-                    let text = resp.text().await.unwrap_or_default();
-                    let mut redirect: Option<String> = None;
-                    if !text.trim().is_empty() {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                            if let Some(redirect_url) = v.get("redirect").and_then(|v| v.as_str()) {
-                                redirect = Some(redirect_url.to_string());
-                            }
-                        }
-                    }
+                    let (url, redirect) = session.rerun(&repo, run_index, job_index_i64).await?;
 
                     if json {
                         let payload = serde_json::json!({
@@ -1002,8 +915,8 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         println!("{}", crate::output::sanitize_line(&redirect));
                     }
                 }
-                ActionsSubcommand::Trigger { .. } => {
-                    unreachable!("Trigger is handled before UiSession initialization")
+                ActionsSubcommand::Trigger { .. } | ActionsSubcommand::SmokeTest(_) => {
+                    unreachable!("handled before backend initialization")
                 }
                 ActionsSubcommand::Runners { .. } => {
                     unreachable!("Runners is handled before UiSession initialization")
@@ -1076,14 +989,9 @@ async fn run_repository_actions_value(
         urlencoding::encode(&actions_name)
     );
 
-    let creds = crate::store::get_ui_creds(&target.base_url)
+    let auth = crate::credentials::resolve_api_auth(&target.base_url)
         .await?
-        .ok_or_else(|| {
-            eyre!(
-                "No stored UI creds for '{}'. Run `fj-ex auth login` first.",
-                target.base_url
-            )
-        })?;
+        .ok_or_else(|| crate::credentials::missing_api_auth_error(&target.base_url))?;
     let mut builder = reqwest::Client::builder()
         .user_agent(concat!(
             env!("CARGO_PKG_NAME"),
@@ -1101,13 +1009,21 @@ async fn run_repository_actions_value(
         value_field.to_string(),
         serde_json::Value::String(actions_value),
     );
-    let response = client
-        .put(url)
-        .basic_auth(&creds.username, Some(&creds.password))
-        .json(&body)
+    let mut response = auth
+        .apply(client.put(&url).json(&body))?
         .send()
         .await
         .wrap_err("Actions secret update request failed")?;
+
+    // Forgejo/Gitea create-or-update secrets with PUT, but PUT on a variable
+    // only updates an existing one (404 otherwise); variables are created with POST.
+    if resource_path == "variables" && response.status() == reqwest::StatusCode::NOT_FOUND {
+        response = auth
+            .apply(client.post(&url).json(&body))?
+            .send()
+            .await
+            .wrap_err("Actions variable create request failed")?;
+    }
 
     if !matches!(
         response.status(),
@@ -1115,10 +1031,11 @@ async fn run_repository_actions_value(
     ) {
         // Never include a remote response body here: it may echo sensitive input.
         return Err(eyre!(
-            "Actions {} update failed for '{}': HTTP {}",
+            "Actions {} update failed for '{}': HTTP {} (authenticated with the {}).",
             resource_label,
             actions_name,
-            response.status()
+            response.status(),
+            auth.source_label()
         ));
     }
 
@@ -1167,17 +1084,8 @@ fn read_actions_value_from_stdin() -> eyre::Result<String> {
     Ok(value)
 }
 
-async fn latest_run_index_optional(
-    session: &crate::session::UiSession,
-    repo: &str,
-    workflow: Option<&str>,
-) -> eyre::Result<Option<i64>> {
-    let runs = crate::ui_actions::list_runs(session, repo, workflow, 1, 1).await?;
-    Ok(runs.first().map(|run| run.run_index))
-}
-
 async fn wait_for_new_run_index(
-    session: &crate::session::UiSession,
+    session: &crate::actions_backend::ActionsClient,
     repo: &str,
     workflow: Option<&str>,
     previous_latest_run: Option<i64>,
@@ -1188,7 +1096,7 @@ async fn wait_for_new_run_index(
     let started_at = Instant::now();
 
     loop {
-        let runs = crate::ui_actions::list_runs(session, repo, workflow, 1, 20).await?;
+        let runs = session.list_runs(repo, workflow, 1, 20).await?;
         if let Some(run_index) = select_dispatched_run(&runs, previous_latest_run, dispatch_ref) {
             return Ok(run_index);
         }
@@ -1237,7 +1145,7 @@ fn run_ref_matches_dispatch(run_ref: Option<&str>, dispatch_ref: &str) -> bool {
 }
 
 async fn wait_for_run_completion(
-    session: &crate::session::UiSession,
+    session: &crate::actions_backend::ActionsClient,
     repo: &str,
     run_index: i64,
     job_index: Option<i64>,
@@ -1252,20 +1160,13 @@ async fn wait_for_run_completion(
         // run; the run page's job snapshot is used for single jobs and as a
         // fallback when the run is not listed.
         let run_status = run_status_tracker.poll(session, repo).await?;
-        let view = crate::ui_actions::get_run_view_data(session, repo, run_index)
-            .await
-            .wrap_err("failed to load run view")?;
-        let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+        let jobs = session.run_jobs(repo, run_index).await?;
 
         let run_terminal = run_status_tracker.is_terminal();
         if is_wait_target_done(&jobs, job_index, run_status.as_deref(), run_terminal) {
-            let repo_path = repo.trim_matches('/');
             return Ok(WaitResult {
                 run_index,
-                run_url: format!(
-                    "{}/{repo_path}/actions/runs/{run_index}",
-                    session.base_url()
-                ),
+                run_url: session.run_url(repo, run_index),
                 terminal_run_status: run_status.filter(|_| run_terminal),
                 jobs,
             });
@@ -1493,19 +1394,15 @@ fn remaining_timeout(
 }
 
 async fn rerun_failed_jobs(
-    session: &crate::session::UiSession,
+    session: &crate::actions_backend::ActionsClient,
     target_base_url: &str,
     repo: &str,
     run_index: i64,
     dry_run: bool,
     json: bool,
 ) -> eyre::Result<()> {
-    let repo_path = repo.trim_matches('/');
-
-    let view = crate::ui_actions::get_run_view_data(session, repo, run_index)
-        .await
-        .wrap_err("failed to load run view")?;
-    let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
+    session.check_rerun_failed_supported()?;
+    let jobs = session.run_jobs(repo, run_index).await?;
     let failed_job_indexes: Vec<i64> = jobs
         .iter()
         .filter(|j| {
@@ -1531,11 +1428,10 @@ async fn rerun_failed_jobs(
         } else if failed_job_indexes.is_empty() {
             println!("No failed jobs found for run #{run_index}.");
         } else {
-            for job_index in &failed_job_indexes {
-                let url = format!(
-                    "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
-                    session.base_url()
-                );
+            for url in session
+                .rerun_failed_plan(repo, run_index, &failed_job_indexes)
+                .await?
+            {
                 println!("DRY RUN: POST {url}");
             }
         }
@@ -1560,44 +1456,12 @@ async fn rerun_failed_jobs(
         return Ok(());
     }
 
-    let mut failures: Vec<String> = Vec::new();
-    let mut redirects: Vec<String> = Vec::new();
-
-    for job_index in &failed_job_indexes {
-        let url = format!(
-            "{}/{repo_path}/actions/runs/{run_index}/jobs/{job_index}/rerun",
-            session.base_url()
-        );
-        let body = serde_json::json!({});
-        let resp = match session.post_json_response(&url, &body, true).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                failures.push(format!(
-                    "job {}: POST {} -> transport error: {}",
-                    job_index, url, e
-                ));
-                continue;
-            }
-        };
-        if resp.status() != reqwest::StatusCode::OK {
-            failures.push(format!(
-                "job {}: POST {} -> HTTP {}",
-                job_index,
-                url,
-                resp.status()
-            ));
-            continue;
-        }
-
-        let text = resp.text().await.unwrap_or_default();
-        if !text.trim().is_empty() {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(redirect_url) = v.get("redirect").and_then(|v| v.as_str()) {
-                    redirects.push(redirect_url.to_string());
-                }
-            }
-        }
-    }
+    let crate::actions_backend::RerunFailedResult {
+        failures,
+        redirects,
+    } = session
+        .rerun_failed(repo, run_index, &failed_job_indexes)
+        .await?;
 
     if !failures.is_empty() {
         if redirects.is_empty() {
@@ -1677,22 +1541,7 @@ fn resolve_runner_scope(
 }
 
 pub(crate) fn fj_missing_api_token_error(base_url: &str) -> eyre::Report {
-    let token_key = crate::target::normalize_base_url(base_url)
-        .map(|normalized| {
-            if crate::target::normalized_base_url_has_path(&normalized) {
-                normalized
-            } else {
-                crate::target::normalize_host_key(&normalized).unwrap_or(normalized)
-            }
-        })
-        .unwrap_or_else(|_| base_url.into());
-    let path = crate::store::keys_store_paths()
-        .map(|p| p.path.display().to_string())
-        .unwrap_or_else(|_| "%APPDATA%/Cyborus/forgejo-cli/data/keys.json".to_string());
-
-    eyre!(
-        "No Forgejo API token found for host '{token_key}'. Authenticate via `fj`:\n  fj --host {token_key} auth login\n  fj --host {token_key} auth add-key <USER>  # reads token from stdin if omitted\nToken store:\n  %APPDATA%/Cyborus/forgejo-cli/data/keys.json (Windows)\n  ~/.local/share/Cyborus/forgejo-cli/data/keys.json (Linux)\nReading: {path}"
-    )
+    crate::credentials::missing_api_token_error(base_url)
 }
 
 fn resolve_runner_endpoint_url(
@@ -1749,11 +1598,12 @@ async fn run_runners(
     command: ActionsRunnersSubcommand,
     target: &crate::target::ResolvedTarget,
 ) -> eyre::Result<()> {
-    let token = crate::store::get_fj_api_token_for_base_url(&target.base_url)?
+    let token = crate::credentials::resolve_api_token(&target.base_url)
+        .await?
         .ok_or_else(|| fj_missing_api_token_error(&target.base_url))?;
     let client = crate::api::ApiClient::new_with_socket(
         &target.base_url,
-        &token,
+        &token.token,
         target.unix_socket.as_deref(),
     )?;
 
@@ -1864,7 +1714,7 @@ async fn run_runners(
 }
 
 async fn resolve_run_index(
-    session: &crate::session::UiSession,
+    session: &crate::actions_backend::ActionsClient,
     repo: &str,
     run_index: Option<NonZeroU64>,
     latest: bool,
@@ -1883,7 +1733,7 @@ async fn resolve_run_index(
     }
 
     if latest {
-        return crate::ui_actions::latest_run_index(session, repo, workflow).await;
+        return session.latest_run_index(repo, workflow).await;
     }
 
     Err(eyre!("Pass --run-index or --latest"))
@@ -2064,14 +1914,18 @@ impl RunStatusTracker {
     /// a missing run is reported once on stderr.
     async fn poll(
         &mut self,
-        session: &crate::session::UiSession,
+        session: &crate::actions_backend::ActionsClient,
         repo: &str,
     ) -> eyre::Result<Option<String>> {
-        let run = crate::ui_actions::find_run(session, repo, self.run_index).await?;
-        if run.is_none() {
+        let Some(status) = session.find_run_status(repo, self.run_index).await? else {
             self.warn_missing_once();
-        }
-        let status = run.and_then(|run| run.status);
+            observe_terminal_run_status(
+                &mut self.terminal_status,
+                &mut self.terminal_observations,
+                None,
+            );
+            return Ok(None);
+        };
         observe_terminal_run_status(
             &mut self.terminal_status,
             &mut self.terminal_observations,

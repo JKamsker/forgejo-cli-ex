@@ -1,0 +1,35 @@
+{
+ "workflow_runs": [
+  {
+   "id": 3,
+   "run_number": 2,
+   "display_title": "chore: bump",
+   "status": "completed",
+   "conclusion": "failure",
+   "path": "ci.yml@refs/heads/main",
+   "head_branch": "main",
+   "event": "push",
+   "html_url": "http://forge.example.com/e2e/demo/actions/runs/3",
+   "url": "http://forge.example.com/api/v1/repos/e2e/demo/actions/runs/3",
+   "started_at": "2026-11-06T18:10:10Z",
+   "completed_at": "2026-11-06T18:10:10Z",
+   "run_attempt": 2
+  },
+  {
+   "id": 1,
+   "run_number": 1,
+   "display_title": "ci: add workflow",
+   "status": "completed",
+   "conclusion": "failure",
+   "path": "ci.yml@refs/heads/main",
+   "head_branch": "main",
+   "event": "push",
+   "html_url": "http://forge.example.com/e2e/demo/actions/runs/1",
+   "url": "http://forge.example.com/api/v1/repos/e2e/demo/actions/runs/1",
+   "started_at": "2026-11-06T18:08:11Z",
+   "completed_at": "2026-11-06T18:08:11Z",
+   "run_attempt": 1
+  }
+ ],
+ "total_count": 2
+}

@@ -1,0 +1,33 @@
+{
+ "jobs": [
+  {
+   "id": 7,
+   "run_id": 3,
+   "name": "ok",
+   "status": "completed",
+   "conclusion": "success",
+   "run_attempt": 2,
+   "html_url": "http://forge.example.com/e2e/demo/actions/runs/3/jobs/7",
+   "started_at": "2026-11-06T18:09:02Z",
+   "completed_at": "2026-11-06T18:09:02Z",
+   "labels": [
+    "ubuntu-latest"
+   ]
+  },
+  {
+   "id": 8,
+   "run_id": 3,
+   "name": "bad",
+   "status": "completed",
+   "conclusion": "failure",
+   "run_attempt": 2,
+   "html_url": "http://forge.example.com/e2e/demo/actions/runs/3/jobs/8",
+   "started_at": "2026-11-06T18:10:10Z",
+   "completed_at": "2026-11-06T18:10:10Z",
+   "labels": [
+    "ubuntu-latest"
+   ]
+  }
+ ],
+ "total_count": 2
+}
