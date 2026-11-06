@@ -695,6 +695,75 @@ fn empty_token_and_empty_session_are_rejected() {
     .is_err());
 }
 
+#[test]
+fn unknown_kind_does_not_invalidate_the_store_and_is_preserved() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = test_store_paths(temp.path());
+    std::fs::create_dir_all(&paths.dir).unwrap();
+    std::fs::write(
+        &paths.path,
+        r#"{
+  "a.example.com": {
+    "baseUrl": "https://a.example.com",
+    "kind": "Session",
+    "username": "alice",
+    "cookieJar": {"savedUtc": null, "cookies": [
+      {"name": "i_like_gitea", "value": "s1", "domain": "a.example.com", "hostOnly": true, "path": "/", "secure": true, "httpOnly": true}
+    ]}
+  },
+  "b.example.com": {
+    "baseUrl": "https://b.example.com",
+    "kind": "oauth",
+    "username": "bob",
+    "refresh": "r1"
+  }
+}"#,
+    )
+    .unwrap();
+
+    let store = read_creds_store_with_paths(&paths).unwrap();
+    let a = &store["a.example.com"];
+    assert_eq!(a.kind, Some(CredentialKind::Session));
+    assert_eq!(a.ui_login_kind(), Some(CredentialKind::Session));
+    let b = &store["b.example.com"];
+    assert_eq!(b.kind, None);
+    assert_eq!(b.credential_kind(), None);
+    assert_eq!(b.ui_login_kind(), None);
+
+    // A rewrite keeps both entries, the unknown kind and its unknown fields.
+    set_api_token_with_paths(&paths, "https://c.example.com", "tok-c", None).unwrap();
+    let backups = std::fs::read_dir(temp.path())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .path()
+                .to_string_lossy()
+                .contains(".bad.")
+        })
+        .count();
+    assert_eq!(backups, 0, "the store must not be treated as invalid");
+
+    let raw: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&paths.path).unwrap()).unwrap();
+    assert_eq!(raw["a.example.com"]["kind"], "session");
+    assert_eq!(
+        raw["a.example.com"]["cookieJar"]["cookies"][0]["value"],
+        "s1"
+    );
+    assert_eq!(raw["b.example.com"]["kind"], "oauth");
+    assert_eq!(raw["b.example.com"]["refresh"], "r1");
+    assert_eq!(raw["c.example.com"]["kind"], "token");
+
+    // Logging in again replaces the unknown kind with a known one, once.
+    set_ui_creds_with_paths(&paths, "https://b.example.com", "bob", "pw").unwrap();
+    let text = std::fs::read_to_string(&paths.path).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(raw["b.example.com"]["kind"], "password");
+    assert_eq!(raw["b.example.com"]["refresh"], "r1");
+    assert_eq!(text.matches("\"kind\"").count(), 3);
+}
+
 #[cfg(unix)]
 fn file_mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt;
