@@ -75,14 +75,15 @@ fj-ex pulls review --repo owner/name --index 42 --body-file review.md
 |---|---|
 | `auth` | Login, logout, status, list saved sessions |
 | `token` | Mint and list personal access tokens |
+| `actions workflows` | List workflows of a repository |
 | `actions runs` | List workflow runs (filter by status, workflow, latest) |
-| `actions jobs` | List jobs for a run, optionally `--watch` |
+| `actions jobs` | List jobs for a run, optionally `--watch`; `--watch --json-lines` streams one compact JSON snapshot per line |
 | `actions wait` | Wait for a run or job to complete, with script-friendly exit codes |
-| `actions logs` | Download complete job/run logs; `logs job --follow` prints only newly appended bytes |
+| `actions logs` | Download complete job/run logs; `logs job --follow` polls and prints only newly available bytes until the run finishes |
 | `actions artifacts` | List / download artifacts |
 | `actions cancel` | Cancel a running workflow |
 | `actions rerun` | Rerun a workflow (optionally `--failed-only`) |
-| `actions trigger` | Dispatch a `workflow_dispatch` event |
+| `actions trigger` | Dispatch a `workflow_dispatch` event; `--wait` waits for the dispatched run like `actions wait` |
 | `actions secrets set` | Create or replace a repository Actions secret from stdin; never accepts or echoes a literal value |
 | `actions variables set` | Create or replace a repository Actions variable from stdin; never accepts or echoes a literal value |
 | `pulls list` | List pull requests with state/page/limit filters |
@@ -90,7 +91,8 @@ fj-ex pulls review --repo owner/name --index 42 --body-file review.md
 | `pulls comments` | Read normal PR comments for verification |
 | `pulls review` | Submit a review; defaults to `COMMENT`, with explicit approval events only |
 | `pulls reviews` | Read review objects for verification |
-| `pulls create/merge` | Create pull requests and merge an expected source commit through the REST API |
+| `pulls create` | Create a pull request through the REST API |
+| `pulls merge` | Merge a pull request only at an expected source commit (`--head-commit`) |
 | `actions runners` | Runner tokens + queued jobs (REST API; uses `fj` token store) |
 | `smoke-test` | Non-destructive end-to-end validation |
 
@@ -98,8 +100,9 @@ Full command reference with all flags: [docs/commands.md](docs/commands.md)
 
 ## CI observation contract
 
-Use `actions runs` or `actions jobs --watch --json` to decide whether a run has
-finished. The JSON job snapshot includes `runStatus` and `observedAtUnixMs`;
+Use `actions wait`, `actions runs`, or `actions jobs --watch --json` to decide
+whether a run has finished (`actions wait` and `trigger --wait` apply the same
+rules below). The JSON job snapshot includes `runStatus` and `observedAtUnixMs`;
 `runStatus` from the Actions list is authoritative when the run page still has
 stale job data. A terminal status must be observed twice because Forgejo can
 briefly report a previous terminal state while scheduling a rerun attempt. Use `actions logs job --follow` only for progress, and download
