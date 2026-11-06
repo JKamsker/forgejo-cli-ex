@@ -522,6 +522,11 @@ impl ApiActions {
             // An unknown route answers with a plain-text 404 (or 405 for a
             // wrong method), while a missing run/job answers with JSON.
             404 | 405 if !is_json => Err(self.unsupported(op, None)),
+            404 if matches!(op, ApiOp::JobLogs | ApiOp::JobLogsAttempt) => Err(eyre!(
+                "HTTP 404 from {path} while {}: the job has no logs (it may not have started, \
+                 e.g. it was cancelled or is still waiting for a runner).",
+                op.describe()
+            )),
             404 => Err(eyre!(
                 "HTTP 404 from {path} while {}: not found (check the repository, run and job).",
                 op.describe()
