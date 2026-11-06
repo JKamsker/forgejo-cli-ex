@@ -1,0 +1,5 @@
+{
+  "owner": "org",
+  "description": "A dispatch-only job that prints one numbered tick per second (logs job --follow, jobs --watch --json-lines, cancel).",
+  "branches": []
+}

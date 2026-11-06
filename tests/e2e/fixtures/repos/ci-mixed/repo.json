@@ -1,0 +1,5 @@
+{
+  "owner": "org",
+  "description": "One passing and one failing job on every push. The failing job passes once the repository variable FJEX_MIXED_SHOULD_PASS is \"true\" (wait exit codes, rerun --failed-only, variables set).",
+  "branches": []
+}

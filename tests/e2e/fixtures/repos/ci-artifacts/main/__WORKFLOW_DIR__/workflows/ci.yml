@@ -1,0 +1,38 @@
+name: ci [__FJEX_STACK__]
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build
+        run: |
+          echo "fj-ex-e2e: hello from ${GITHUB_REPOSITORY}"
+          echo "fj-ex-e2e: build ok"
+
+      # Uploads with the artifact v3 ("actions_pipeline") protocol that
+      # actions/upload-artifact@v3 speaks, using only curl. This keeps the demo
+      # repository self-contained: no remote action is fetched from github.com.
+      - name: Upload artifact my-artifact
+        run: |
+          set -euo pipefail
+          name=my-artifact
+          file=artifact.txt
+          printf 'fj-ex-e2e: artifact\n' > "$file"
+          size=$(wc -c < "$file")
+          md5_b64=$(printf "$(md5sum "$file" | cut -d' ' -f1 | sed 's/../\\x&/g')" | base64)
+          api="${ACTIONS_RUNTIME_URL}_apis/pipelines/workflows/${GITHUB_RUN_ID}/artifacts?api-version=6.0-preview"
+          auth="Authorization: Bearer ${ACTIONS_RUNTIME_TOKEN}"
+          created=$(curl -fsS -X POST -H "$auth" -H 'Content-Type: application/json' \
+            -d "{\"Type\":\"actions_storage\",\"Name\":\"$name\"}" "$api")
+          upload_url=$(printf '%s' "$created" | sed -n 's/.*"fileContainerResourceUrl":"\([^"]*\)".*/\1/p')
+          test -n "$upload_url"
+          curl -fsS -X PUT -H "$auth" -H 'Content-Type: application/octet-stream' \
+            -H "Content-Range: bytes 0-$((size - 1))/$size" -H "x-tfs-filelength: $size" \
+            -H "x-actions-results-md5: $md5_b64" \
+            --data-binary @"$file" "${upload_url}?itemPath=${name}%2F${file}" > /dev/null
+          curl -fsS -X PATCH -H "$auth" -H 'Content-Type: application/json' \
+            -d "{\"Size\":$size}" "${api}&artifactName=${name}" > /dev/null
+          echo "fj-ex-e2e: uploaded $name ($size bytes)"
