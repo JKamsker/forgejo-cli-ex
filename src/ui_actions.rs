@@ -257,57 +257,21 @@ pub async fn get_run_view_data(
     let initial_artifacts_json =
         html::get_html_attribute_value(&html_s, "data-initial-artifacts-response");
 
-    let view: Value = if let Some(job_json) = initial_job_json {
-        serde_json::from_str(&job_json)
-            .wrap_err("failed to parse data-initial-post-response json")?
-    } else {
-        // Older Forgejo versions (e.g. 11.x) don't embed the initial JSON response and instead
-        // fetch it via a CSRF-protected UI endpoint.
-        let csrf_token = html::get_csrf_token_from_html(&html_s)
-            .ok_or_else(|| eyre!("Unable to determine CSRF token in run view HTML ({url})."))?;
-        let actions_url =
-            html::get_html_attribute_value(&html_s, "data-actions-url").ok_or_else(|| {
-                eyre!("Unable to determine data-actions-url in run view HTML ({url}).")
-            })?;
-
-        let effective_run_index = html::get_html_attribute_value(&html_s, "data-run-index")
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(run_index);
-        let job_index = html::get_html_attribute_value(&html_s, "data-job-index")
-            .and_then(|s| s.parse::<i64>().ok())
-            .unwrap_or(0);
-
-        let actions_base =
-            if actions_url.starts_with("http://") || actions_url.starts_with("https://") {
-                actions_url
-            } else if actions_url.starts_with('/') {
-                format!("{}{}", session.base_url(), actions_url)
-            } else {
-                format!(
-                    "{}/{}",
-                    session.base_url().trim_end_matches('/'),
-                    actions_url
-                )
-            };
-        let job_url = format!("{actions_base}/runs/{effective_run_index}/jobs/{job_index}");
-        let body = serde_json::json!({ "logCursors": [] });
-
-        let resp = session
-            .post_json_response_with_csrf(&job_url, &body, &csrf_token, true)
-            .await
-            .wrap_err("failed to fetch run/job json")?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if status != reqwest::StatusCode::OK {
-            return Err(eyre!(
-                "Failed to load run/job state from '{}'. HTTP {} body={}",
-                job_url,
-                status,
-                text
-            ));
-        }
-
-        serde_json::from_str(&text).wrap_err("failed to parse run/job json")?
+    let embedded_view = initial_job_json
+        .map(|job_json| {
+            serde_json::from_str(&job_json)
+                .wrap_err("failed to parse data-initial-post-response json")
+        })
+        .transpose()?;
+    // The HTML attribute is a render-time snapshot. On a busy runner it can
+    // report a completed step as running for one polling cycle, so prefer the
+    // UI's live state endpoint and retain the embedded value only for Forgejo
+    // versions that do not expose its CSRF metadata.
+    let view = match fetch_live_run_state(session, &html_s, run_index).await? {
+        Some(view) => view,
+        None => embedded_view.ok_or_else(|| {
+            eyre!("Unable to determine live or embedded run state from run view HTML ({url}).")
+        })?,
     };
     let artifacts: Option<Value> = match initial_artifacts_json {
         Some(s) if !s.trim().is_empty() => Some(
@@ -335,6 +299,53 @@ pub async fn get_run_view_data(
         view,
         artifacts,
     })
+}
+
+async fn fetch_live_run_state(
+    session: &UiSession,
+    html_s: &str,
+    run_index: i64,
+) -> eyre::Result<Option<Value>> {
+    let Some(csrf_token) = html::get_csrf_token_from_html(html_s) else {
+        return Ok(None);
+    };
+    let Some(actions_url) = html::get_html_attribute_value(html_s, "data-actions-url") else {
+        return Ok(None);
+    };
+
+    let effective_run_index = html::get_html_attribute_value(html_s, "data-run-index")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(run_index);
+    let job_index = html::get_html_attribute_value(html_s, "data-job-index")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let actions_base = resolve_actions_base(session.base_url(), &actions_url);
+    let job_url = format!("{actions_base}/runs/{effective_run_index}/jobs/{job_index}");
+    let body = serde_json::json!({ "logCursors": [] });
+
+    let resp = session
+        .post_json_response_with_csrf(&job_url, &body, &csrf_token, true)
+        .await
+        .wrap_err("failed to fetch live run/job json")?;
+    if resp.status() != reqwest::StatusCode::OK {
+        return Ok(None);
+    }
+    let text = resp
+        .text()
+        .await
+        .wrap_err("failed to read live run/job json")?;
+    let view = serde_json::from_str(&text).wrap_err("failed to parse live run/job json")?;
+    Ok(Some(view))
+}
+
+fn resolve_actions_base(base_url: &str, actions_url: &str) -> String {
+    if actions_url.starts_with("http://") || actions_url.starts_with("https://") {
+        actions_url.to_string()
+    } else if actions_url.starts_with('/') {
+        format!("{base_url}{actions_url}")
+    } else {
+        format!("{}/{}", base_url.trim_end_matches('/'), actions_url)
+    }
 }
 
 pub fn get_run_jobs(run_index: i64, run_view: &Value) -> eyre::Result<Vec<JobInfo>> {
@@ -569,4 +580,25 @@ pub async fn open_artifact(
         ));
     }
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_actions_base;
+
+    #[test]
+    fn resolves_absolute_rooted_and_relative_actions_urls() {
+        assert_eq!(
+            resolve_actions_base("https://forge.example", "https://actions.example/api"),
+            "https://actions.example/api"
+        );
+        assert_eq!(
+            resolve_actions_base("https://forge.example", "/api/actions"),
+            "https://forge.example/api/actions"
+        );
+        assert_eq!(
+            resolve_actions_base("https://forge.example/", "api/actions"),
+            "https://forge.example/api/actions"
+        );
+    }
 }
