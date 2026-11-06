@@ -169,6 +169,46 @@ pub async fn waiting_queue(ctx: &Ctx<'_>) -> Result<()> {
             "table:\n{}",
             out.stdout
         );
+
+        ctx.step("runners jobs lists only the queue, on Forgejo and Gitea alike");
+        let v = ctx
+            .fj
+            .cmd(&ctx.actions(&repo, &["runners", "jobs", "--json"]))
+            .json()
+            .await?;
+        ensure!(
+            v["jobs"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty() && a.iter().all(|j| j["status"] == "waiting")),
+            "queue without --waiting: {v}"
+        );
+        // A runner with this label and another one could take the job; a
+        // runner with only another label could not.
+        let v = ctx
+            .fj
+            .cmd(&ctx.actions(
+                &repo,
+                &[
+                    "runners", "jobs", "--label", label, "--label", "extra", "--json",
+                ],
+            ))
+            .json()
+            .await?;
+        ensure!(
+            v["jobs"].as_array().is_some_and(|a| !a.is_empty()),
+            "superset labels: {v}"
+        );
+        let v = ctx
+            .fj
+            .cmd(&ctx.actions(&repo, &["runners", "jobs", "--label", "extra", "--json"]))
+            .json()
+            .await?;
+        ensure!(
+            v["jobs"]
+                .as_array()
+                .is_some_and(|a| a.iter().all(|j| j["name"] != "queued")),
+            "unrelated label: {v}"
+        );
     } else {
         ctx.skip_capability(
             "runners jobs --waiting (queued job listing)",
