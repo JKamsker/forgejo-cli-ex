@@ -19,6 +19,8 @@ pub enum Command {
     Token(TokenCommand),
     /// Forgejo Actions: workflows, runs, jobs, logs, artifacts, cancel/rerun.
     Actions(ActionsCommand),
+    /// Inspect and manage pull requests through the Forgejo REST API.
+    Pulls(PullsCommand),
     /// Smoke test for Actions access (useful for debugging auth/connectivity/log downloads).
     #[command(name = "smoke-test")]
     SmokeTest(SmokeTestCommand),
@@ -29,7 +31,8 @@ pub enum Command {
 
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
-    /// Log in to an instance (stores plaintext creds + UI session cookies).
+    /// Log in to an instance: username + password (default), an API token
+    /// (`--token-stdin`), or an imported browser session (`--session-cookie-stdin`, for SSO).
     Login(LoginCommand),
     /// Check login status against the host.
     Status(AuthStatusCommand),
@@ -37,9 +40,9 @@ pub enum AuthCommand {
     List(AuthListCommand),
     /// Show stored login info for a host.
     Show(AuthShowCommand),
-    /// Delete stored login info for a host.
+    /// Delete stored login info (password, imported session and stored token) for a host.
     Logout(AuthLogoutCommand),
-    /// Clear stored UI cookies for a host (keeps creds).
+    /// Clear stored UI cookies for a host (keeps password/token; removes an imported session).
     #[command(name = "clear-cookies")]
     ClearCookies(AuthClearCookiesCommand),
     /// Create a package token suitable for Forgejo NuGet auth.
@@ -141,7 +144,50 @@ pub struct LoginCommand {
     /// When used with --password-stdin, the password is the first line and the passcode is the second.
     #[arg(long, conflicts_with = "otp")]
     pub otp_stdin: bool,
+
+    /// Store a Forgejo/Gitea API token instead of a password (unsafe: visible in process list;
+    /// prefer --token-stdin).
+    #[arg(
+        long,
+        value_name = "TOKEN",
+        conflicts_with_all = PASSWORD_LOGIN_ARGS,
+        conflicts_with = "token_stdin",
+        conflicts_with = "session_cookie_stdin"
+    )]
+    pub token: Option<String>,
+
+    /// Read a Forgejo/Gitea API token from stdin (first line) and store it. Prompts without
+    /// echo when stdin is a terminal. Recommended for automation and SSO accounts.
+    #[arg(
+        long,
+        conflicts_with_all = PASSWORD_LOGIN_ARGS,
+        conflicts_with = "session_cookie_stdin"
+    )]
+    pub token_stdin: bool,
+
+    /// Import a logged-in browser session (for SSO/OAuth accounts without a password).
+    ///
+    /// Reads the session cookie from stdin: either the bare value of the session cookie
+    /// (`session` on current Forgejo, `i_like_gitea` on Gitea/older Forgejo), `name=value`, or a
+    /// full `Cookie:` header (`a=1; b=2`). Prompts without echo when stdin is a terminal. The
+    /// session is validated before it is stored and cannot be renewed automatically once it expires.
+    #[arg(long, conflicts_with_all = PASSWORD_LOGIN_ARGS)]
+    pub session_cookie_stdin: bool,
+
+    /// Session cookie name for a bare --session-cookie-stdin value (default: try `session`,
+    /// `i_like_gitea`, then `i_like_forgejo`). Needed for a custom [session] COOKIE_NAME.
+    #[arg(long, value_name = "NAME", requires = "session_cookie_stdin")]
+    pub cookie_name: Option<String>,
 }
+
+const PASSWORD_LOGIN_ARGS: [&str; 6] = [
+    "userpass",
+    "username",
+    "password",
+    "password_stdin",
+    "otp",
+    "otp_stdin",
+];
 
 #[derive(Args, Debug, Clone)]
 pub struct AuthStatusCommand {
@@ -217,8 +263,215 @@ pub struct ActionsCommand {
     #[command(flatten)]
     pub target: TargetArgs,
 
+    /// How to talk to the server: `ui` (web UI with the stored password login or imported
+    /// session), `api` (REST API with an API token), or `auto` (UI when a UI login is stored,
+    /// otherwise the API token; falls back to the token when the UI session is unusable).
+    /// The `trigger` dispatch, `secrets`, `variables` and `runners` always use the REST API.
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    pub backend: ActionsBackendMode,
+
     #[command(subcommand)]
     pub command: ActionsSubcommand,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ActionsBackendMode {
+    /// UI session when a password login or imported session is stored, else the API token.
+    #[default]
+    Auto,
+    /// Always use the web UI session.
+    Ui,
+    /// Always use the REST API (token from `auth login --token-stdin`, FJ_EX_TOKEN,
+    /// FORGEJO_TOKEN, GITEA_TOKEN, or fj keys.json; else basic auth with the stored password).
+    Api,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct PullsCommand {
+    #[command(flatten)]
+    pub target: TargetArgs,
+
+    #[command(subcommand)]
+    pub command: PullsSubcommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum PullsSubcommand {
+    /// List pull requests.
+    List {
+        /// Pull request state to include.
+        #[arg(long, value_enum, default_value = "open")]
+        state: PullState,
+        /// Page number (1-based).
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        page: u32,
+        /// Items per page.
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        limit: u32,
+        /// Print JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a pull request.
+    Create {
+        /// Source branch.
+        #[arg(long)]
+        head: String,
+        /// Target branch.
+        #[arg(long)]
+        base: String,
+        /// Pull request title.
+        #[arg(long)]
+        title: String,
+        /// Optional pull request body.
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// Merge a pull request using the current source commit.
+    Merge {
+        /// Pull request number.
+        #[arg(long)]
+        index: u64,
+        /// Expected source commit SHA. Required to prevent merging a changed head.
+        #[arg(long)]
+        head_commit: String,
+        /// Merge commit title.
+        #[arg(long)]
+        title: String,
+        /// Bypass configured required checks. Use only after explicit operator authorization.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Post a normal issue comment on a pull request.
+    Comment {
+        /// Pull request number.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        index: u64,
+        /// Comment body. Use --body-file for multi-line or generated content.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the comment body from a file, or from stdin when set to '-'.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<std::path::PathBuf>,
+        /// Print the created comment as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Submit a pull request review. The default event only posts a comment.
+    Review {
+        /// Pull request number.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        index: u64,
+        /// Review body. Use --body-file for multi-line or generated content.
+        #[arg(long, conflicts_with = "body_file")]
+        body: Option<String>,
+        /// Read the review body from a file, or from stdin when set to '-'.
+        #[arg(long, conflicts_with = "body")]
+        body_file: Option<std::path::PathBuf>,
+        /// Review event. Defaults to comment; approve and request-changes are explicit.
+        #[arg(long, value_enum, default_value = "comment")]
+        event: ReviewEvent,
+        /// Commit SHA the review applies to.
+        #[arg(long)]
+        commit: Option<String>,
+        /// Print the created review as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List normal issue comments on a pull request.
+    Comments {
+        /// Pull request number.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        index: u64,
+        /// Page number (1-based).
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        page: u32,
+        /// Items per page.
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        limit: u32,
+        /// Print JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List review objects on a pull request.
+    Reviews {
+        /// Pull request number.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        index: u64,
+        /// Page number (1-based).
+        #[arg(
+            long,
+            default_value_t = 1,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        page: u32,
+        /// Items per page.
+        #[arg(
+            long,
+            default_value_t = 20,
+            value_parser = clap::value_parser!(u32).range(1..)
+        )]
+        limit: u32,
+        /// Print JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PullState {
+    Open,
+    Closed,
+    All,
+}
+
+impl PullState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Closed => "closed",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewEvent {
+    /// Add a review comment without approving or rejecting the pull request.
+    Comment,
+    /// Approve the pull request. This must be explicitly requested.
+    Approve,
+    /// Request changes. This must be explicitly requested.
+    #[value(name = "request-changes")]
+    RequestChanges,
+}
+
+impl ReviewEvent {
+    pub fn as_api_value(self) -> &'static str {
+        match self {
+            Self::Comment => "COMMENT",
+            // Forgejo/Gitea expect the review *state* name; "APPROVE" (GitHub's
+            // spelling) is silently stored as a PENDING review.
+            Self::Approve => "APPROVED",
+            Self::RequestChanges => "REQUEST_CHANGES",
+        }
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -307,6 +560,44 @@ pub enum ActionsSubcommand {
         no_header: bool,
         #[arg(long, help = "Print JSON output.")]
         json: bool,
+        #[arg(
+            long,
+            conflicts_with = "json",
+            requires = "watch",
+            help = "Emit JSON snapshots for initial, changed, and terminal states while watching."
+        )]
+        json_lines: bool,
+    },
+    /// Wait for a run, or one job within a run, to complete.
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
+    Wait {
+        #[arg(long, help = "Run index to wait for.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Wait for the latest run.")]
+        latest: bool,
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(long, help = "Wait for a specific job index within the run (0-based).")]
+        job_index: Option<u32>,
+        #[arg(
+            long,
+            default_value_t = 2,
+            value_parser = clap::value_parser!(u64).range(1..),
+            help = "Polling interval in seconds (minimum 1)."
+        )]
+        interval: u64,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            help = "Maximum time to wait (examples: 30s, 10m, 1h). Omit for no timeout."
+        )]
+        timeout: Option<String>,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
     },
     /// Download and print logs.
     Logs {
@@ -336,10 +627,40 @@ pub enum ActionsSubcommand {
             help = "Print the request that would be made, but do not perform it."
         )]
         dry_run: bool,
+        #[arg(
+            long,
+            conflicts_with = "dry_run",
+            help = "Wait for the triggered run to complete."
+        )]
+        wait: bool,
+        #[arg(
+            long,
+            requires = "wait",
+            value_parser = clap::value_parser!(u64).range(1..),
+            help = "Polling interval in seconds for --wait (minimum 1; default: 2)."
+        )]
+        interval: Option<u64>,
+        #[arg(
+            long,
+            requires = "wait",
+            value_name = "DURATION",
+            help = "Maximum time to wait after dispatch (examples: 30s, 10m, 1h). Omit for no timeout."
+        )]
+        timeout: Option<String>,
         #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
-    /// Runner registration tokens and queued jobs (REST API; uses `fj`'s stored API token).
+    /// Create or replace a repository Actions secret from standard input.
+    Secrets {
+        #[command(subcommand)]
+        command: ActionsSecretsSubcommand,
+    },
+    /// Create or replace a repository Actions variable from standard input.
+    Variables {
+        #[command(subcommand)]
+        command: ActionsVariablesSubcommand,
+    },
+    /// Runner registration tokens and queued jobs (REST API; needs an API token).
     Runners {
         #[command(subcommand)]
         command: ActionsRunnersSubcommand,
@@ -396,6 +717,32 @@ pub enum ActionsSubcommand {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum ActionsSecretsSubcommand {
+    /// Create or replace one repository Actions secret.
+    Set {
+        /// Secret name (for example HARBOR_PASSWORD).
+        #[arg(long)]
+        name: String,
+        /// Read the secret value from standard input. The value is never echoed.
+        #[arg(long, required = true)]
+        value_stdin: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ActionsVariablesSubcommand {
+    /// Create or replace one repository Actions variable.
+    Set {
+        /// Variable name (for example HARBOR_USERNAME).
+        #[arg(long)]
+        name: String,
+        /// Read the variable value from standard input. The value is never echoed.
+        #[arg(long, required = true)]
+        value_stdin: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum ActionsLogsSubcommand {
     /// Download logs for all jobs in a run.
     ///
@@ -439,6 +786,20 @@ pub enum ActionsLogsSubcommand {
         attempt: Option<NonZeroU32>,
         #[arg(long, help = "Write logs to this file (otherwise stdout).")]
         out_file: Option<std::path::PathBuf>,
+        #[arg(
+            long,
+            conflicts_with = "out_file",
+            help = "Poll the job log and print only newly available bytes until the run reaches a terminal state."
+        )]
+        follow: bool,
+        #[arg(
+            long,
+            default_value_t = 5,
+            value_parser = clap::value_parser!(u64).range(1..),
+            requires = "follow",
+            help = "Polling interval in seconds for --follow (minimum 1)."
+        )]
+        follow_interval: u64,
     },
 }
 

@@ -1,0 +1,24 @@
+name: slow [__FJEX_STACK__]
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: How many one-second ticks to print
+        required: false
+        default: "20"
+        type: string
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Tick
+        env:
+          TICKS: ${{ github.event.inputs.seconds }}
+        run: |
+          n="${TICKS:-20}"
+          for i in $(seq 1 "$n"); do
+            echo "fj-ex-e2e: tick $i/$n"
+            sleep 1
+          done
+          echo "fj-ex-e2e: slow job done"

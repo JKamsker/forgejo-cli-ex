@@ -1,0 +1,27 @@
+name: mixed [__FJEX_STACK__]
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  pass:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pass
+        run: |
+          echo "fj-ex-e2e: pass job ok"
+
+  fail:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless FJEX_MIXED_SHOULD_PASS is true
+        env:
+          SHOULD_PASS: ${{ vars.FJEX_MIXED_SHOULD_PASS }}
+        run: |
+          echo "fj-ex-e2e: fail job sees FJEX_MIXED_SHOULD_PASS=${SHOULD_PASS:-<unset>}"
+          if [ "${SHOULD_PASS:-}" = "true" ]; then
+            echo "fj-ex-e2e: fail job passes now"
+            exit 0
+          fi
+          echo "fj-ex-e2e: failing on purpose"
+          exit 1

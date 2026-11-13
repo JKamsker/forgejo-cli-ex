@@ -1,0 +1,5 @@
+{
+  "owner": "org",
+  "description": "workflow_dispatch with inputs (trigger, trigger --wait success/failure) reading a repository secret and variable; plus a job no runner can pick up (runners jobs --waiting).",
+  "branches": []
+}

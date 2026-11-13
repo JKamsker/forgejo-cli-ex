@@ -16,9 +16,14 @@ async fn run_list(args: TokenListCommand) -> eyre::Result<()> {
         args.target.remote.as_deref(),
     )?;
 
-    let token = crate::store::get_fj_api_token_for_base_url(&target.base_url)?
-        .ok_or_else(|| crate::actions::fj_missing_api_token_error(&target.base_url))?;
-    let client = crate::api::ApiClient::new(&target.base_url, &token)?;
+    let token = crate::credentials::resolve_api_token(&target.base_url)
+        .await?
+        .ok_or_else(|| crate::credentials::missing_api_token_error(&target.base_url))?;
+    let client = crate::api::ApiClient::new_with_socket(
+        &target.base_url,
+        &token.token,
+        target.unix_socket.as_deref(),
+    )?;
 
     let me: crate::api::AuthenticatedUser = client.get_json(&client.api_v1_url("/user")).await?;
     let url = client.api_v1_url(&format!(
@@ -27,7 +32,15 @@ async fn run_list(args: TokenListCommand) -> eyre::Result<()> {
         args.page,
         args.limit
     ));
-    let tokens: Vec<crate::api::ListedAccessToken> = client.get_json(&url).await?;
+    let ui_creds = crate::store::get_ui_creds(&target.base_url).await?;
+    let tokens: Vec<crate::api::ListedAccessToken> =
+        if let Some(creds) = ui_creds.filter(|creds| creds.username == me.login) {
+            client
+                .get_json_with_basic_auth(&url, &creds.username, &creds.password)
+                .await?
+        } else {
+            client.get_json(&url).await?
+        };
 
     if args.json {
         let payload = serde_json::json!({

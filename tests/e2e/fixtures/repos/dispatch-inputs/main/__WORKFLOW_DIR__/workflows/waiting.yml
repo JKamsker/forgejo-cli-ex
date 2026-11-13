@@ -1,0 +1,12 @@
+name: waiting [__FJEX_STACK__]
+on:
+  workflow_dispatch:
+
+jobs:
+  queued:
+    # No runner carries this label, so the job stays in the "waiting" state.
+    runs-on: fjex-no-such-runner
+    steps:
+      - name: Never runs
+        run: |
+          echo "fj-ex-e2e: this never runs"

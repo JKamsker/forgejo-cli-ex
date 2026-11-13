@@ -40,19 +40,32 @@ jobs:
 
   e2e:
     needs: test
-    name: e2e (Forgejo ${{ matrix.forgejo_version }})
+    name: e2e (${{ matrix.name }})
     strategy:
       fail-fast: false
       matrix:
+        # One job per server target; ids come from tests/e2e/harness/targets.rs.
         include:
-          - forgejo_version: "11.0.10"
-            test_name: "e2e_forgejo_11_0_10_docker"
-          - forgejo_version: "14.0.2"
-            test_name: "e2e_forgejo_14_0_2_docker"
-          - forgejo_version: "15.0.0"
-            test_name: "e2e_forgejo_15_0_0_docker"
+          - name: "Forgejo 15.0.11"
+            target: forgejo-15
+            test_name: e2e_forgejo_15_docker
+          - name: "Forgejo 16.0.7"
+            target: forgejo-16
+            test_name: e2e_forgejo_16_docker
+          - name: "Forgejo 17.0.1"
+            target: forgejo-17
+            test_name: e2e_forgejo_17_docker
+          - name: "Gitea 1.25.5"
+            target: gitea-1-25
+            test_name: e2e_gitea_1_25_docker
+          - name: "Gitea 1.26.4"
+            target: gitea-1-26
+            test_name: e2e_gitea_1_26_docker
+          - name: "Gitea 1.27.3"
+            target: gitea-1-27
+            test_name: e2e_gitea_1_27_docker
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -60,10 +73,20 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run ignored e2e tests (Docker + Forgejo)
+      - name: Run ignored e2e test (Docker)
         env:
           FJ_EX_E2E: "1"
-        run: cargo test --locked --test e2e_forgejo_docker ${{ matrix.test_name }} -- --ignored --nocapture --test-threads=1
+          FJ_EX_E2E_TARGET: ${{ matrix.target }}
+          FJ_EX_E2E_LOG_DIR: ${{ runner.temp }}/fjex-e2e-logs
+        run: cargo test --locked --test e2e_docker ${{ matrix.test_name }} -- --ignored --nocapture --test-threads=1
+
+      - name: Upload container logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ matrix.target }}
+          path: ${{ runner.temp }}/fjex-e2e-logs
+          if-no-files-found: ignore
 
       - name: Run Unix socket tests
         env:

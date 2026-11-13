@@ -139,23 +139,39 @@ pub fn normalize_base_url(host_or_url: &str) -> eyre::Result<String> {
 
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         let uri = Url::parse(trimmed).wrap_err("invalid base url")?;
-        let host = uri.host_str().ok_or_else(|| eyre!("url is missing host"))?;
-        let port = uri.port();
-        let port_part = port.map(|p| format!(":{p}")).unwrap_or_default();
-        return Ok(format!("{}://{}{}", uri.scheme(), host, port_part));
+        return normalized_http_base_url(&uri);
     }
 
     let no_frag = trimmed.split('#').next().unwrap_or(trimmed);
     let no_query = no_frag.split('?').next().unwrap_or(no_frag);
-    let host_part = no_query
-        .split('/')
-        .next()
-        .unwrap_or(no_query)
-        .trim_end_matches('/');
-    if host_part.is_empty() {
+    let host_or_base = no_query.trim_end_matches('/');
+    if host_or_base.is_empty() {
         return Err(eyre!("host is required"));
     }
-    Ok(format!("https://{host_part}"))
+
+    let uri = Url::parse(&format!("https://{host_or_base}")).wrap_err("invalid base url")?;
+    normalized_http_base_url(&uri)
+}
+
+fn normalized_http_base_url(uri: &Url) -> eyre::Result<String> {
+    let host = uri.host_str().ok_or_else(|| eyre!("url is missing host"))?;
+    let port = uri.port();
+    let port_part = port.map(|p| format!(":{p}")).unwrap_or_default();
+    let mut base = format!("{}://{}{}", uri.scheme(), host, port_part);
+
+    let path = uri.path().trim_end_matches('/');
+    if !path.is_empty() && path != "/" {
+        base.push_str(path);
+    }
+
+    Ok(base)
+}
+
+pub(crate) fn normalized_base_url_has_path(normalized: &str) -> bool {
+    url::Url::parse(normalized).is_ok_and(|url| {
+        let path = url.path().trim_end_matches('/');
+        !path.is_empty() && path != "/"
+    })
 }
 
 pub fn normalize_host_key(host_or_url: &str) -> eyre::Result<String> {
@@ -231,13 +247,114 @@ fn remote_url_to_host_and_repo(url_s: &str) -> eyre::Result<Option<(String, Repo
     let owner = segments.pop().unwrap();
     let name = name.strip_suffix(".git").unwrap_or(name);
 
+    let mut base = match url.scheme() {
+        // The web server's port is part of an http(s) remote. A plain-http
+        // remote is trusted only on loopback: elsewhere it is upgraded so
+        // that stored tokens (whose lookup ignores the scheme) never go out
+        // in cleartext; pass `--host http://...` to opt in explicitly.
+        scheme @ ("http" | "https") => {
+            let scheme = if scheme == "http" && !is_loopback_host(&url) {
+                "https"
+            } else {
+                scheme
+            };
+            let port_part = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{scheme}://{host}{port_part}")
+        }
+        // An ssh port belongs to the ssh daemon, not the web server.
+        _ => host.to_string(),
+    };
+    if !segments.is_empty() {
+        base.push('/');
+        base.push_str(&segments.join("/"));
+    }
+
     Ok(Some((
-        host.to_string(),
+        base,
         RepoName {
             owner: owner.to_string(),
             name: name.to_string(),
         },
     )))
+}
+
+fn is_loopback_host(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// How well a remote's host (and base path) matches a `--host` hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RemoteHintMatch {
+    None,
+    /// Same host and port, but not under the hint's base path.
+    Host,
+    /// Same host and port, and the remote is under the hint's base path (or
+    /// the hint has no path).
+    BasePath,
+}
+
+/// The path of a host or base URL without a trailing slash (empty at the root).
+fn base_url_path(host_or_url: &str) -> String {
+    normalize_base_url(host_or_url)
+        .ok()
+        .filter(|base| !base.starts_with("http+unix://"))
+        .and_then(|base| Url::parse(&base).ok())
+        .map(|url| url.path().trim_end_matches('/').to_string())
+        .unwrap_or_default()
+}
+
+fn path_is_or_under(path: &str, base_path: &str) -> bool {
+    path.strip_prefix(base_path)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Compares host and port (ignoring the scheme, since a remote may use ssh or
+/// http while the hint defaults to https) and then the base path, so that with
+/// `--host https://host/gitea` a remote under `/gitea` wins over another
+/// remote on the same domain.
+fn remote_hint_match(remote_host: &str, host_hint: &str) -> RemoteHintMatch {
+    let same_host = normalize_host_key(remote_host).is_ok_and(|remote_key| {
+        normalize_host_key(host_hint).is_ok_and(|hint_key| remote_key == hint_key)
+    });
+    if !same_host {
+        return RemoteHintMatch::None;
+    }
+
+    if path_is_or_under(&base_url_path(remote_host), &base_url_path(host_hint)) {
+        RemoteHintMatch::BasePath
+    } else {
+        RemoteHintMatch::Host
+    }
+}
+
+fn select_remote_by_host_hint(
+    repo: &git2::Repository,
+    remote_names: &[&str],
+    host_hint: &str,
+) -> eyre::Result<Option<String>> {
+    let mut best: Option<(RemoteHintMatch, &str)> = None;
+    for remote_name in remote_names {
+        let remote = repo.find_remote(remote_name)?;
+        let Some(url_s) = remote.url() else {
+            continue;
+        };
+
+        // A remote that is not a forge URL (a local path, file://) cannot
+        // match; it must not stop the search for one that does.
+        if let Ok(Some((host, _))) = remote_url_to_host_and_repo(url_s) {
+            let rank = remote_hint_match(&host, host_hint);
+            if rank > best.map_or(RemoteHintMatch::None, |(rank, _)| rank) {
+                best = Some((rank, remote_name));
+            }
+        }
+    }
+
+    Ok(best.map(|(_, remote_name)| remote_name.to_string()))
 }
 
 fn select_remote_name(
@@ -256,6 +373,12 @@ fn select_remote_name(
         return Ok(Some(remote_names[0].to_string()));
     }
 
+    if let Some(host_hint) = host_hint {
+        if let Some(remote_name) = select_remote_by_host_hint(repo, &remote_names, host_hint)? {
+            return Ok(Some(remote_name));
+        }
+    }
+
     if let Ok(head) = repo.head() {
         if let Some(branch_name) = head.name() {
             if let Ok(remote_name) = repo.branch_upstream_remote(branch_name) {
@@ -266,26 +389,7 @@ fn select_remote_name(
         }
     }
 
-    if let Some(host_hint) = host_hint {
-        if let Ok(hint_key) = normalize_host_key(host_hint) {
-            for remote_name in &remote_names {
-                let remote = repo.find_remote(remote_name)?;
-                let Some(url_s) = remote.url() else {
-                    continue;
-                };
-
-                if let Ok(parsed) = remote_url_to_host_and_repo(url_s) {
-                    if let Some((host, _)) = parsed {
-                        if host == hint_key {
-                            return Ok(Some((*remote_name).to_string()));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if remote_names.iter().any(|n| *n == "origin") {
+    if remote_names.contains(&"origin") {
         return Ok(Some("origin".to_string()));
     }
 
@@ -425,10 +529,18 @@ mod tests {
     }
 
     #[test]
-    fn normalize_base_url_strips_path() {
+    fn normalize_base_url_preserves_path_prefix() {
         assert_eq!(
-            normalize_base_url("https://forge.example.com:3000/some/path").unwrap(),
-            "https://forge.example.com:3000"
+            normalize_base_url("https://forge.example.com:3000/gitea/").unwrap(),
+            "https://forge.example.com:3000/gitea"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_accepts_bare_host_with_path() {
+        assert_eq!(
+            normalize_base_url("forge.example.com:3000/gitea").unwrap(),
+            "https://forge.example.com:3000/gitea"
         );
     }
 
@@ -462,7 +574,17 @@ mod tests {
             remote_url_to_host_and_repo("https://forge.example.com/alice/widgets.git")
                 .unwrap()
                 .unwrap();
-        assert_eq!(host, "forge.example.com");
+        assert_eq!(host, "https://forge.example.com");
+        assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
+    }
+
+    #[test]
+    fn remote_url_parses_https_with_base_path() {
+        let (host, repo) =
+            remote_url_to_host_and_repo("https://forge.example.com/gitea/alice/widgets.git")
+                .unwrap()
+                .unwrap();
+        assert_eq!(host, "https://forge.example.com/gitea");
         assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
     }
 
@@ -473,6 +595,149 @@ mod tests {
             .unwrap();
         assert_eq!(host, "forge.example.com");
         assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
+    }
+
+    #[test]
+    fn remote_url_drops_the_ssh_port() {
+        for remote in [
+            "ssh://git@forge.example.com:2222/alice/widgets.git",
+            "ssh://git@forge.example.com/alice/widgets.git",
+        ] {
+            let (host, repo) = remote_url_to_host_and_repo(remote).unwrap().unwrap();
+            assert_eq!(host, "forge.example.com", "{remote}");
+            assert_eq!(repo.as_owner_slash_name(), "alice/widgets");
+            assert_eq!(
+                normalize_base_url(&host).unwrap(),
+                "https://forge.example.com"
+            );
+            assert_eq!(
+                remote_hint_match(&host, "forge.example.com"),
+                RemoteHintMatch::BasePath
+            );
+        }
+    }
+
+    #[test]
+    fn remote_url_keeps_the_http_port_and_upgrades_non_loopback_http() {
+        let host = |remote: &str| remote_url_to_host_and_repo(remote).unwrap().unwrap().0;
+        assert_eq!(
+            host("https://forge.example.com:8443/alice/widgets.git"),
+            "https://forge.example.com:8443"
+        );
+        assert_eq!(
+            host("http://forge.example.com/alice/widgets.git"),
+            "https://forge.example.com"
+        );
+        assert_eq!(
+            host("http://forge.example.com:3000/gitea/alice/widgets.git"),
+            "https://forge.example.com:3000/gitea"
+        );
+        assert_eq!(
+            host("http://localhost:3000/alice/widgets.git"),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            host("http://127.0.0.1:3000/alice/widgets.git"),
+            "http://127.0.0.1:3000"
+        );
+        assert_eq!(
+            host("http://[::1]:3000/alice/widgets.git"),
+            "http://[::1]:3000"
+        );
+    }
+
+    #[test]
+    fn select_remote_name_skips_remotes_that_are_not_forge_urls() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        repo.remote("aaa", "/srv/git/widgets.git").unwrap();
+        repo.remote("bbb", "file:///srv/git/widgets.git").unwrap();
+        repo.remote("origin", "https://forge.example.com/alice/widgets.git")
+            .unwrap();
+
+        let selected = select_remote_name(&repo, None, Some("forge.example.com")).unwrap();
+        assert_eq!(selected.as_deref(), Some("origin"));
+    }
+
+    #[test]
+    fn select_remote_name_preserves_host_hint_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        repo.remote("aaa", "https://forge.example.com/other/bob/wrong.git")
+            .unwrap();
+        repo.remote("zzz", "https://forge.example.com/gitea/alice/widgets.git")
+            .unwrap();
+
+        let selected =
+            select_remote_name(&repo, None, Some("https://forge.example.com/gitea")).unwrap();
+
+        assert_eq!(selected.as_deref(), Some("zzz"));
+    }
+
+    #[test]
+    fn select_remote_name_prefers_remote_under_host_hint_path_regardless_of_scheme() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        repo.remote("aaa", "http://forge.example.com:3000/alice/root-app.git")
+            .unwrap();
+        repo.remote(
+            "bbb",
+            "http://forge.example.com:3000/gitea/alice/widgets.git",
+        )
+        .unwrap();
+        repo.remote("ccc", "http://forge.example.com:3000/gitea/bob/other.git")
+            .unwrap();
+
+        let selected =
+            select_remote_name(&repo, None, Some("forge.example.com:3000/gitea")).unwrap();
+        assert_eq!(selected.as_deref(), Some("bbb"));
+
+        // Without a path in the hint, the first remote on the host still wins.
+        let selected = select_remote_name(&repo, None, Some("forge.example.com:3000")).unwrap();
+        assert_eq!(selected.as_deref(), Some("aaa"));
+    }
+
+    #[test]
+    fn select_remote_name_falls_back_to_a_same_host_remote_outside_the_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = git2::Repository::init(temp.path()).unwrap();
+        repo.remote("aaa", "https://other.example.com/bob/wrong.git")
+            .unwrap();
+        repo.remote("zzz", "git@forge.example.com:alice/widgets.git")
+            .unwrap();
+
+        let selected =
+            select_remote_name(&repo, None, Some("https://forge.example.com/gitea")).unwrap();
+        assert_eq!(selected.as_deref(), Some("zzz"));
+    }
+
+    #[test]
+    fn remote_hint_match_ranks_base_path_over_host_only() {
+        let hint = "https://forge.example.com/gitea";
+        assert_eq!(
+            remote_hint_match("https://forge.example.com/gitea", hint),
+            RemoteHintMatch::BasePath
+        );
+        assert_eq!(
+            remote_hint_match("http://forge.example.com/gitea/sub", hint),
+            RemoteHintMatch::BasePath
+        );
+        assert_eq!(
+            remote_hint_match("https://forge.example.com/gitea-old", hint),
+            RemoteHintMatch::Host
+        );
+        assert_eq!(
+            remote_hint_match("forge.example.com", hint),
+            RemoteHintMatch::Host
+        );
+        assert_eq!(
+            remote_hint_match("https://other.example.com/gitea", hint),
+            RemoteHintMatch::None
+        );
+        assert_eq!(
+            remote_hint_match("https://forge.example.com/any", "forge.example.com"),
+            RemoteHintMatch::BasePath
+        );
     }
 
     #[test]

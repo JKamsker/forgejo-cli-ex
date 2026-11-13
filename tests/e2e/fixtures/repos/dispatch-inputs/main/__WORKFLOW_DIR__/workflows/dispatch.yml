@@ -1,0 +1,37 @@
+name: dispatch [__FJEX_STACK__]
+on:
+  workflow_dispatch:
+    inputs:
+      greeting:
+        description: Text echoed by the job
+        required: false
+        default: hello
+        type: string
+      outcome:
+        description: Whether the job succeeds or fails
+        required: false
+        default: success
+        type: choice
+        options:
+          - success
+          - failure
+
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Greet
+        env:
+          GREETING: ${{ github.event.inputs.greeting }}
+          OUTCOME: ${{ github.event.inputs.outcome }}
+          E2E_SECRET: ${{ secrets.FJEX_E2E_SECRET }}
+          E2E_VARIABLE: ${{ vars.FJEX_E2E_VARIABLE }}
+        run: |
+          echo "fj-ex-e2e: greeting=${GREETING}"
+          echo "fj-ex-e2e: secret-length=${#E2E_SECRET}"
+          echo "fj-ex-e2e: variable=${E2E_VARIABLE}"
+          if [ "${OUTCOME}" = "failure" ]; then
+            echo "fj-ex-e2e: failing as requested"
+            exit 1
+          fi
+          echo "fj-ex-e2e: outcome=${OUTCOME}"

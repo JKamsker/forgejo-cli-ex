@@ -1,0 +1,5 @@
+{
+  "owner": "org",
+  "description": "Passing CI on every push; uploads the artifact `my-artifact` (artifacts list/get, logs, smoke-test, remote inference).",
+  "branches": []
+}

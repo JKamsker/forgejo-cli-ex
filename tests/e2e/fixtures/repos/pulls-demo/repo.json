@@ -1,0 +1,11 @@
+{
+  "owner": "user",
+  "description": "No workflows; a feature branch for pull requests (pulls list/create/comment/review/comments/reviews/merge) and an always-empty runner job queue.",
+  "branches": [
+    {
+      "name": "feature/greeting",
+      "overlay": "branches/feature-greeting",
+      "message": "feat: friendlier greeting"
+    }
+  ]
+}
