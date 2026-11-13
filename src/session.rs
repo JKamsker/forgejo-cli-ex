@@ -172,9 +172,15 @@ impl UiSession {
             .await
             .wrap_err("failed to probe session")?;
 
-        if let Some(canonical) = canonical_host_redirect(self.request_base_url(), resp.url()) {
+        if let Some(target) = canonical_host_redirect(self.request_base_url(), resp.url()) {
+            // The destination is not verified: it looks like this instance's
+            // own settings/login page on another host (a ROOT_URL redirect),
+            // but an SSO proxy could use the same path.
             return Err(eyre!(
-                "'{}' redirected to '{canonical}', the instance's configured ROOT_URL;                  cookies are kept per host, so the session cannot work this way.                  Use `--host {canonical}` instead.",
+                "'{}' redirected the session check to another host, '{target}' (unverified). \
+                 If that is this instance's configured ROOT_URL, cookies only work there: \
+                 rerun with `--host {target}`. Otherwise the instance sends logins off-site \
+                 (e.g. SSO); import a browser session or use an API token instead.",
                 self.request_base_url()
             ));
         }
@@ -592,9 +598,9 @@ fn is_off_instance_url(base_url: &str, url: &Url) -> bool {
 }
 
 /// The origin (plus base path) a probe of `/user/settings` was redirected to
-/// when that is the same instance under its canonical ROOT_URL host: the
-/// final page is still the instance's own settings or login page, just on
-/// another origin. Identity-provider and forward-auth pages never match.
+/// when the final page looks like the instance's own settings or login page
+/// on another origin, as after a redirect to the canonical ROOT_URL host.
+/// This is judged by path only, so callers must present it as unverified.
 fn canonical_host_redirect(base_url: &str, url: &Url) -> Option<String> {
     if !is_off_instance_url(base_url, url) {
         return None;

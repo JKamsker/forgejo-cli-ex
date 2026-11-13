@@ -465,7 +465,8 @@ impl ActionsClient {
                     match jobs {
                         Ok(jobs) => failures.extend(unrerun_jobs(&jobs, &accepted)),
                         Err(e) => failures.push(format!(
-                            "the server accepted the reruns, but reloading the run to confirm them failed,                              so their state is unknown: {e}"
+                            "the server accepted the reruns, but reloading the run to confirm them failed, \
+                             so their state is unknown: {e}"
                         )),
                     }
                 }

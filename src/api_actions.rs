@@ -27,6 +27,7 @@
 //! their `html_url`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use eyre::{eyre, Context};
@@ -71,6 +72,30 @@ impl PageScan {
             None => got >= first_len.min(requested as usize),
         }
     }
+}
+
+/// Whether a run other than `run_id` is queued or running.
+fn is_other_active_run(run: &ApiRun, run_id: i64) -> bool {
+    run.id != run_id && matches!(run.status.as_deref(), Some("running" | "waiting"))
+}
+
+/// Scan run-list pages (from `fetch_page`) for an active run other than
+/// `run_id`, stopping at the first one or when the listing ends.
+async fn scan_for_active_run(
+    run_id: i64,
+    mut fetch_page: impl AsyncFnMut(u32) -> eyre::Result<(Vec<ApiRun>, Option<i64>)>,
+) -> eyre::Result<bool> {
+    let mut scan = PageScan::default();
+    for page in 1..=MAX_SCAN_PAGES {
+        let (runs, total) = fetch_page(page).await?;
+        if runs.iter().any(|run| is_other_active_run(run, run_id)) {
+            return Ok(true);
+        }
+        if !scan.more(runs.len(), total, SCAN_PAGE_SIZE) {
+            break;
+        }
+    }
+    Ok(false)
 }
 
 /// `total_count` of a list response, if the server sent one.
@@ -473,6 +498,7 @@ pub struct ApiActions {
     repo: String,
     server: ServerInfo,
     run_ids: Mutex<HashMap<i64, i64>>,
+    noted_ambiguous_block: AtomicBool,
 }
 
 pub struct RerunFailedOutcome {
@@ -503,6 +529,7 @@ impl ApiActions {
             repo: name.to_string(),
             server,
             run_ids: Mutex::new(HashMap::new()),
+            noted_ambiguous_block: AtomicBool::new(false),
         })
     }
 
@@ -831,12 +858,22 @@ impl ApiActions {
         let status = match run.status.as_deref() {
             // Gitea reports a run held back by its concurrency group as
             // Blocked, just like one awaiting approval, and the API exposes
-            // nothing else to tell them apart. While another run of the repo
-            // is still active the block can lift on its own, so keep waiting.
+            // nothing else to tell them apart. The block is ambiguous, so it
+            // is resolved conservatively: while any other run of the repo is
+            // still queued or running the block may lift on its own and the
+            // run is reported as waiting; once none is, it is final. An
+            // approval-gated run therefore ends a wait only after unrelated
+            // activity stops (or `--timeout` expires), which is noted once.
             Some("blocked")
                 if self.server.family == ServerFamily::Gitea
                     && self.other_run_is_active(run.id).await? =>
             {
+                if !self.noted_ambiguous_block.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "note: run #{index} is blocked, either by its concurrency group or awaiting approval; \
+                         waiting while other runs of the repository are still active"
+                    );
+                }
                 Some("waiting")
             }
             other => other,
@@ -844,12 +881,20 @@ impl ApiActions {
         Ok(status.map(ui_run_status_label))
     }
 
-    /// Whether a recent run other than `run_id` is still queued or running.
+    /// Whether a run other than `run_id` is still queued or running. The
+    /// server-side status filter keeps the scan short; the statuses are
+    /// checked again in case a server ignores the filter.
     async fn other_run_is_active(&self, run_id: i64) -> eyre::Result<bool> {
-        let runs = self.runs_page(1, SCAN_PAGE_SIZE, "").await?;
-        Ok(runs.iter().any(|run| {
-            run.id != run_id && matches!(run.status.as_deref(), Some("running" | "waiting"))
-        }))
+        for filter in ["&status=in_progress", "&status=queued"] {
+            let found = scan_for_active_run(run_id, async |page| {
+                self.runs_page_counted(page, SCAN_PAGE_SIZE, filter).await
+            })
+            .await?;
+            if found {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     pub fn run_url(&self, index: i64) -> String {
@@ -1485,5 +1530,58 @@ mod tests {
         };
         assert!(workflow_matches(&run, "ci.yml"));
         assert!(!workflow_matches(&run, "release.yml"));
+    }
+
+    fn run_with(id: i64, status: &str) -> ApiRun {
+        ApiRun {
+            id,
+            index: id,
+            status: Some(status.to_string()),
+            html_url: None,
+            branch: None,
+            created_at: None,
+            workflow: None,
+        }
+    }
+
+    /// Serves `pages` (1-based) with `total` as `total_count`.
+    async fn scan(run_id: i64, pages: Vec<Vec<ApiRun>>, total: Option<i64>) -> (bool, u32) {
+        let mut fetched = 0;
+        let found = scan_for_active_run(run_id, async |page| {
+            fetched = page;
+            Ok((
+                pages.get(page as usize - 1).cloned().unwrap_or_default(),
+                total,
+            ))
+        })
+        .await
+        .unwrap();
+        (found, fetched)
+    }
+
+    #[tokio::test]
+    async fn an_active_run_on_a_later_page_keeps_a_blocked_run_waiting() {
+        let full_page = |start: i64| -> Vec<ApiRun> {
+            (start..start + SCAN_PAGE_SIZE as i64)
+                .map(|id| run_with(id, "success"))
+                .collect()
+        };
+        let pages = vec![full_page(100), full_page(200), vec![run_with(7, "running")]];
+        assert_eq!(scan(1, pages, None).await, (true, 3));
+    }
+
+    #[tokio::test]
+    async fn the_blocked_run_itself_and_finished_runs_do_not_count_as_active() {
+        let pages = vec![vec![
+            run_with(1, "blocked"),
+            run_with(1, "waiting"),
+            run_with(2, "success"),
+            run_with(3, "failure"),
+        ]];
+        assert_eq!(scan(1, pages, Some(4)).await, (false, 1));
+        // An unrelated queued run also counts: the block is ambiguous, so the
+        // wait continues while anything else in the repository is active.
+        let pages = vec![vec![run_with(1, "blocked"), run_with(9, "waiting")]];
+        assert_eq!(scan(1, pages, Some(2)).await, (true, 1));
     }
 }

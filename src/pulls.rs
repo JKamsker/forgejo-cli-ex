@@ -487,25 +487,34 @@ fn read_review_body(
 
 fn read_body(body: Option<String>, body_file: Option<PathBuf>) -> eyre::Result<String> {
     let value = match (body, body_file) {
+        // An explicit --body is sent exactly as given.
         (Some(body), None) => body,
+        // Files and stdin usually end in a newline that is not meant as
+        // content; only those line endings are dropped.
         (None, Some(path)) if path == Path::new("-") => {
             let mut body = String::new();
             std::io::stdin()
                 .read_to_string(&mut body)
                 .wrap_err("failed to read body from stdin")?;
-            body
+            without_trailing_newlines(body)
         }
-        (None, Some(path)) => std::fs::read_to_string(&path)
-            .wrap_err_with(|| format!("failed to read body file '{}'", path.display()))?,
+        (None, Some(path)) => without_trailing_newlines(
+            std::fs::read_to_string(&path)
+                .wrap_err_with(|| format!("failed to read body file '{}'", path.display()))?,
+        ),
         (Some(_), Some(_)) => unreachable!("clap prevents conflicting body sources"),
         (None, None) => return Err(eyre!("provide either --body or --body-file")),
     };
     if value.trim().is_empty() {
         return Err(eyre!("body must not be empty"));
     }
-    // Leading whitespace is Markdown (an indented code block); only the
-    // trailing newline(s) of a file or stdin are dropped.
-    Ok(value.trim_end().to_string())
+    Ok(value)
+}
+
+fn without_trailing_newlines(mut body: String) -> String {
+    let kept = body.trim_end_matches(['\n', '\r']).len();
+    body.truncate(kept);
+    body
 }
 
 // Human-readable list output. Every server-controlled string is sanitized so
@@ -590,7 +599,8 @@ mod tests {
     use super::{
         complete_utf8_prefix_len, format_comment_line, format_pull_line, format_review_line,
         is_transient_merge_refusal, nonempty, read_body, read_review_body, request_base,
-        response_detail, BodyPrefix, ERROR_BODY_MAX_BYTES, ERROR_DETAIL_MAX_CHARS,
+        response_detail, without_trailing_newlines, BodyPrefix, ERROR_BODY_MAX_BYTES,
+        ERROR_DETAIL_MAX_CHARS,
     };
     use crate::cli::{PullState, ReviewEvent};
 
@@ -716,9 +726,15 @@ mod tests {
         assert_eq!(read_body(Some("hello".to_string()), None).unwrap(), "hello");
         assert!(read_body(None, None).is_err());
         assert!(read_body(Some(" ".to_string()), None).is_err());
+        // --body is sent verbatim, including trailing spaces (a Markdown line break).
         assert_eq!(
-            read_body(Some("    $ make test\n    ok\n\n".to_string()), None).unwrap(),
-            "    $ make test\n    ok"
+            read_body(Some("    $ make test\n    ok  \n".to_string()), None).unwrap(),
+            "    $ make test\n    ok  \n"
+        );
+        // Files and stdin lose only their trailing line endings.
+        assert_eq!(
+            without_trailing_newlines("    indented\n\tok  \r\n\n".to_string()),
+            "    indented\n\tok  "
         );
     }
 
