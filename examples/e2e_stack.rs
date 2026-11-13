@@ -19,7 +19,7 @@ mod harness;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use eyre::{eyre, Result};
+use eyre::{eyre, Context, Result};
 
 use harness::stack::{is_work_dir_of, write_fj_keys_json, write_private, Stack, StackOptions};
 use harness::{docker, targets};
@@ -103,6 +103,11 @@ async fn up(args: &[String]) -> Result<()> {
             other => return Err(eyre!("unexpected argument {other:?}")),
         }
     }
+    // The container label records this path for `down`, which may run from
+    // another directory, so a relative --work-root/CARGO_TARGET_DIR must be
+    // made absolute first.
+    let work_root = std::path::absolute(&work_root)
+        .wrap_err_with(|| format!("failed to resolve work root {}", work_root.display()))?;
     let target_id = target_id.ok_or_else(|| eyre!("missing <target>\n\n{USAGE}"))?;
     let target = targets::find(&target_id).ok_or_else(|| {
         let ids: Vec<&str> = targets::TARGETS.iter().map(|t| t.id).collect();

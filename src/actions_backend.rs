@@ -455,12 +455,19 @@ impl ActionsClient {
                 // Gitea answers 200 but skips a job rerun while the run is not
                 // done, which it no longer is after the first rerun. Check that
                 // every accepted job actually left its failed state.
+                // A failed post-check must not discard the reruns already sent.
                 if accepted.len() > 1 {
-                    let view = crate::ui_actions::get_run_view_data(s, repo, run_index)
-                        .await
-                        .wrap_err("failed to reload the run view to check the reruns")?;
-                    let jobs = crate::ui_actions::get_run_jobs(run_index, &view.view)?;
-                    failures.extend(unrerun_jobs(&jobs, &accepted));
+                    let jobs = match crate::ui_actions::get_run_view_data(s, repo, run_index).await
+                    {
+                        Ok(view) => crate::ui_actions::get_run_jobs(run_index, &view.view),
+                        Err(e) => Err(e),
+                    };
+                    match jobs {
+                        Ok(jobs) => failures.extend(unrerun_jobs(&jobs, &accepted)),
+                        Err(e) => failures.push(format!(
+                            "the server accepted the reruns, but reloading the run to confirm them failed,                              so their state is unknown: {e}"
+                        )),
+                    }
                 }
                 Ok(RerunFailedResult {
                     failures,

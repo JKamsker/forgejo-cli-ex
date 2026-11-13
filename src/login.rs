@@ -162,8 +162,19 @@ pub(crate) async fn validate_token(
                 .wrap_err("failed to decode /api/v1/user response")?;
             Ok(TokenValidation::User(user.login))
         }
-        // Forgejo/Gitea answer 403 for a valid token whose scopes exclude read:user.
-        403 => Ok(TokenValidation::MissingUserScope),
+        // Forgejo/Gitea answer 403 for a valid token whose scopes exclude
+        // read:user, but a 403 can also mean a blocked/inactive account or a
+        // proxy refusal, so the body must name the scope check.
+        403 => {
+            let body = resp.text().await.unwrap_or_default();
+            if is_scope_refusal(&body) {
+                Ok(TokenValidation::MissingUserScope)
+            } else {
+                Err(eyre!(
+                    "'{base_url}' refused the API token (HTTP 403) for a reason other than a missing scope. Check that the account is active and allowed to use the API."
+                ))
+            }
+        }
         401 => Err(eyre!(
             "The API token was rejected by '{base_url}' (HTTP 401). Check that it is current and was created on this instance."
         )),
@@ -171,6 +182,12 @@ pub(crate) async fn validate_token(
             "Unexpected HTTP {status} from '{url}' while validating the API token."
         )),
     }
+}
+
+/// Forgejo and Gitea refuse an under-scoped token with
+/// "token does not have at least one of required scope(s): [...]".
+fn is_scope_refusal(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("required scope")
 }
 
 async fn run_session_import(
@@ -476,6 +493,19 @@ async fn read_lines_from_stdin() -> eyre::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_scope_messages_count_as_missing_scope_refusals() {
+        // Gitea >= 1.21 / Forgejo wording, and the older colon-separated form.
+        assert!(is_scope_refusal(
+            r#"{"message":"token does not have at least one of required scope(s), required=[read:user], token scope=read:repository"}"#
+        ));
+        assert!(is_scope_refusal(
+            r#"{"message":"token does not have at least one of required scope(s): [read:user]"}"#
+        ));
+        assert!(!is_scope_refusal(r#"{"message":"user is blocked"}"#));
+        assert!(!is_scope_refusal(""));
+    }
 
     #[test]
     fn two_factor_prompt_error_names_the_non_interactive_options() {

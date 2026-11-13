@@ -201,11 +201,18 @@ impl ApiClient {
 
         let gitea_url = gitea_url.unwrap_or_default();
         let mut jobs = Vec::new();
+        // The server may cap the page size below what was asked for
+        // (MAX_RESPONSE_ITEMS), so a short page alone does not prove the
+        // listing is complete; `total_count` does when the server sends it.
+        let mut read = 0_u64;
+        let mut total = None;
         for page in 1..=GITEA_QUEUE_MAX_PAGES {
             let url =
                 format!("{gitea_url}?status=queued&page={page}&limit={GITEA_QUEUE_PAGE_SIZE}");
             let listed: GiteaWorkflowJobs = self.get_json(&url).await?;
             let count = listed.jobs.len();
+            read += count as u64;
+            total = listed.total_count.or(total);
             jobs.extend(
                 listed
                     .jobs
@@ -214,9 +221,19 @@ impl ApiClient {
                     .filter(|job| job.status.as_deref() == Some("waiting"))
                     .filter(|job| runner_could_take(job, labels)),
             );
-            if count < GITEA_QUEUE_PAGE_SIZE {
-                break;
+            let done = match total {
+                Some(total) => read >= total,
+                None => count < GITEA_QUEUE_PAGE_SIZE,
+            };
+            if done || count == 0 {
+                return Ok(jobs);
             }
+        }
+        if total.is_some_and(|total| read < total) {
+            eprintln!(
+                "warn: listed only the first {read} of {} queued jobs (page limit reached); the result may be incomplete.",
+                total.unwrap_or_default()
+            );
         }
         Ok(jobs)
     }
@@ -337,6 +354,8 @@ struct GiteaWorkflowJob {
 struct GiteaWorkflowJobs {
     #[serde(default)]
     jobs: Vec<GiteaWorkflowJob>,
+    #[serde(default)]
+    total_count: Option<u64>,
 }
 
 impl GiteaWorkflowJob {

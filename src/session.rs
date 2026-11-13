@@ -172,6 +172,12 @@ impl UiSession {
             .await
             .wrap_err("failed to probe session")?;
 
+        if let Some(canonical) = canonical_host_redirect(self.request_base_url(), resp.url()) {
+            return Err(eyre!(
+                "'{}' redirected to '{canonical}', the instance's configured ROOT_URL;                  cookies are kept per host, so the session cannot work this way.                  Use `--host {canonical}` instead.",
+                self.request_base_url()
+            ));
+        }
         if is_auth_challenge_url(self.request_base_url(), resp.url())
             || is_off_instance_url(self.request_base_url(), resp.url())
         {
@@ -585,6 +591,27 @@ fn is_off_instance_url(base_url: &str, url: &Url) -> bool {
     !base_path.is_empty() && !path_is_or_under(url.path(), base_path)
 }
 
+/// The origin (plus base path) a probe of `/user/settings` was redirected to
+/// when that is the same instance under its canonical ROOT_URL host: the
+/// final page is still the instance's own settings or login page, just on
+/// another origin. Identity-provider and forward-auth pages never match.
+fn canonical_host_redirect(base_url: &str, url: &Url) -> Option<String> {
+    if !is_off_instance_url(base_url, url) {
+        return None;
+    }
+    let relative = instance_relative_path(base_url, url);
+    if !path_is_or_under(relative, "/user/settings") && !path_is_or_under(relative, "/user/login") {
+        return None;
+    }
+    let path = url.path();
+    let base_path = path.strip_suffix(relative).unwrap_or_default();
+    let mut canonical = url.clone();
+    canonical.set_path(base_path);
+    canonical.set_query(None);
+    canonical.set_fragment(None);
+    Some(canonical.as_str().trim_end_matches('/').to_string())
+}
+
 /// Matches `/user/login` relative to the instance base path, so both
 /// `https://host/user/login` and `https://host/gitea/user/login` (for a
 /// `https://host/gitea` instance) are detected, but repository pages such as
@@ -758,6 +785,45 @@ mod tests {
         let session = UiSession::new(&format!("http://127.0.0.1:{port}"), None).unwrap();
         assert!(!session.test_session().await.unwrap());
         assert_eq!(session.fetch_login().await, None);
+    }
+
+    #[tokio::test]
+    async fn session_probe_names_the_canonical_host_after_a_root_url_redirect() {
+        // 127.0.0.1 redirects to the same instance under its ROOT_URL host.
+        let port = spawn_redirecting_server(|port| format!("http://localhost:{port}/user/login"));
+        let session = UiSession::new(&format!("http://127.0.0.1:{port}"), None).unwrap();
+        let err = session.test_session().await.unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("--host http://localhost:{port}")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn canonical_host_redirects_keep_the_base_path_and_skip_idp_pages() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        assert_eq!(
+            canonical_host_redirect(
+                "https://10.0.0.5/gitea",
+                &url("https://git.example.com/gitea/user/login?redirect_to=x")
+            )
+            .as_deref(),
+            Some("https://git.example.com/gitea")
+        );
+        assert_eq!(
+            canonical_host_redirect(
+                "https://forge.example.com",
+                &url("https://idp.example.com/login")
+            ),
+            None
+        );
+        assert_eq!(
+            canonical_host_redirect(
+                "https://forge.example.com",
+                &url("https://forge.example.com/user/login")
+            ),
+            None
+        );
     }
 
     #[tokio::test]

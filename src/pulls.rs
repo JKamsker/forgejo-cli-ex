@@ -6,7 +6,7 @@ use eyre::{eyre, Context};
 use reqwest::{RequestBuilder, Response};
 use serde_json::{json, Value};
 
-use crate::cli::{PullsCommand, PullsSubcommand};
+use crate::cli::{PullsCommand, PullsSubcommand, ReviewEvent};
 use crate::output::{sanitize_line, sanitize_terminal_text};
 
 pub async fn run(args: PullsCommand) -> eyre::Result<()> {
@@ -209,7 +209,7 @@ pub async fn run(args: PullsCommand) -> eyre::Result<()> {
             commit,
             json,
         } => {
-            let body = read_body(body, body_file)?;
+            let body = read_review_body(event, body, body_file)?;
             let mut request_body = json!({
                 "body": body,
                 "event": event.as_api_value(),
@@ -472,6 +472,19 @@ async fn response_value(response: Response, operation: &str) -> eyre::Result<Val
         .wrap_err_with(|| format!("failed to parse {operation} response as JSON"))
 }
 
+/// An approval may be submitted without a body; every other review event
+/// needs one, because Forgejo/Gitea reject an empty comment or change request.
+fn read_review_body(
+    event: ReviewEvent,
+    body: Option<String>,
+    body_file: Option<PathBuf>,
+) -> eyre::Result<String> {
+    if event == ReviewEvent::Approve && body.is_none() && body_file.is_none() {
+        return Ok(String::new());
+    }
+    read_body(body, body_file)
+}
+
 fn read_body(body: Option<String>, body_file: Option<PathBuf>) -> eyre::Result<String> {
     let value = match (body, body_file) {
         (Some(body), None) => body,
@@ -479,16 +492,16 @@ fn read_body(body: Option<String>, body_file: Option<PathBuf>) -> eyre::Result<S
             let mut body = String::new();
             std::io::stdin()
                 .read_to_string(&mut body)
-                .wrap_err("failed to read comment body from stdin")?;
+                .wrap_err("failed to read body from stdin")?;
             body
         }
         (None, Some(path)) => std::fs::read_to_string(&path)
-            .wrap_err_with(|| format!("failed to read comment body file '{}'", path.display()))?,
+            .wrap_err_with(|| format!("failed to read body file '{}'", path.display()))?,
         (Some(_), Some(_)) => unreachable!("clap prevents conflicting body sources"),
         (None, None) => return Err(eyre!("provide either --body or --body-file")),
     };
     if value.trim().is_empty() {
-        return Err(eyre!("comment body must not be empty"));
+        return Err(eyre!("body must not be empty"));
     }
     // Leading whitespace is Markdown (an indented code block); only the
     // trailing newline(s) of a file or stdin are dropped.
@@ -576,8 +589,8 @@ fn format_review_line(review: &Value) -> String {
 mod tests {
     use super::{
         complete_utf8_prefix_len, format_comment_line, format_pull_line, format_review_line,
-        is_transient_merge_refusal, nonempty, read_body, request_base, response_detail, BodyPrefix,
-        ERROR_BODY_MAX_BYTES, ERROR_DETAIL_MAX_CHARS,
+        is_transient_merge_refusal, nonempty, read_body, read_review_body, request_base,
+        response_detail, BodyPrefix, ERROR_BODY_MAX_BYTES, ERROR_DETAIL_MAX_CHARS,
     };
     use crate::cli::{PullState, ReviewEvent};
 
@@ -706,6 +719,20 @@ mod tests {
         assert_eq!(
             read_body(Some("    $ make test\n    ok\n\n".to_string()), None).unwrap(),
             "    $ make test\n    ok"
+        );
+    }
+
+    #[test]
+    fn only_approvals_may_omit_the_review_body() {
+        assert_eq!(
+            read_review_body(ReviewEvent::Approve, None, None).unwrap(),
+            ""
+        );
+        assert!(read_review_body(ReviewEvent::Comment, None, None).is_err());
+        assert!(read_review_body(ReviewEvent::RequestChanges, None, None).is_err());
+        assert_eq!(
+            read_review_body(ReviewEvent::Approve, Some("lgtm".to_string()), None).unwrap(),
+            "lgtm"
         );
     }
 

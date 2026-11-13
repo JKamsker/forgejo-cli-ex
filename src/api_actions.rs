@@ -270,7 +270,8 @@ pub fn normalize_status(
         ServerFamily::Forgejo => status.map(str::to_ascii_lowercase),
         // Gitea uses GitHub-compatible status/conclusion pairs. Its converter
         // (`ToActionsStatus`) reports its own Waiting status as `queued` and
-        // Blocked (awaiting approval, `needs` or concurrency) as `waiting`.
+        // Blocked (awaiting approval, `needs` or concurrency) as `waiting`;
+        // `run_status` tells a concurrency block apart where it can.
         ServerFamily::Gitea => match status.map(str::to_ascii_lowercase).as_deref() {
             Some("completed") => Some(
                 conclusion
@@ -826,12 +827,29 @@ impl ApiActions {
     }
 
     pub async fn run_status(&self, index: i64) -> eyre::Result<Option<String>> {
-        Ok(self
-            .find_run(index)
-            .await?
-            .status
-            .as_deref()
-            .map(ui_run_status_label))
+        let run = self.find_run(index).await?;
+        let status = match run.status.as_deref() {
+            // Gitea reports a run held back by its concurrency group as
+            // Blocked, just like one awaiting approval, and the API exposes
+            // nothing else to tell them apart. While another run of the repo
+            // is still active the block can lift on its own, so keep waiting.
+            Some("blocked")
+                if self.server.family == ServerFamily::Gitea
+                    && self.other_run_is_active(run.id).await? =>
+            {
+                Some("waiting")
+            }
+            other => other,
+        };
+        Ok(status.map(ui_run_status_label))
+    }
+
+    /// Whether a recent run other than `run_id` is still queued or running.
+    async fn other_run_is_active(&self, run_id: i64) -> eyre::Result<bool> {
+        let runs = self.runs_page(1, SCAN_PAGE_SIZE, "").await?;
+        Ok(runs.iter().any(|run| {
+            run.id != run_id && matches!(run.status.as_deref(), Some("running" | "waiting"))
+        }))
     }
 
     pub fn run_url(&self, index: i64) -> String {

@@ -101,7 +101,15 @@ fn repair_invalid_store(
     let backup = backup_path(store_path)?;
     // The backup holds the same secrets as the store, so it gets the same
     // owner-only permissions (`std::fs::copy` would copy the old mode).
-    let _ = write_private_file_new(&backup, raw.as_bytes());
+    // Without a backup, the repair below would be the only copy of the
+    // original data, so stop rather than risk losing it.
+    write_private_file_new(&backup, raw.as_bytes()).wrap_err_with(|| {
+        format!(
+            "invalid creds store JSON at '{}', and backing it up to '{}' failed; leaving it untouched",
+            store_path.display(),
+            backup.display()
+        )
+    })?;
 
     let repaired = repair_creds_store_from_raw(raw)?;
     if !repaired.is_empty() {

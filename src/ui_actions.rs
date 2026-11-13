@@ -599,6 +599,26 @@ where
     Ok(written)
 }
 
+/// The typed error `copy_response_body_with_limit` returns when the body is
+/// larger than allowed, so callers can tell it apart from I/O failures.
+#[derive(Debug)]
+pub struct ResponseBodyLimitExceeded {
+    pub received: u64,
+    pub max_bytes: u64,
+}
+
+impl std::fmt::Display for ResponseBodyLimitExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Response body exceeds limit ({} bytes > {} bytes).",
+            self.received, self.max_bytes
+        )
+    }
+}
+
+impl std::error::Error for ResponseBodyLimitExceeded {}
+
 pub async fn copy_response_body_with_limit<W>(
     mut resp: reqwest::Response,
     writer: &mut W,
@@ -617,9 +637,10 @@ where
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| eyre!("response body is too large to count"))?;
         if next_written > max_bytes {
-            return Err(eyre!(
-                "Response body exceeds limit ({next_written} bytes > {max_bytes} bytes)."
-            ));
+            return Err(eyre::Report::new(ResponseBodyLimitExceeded {
+                received: next_written,
+                max_bytes,
+            }));
         }
 
         writer

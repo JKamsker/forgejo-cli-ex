@@ -99,10 +99,17 @@ pub async fn run(args: SmokeTestCommand) -> eyre::Result<()> {
         )
         .await
         .map_err(|err| {
-            eyre::eyre!(
-                "Log file exceeds LogDownloadMaxBytes ({}): {err}. Rerun with a larger limit.",
-                args.opts.log_download_max_bytes
-            )
+            if err
+                .downcast_ref::<crate::ui_actions::ResponseBodyLimitExceeded>()
+                .is_some()
+            {
+                eyre::eyre!(
+                    "Log file exceeds LogDownloadMaxBytes ({}): {err}. Rerun with a larger limit.",
+                    args.opts.log_download_max_bytes
+                )
+            } else {
+                err.wrap_err("failed to download the job log")
+            }
         })?;
         file.flush().await?;
         drop(file);

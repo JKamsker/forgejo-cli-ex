@@ -669,6 +669,7 @@ fn logins_for_http_and_https_on_one_host_do_not_overwrite_each_other() {
     assert_eq!(http.api_token.as_deref(), Some("http-tok"));
 }
 
+#[cfg(unix)]
 #[test]
 fn unix_socket_logins_are_keyed_by_socket_url() {
     let temp = tempfile::tempdir().unwrap();
