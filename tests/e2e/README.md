@@ -23,7 +23,8 @@ Each row also carries capability flags (`Caps`). A flag is off only when a
 server genuinely lacks a feature; the affected check is then logged in the run
 summary instead of passing silently. Today the gates are all about the REST
 API that `fj-ex actions` uses with only an API token (the web-UI backend
-supports everything on every target). For a gated operation the suite asserts
+supports everything on every target, except `ui_run_priority`: only Forgejo
+16+ can prioritize runs). For a gated operation the suite asserts
 that fj-ex refuses with the expected message and logs `GATED <capability>`:
 
 | REST operation (token only)   | Forgejo 15     | Forgejo 16     | Forgejo 17 | Gitea 1.25     | Gitea 1.26 / 1.27 |
@@ -33,6 +34,15 @@ that fj-ex refuses with the expected message and logs `GATED <capability>`:
 | `cancel`                      | added in 16    | yes            | yes        | no endpoint    | no endpoint       |
 | `rerun --failed-only`         | added in 17    | added in 17    | yes        | added in 1.26  | yes               |
 | `workflows`                   | no endpoint    | no endpoint    | no endpoint| yes            | yes               |
+
+Where `ui_run_priority` is on (Forgejo 16 and 17), the prioritize scenario
+also proves the effect on a runner: it queues three `priority.yml` runs that
+no runner can take, prioritizes the newest, and only then starts a second
+runner (label `fjex-priority`, capacity 1). The task list of the repository
+(`GET /repos/{owner}/{repo}/actions/tasks`; task ids grow with every pick)
+must show the prioritized run picked first and the other two in the order
+they were queued. On the other targets the scenario asserts the "no run
+prioritization" refusal instead.
 
 `session_cookie` names the web session cookie used by the session-import
 scenario (`session` on Forgejo, `i_like_gitea` on Gitea).
@@ -59,7 +69,7 @@ name, so the tag keeps parallel stacks on one Docker daemon apart).
 |----------------------------|---------|
 | `fjex-demo/ci-artifacts`   | passing `ci.yml` on push, uploads `my-artifact` (artifacts, logs, smoke-test, remote inference) |
 | `fjex-demo/ci-mixed`       | `mixed.yml`: a `pass` and a `fail` job; `fail` passes once the variable `FJEX_MIXED_SHOULD_PASS` is `true` (wait exit codes, `rerun --failed-only`) |
-| `fjex-demo/dispatch-inputs`| `dispatch.yml` (`workflow_dispatch` inputs `greeting`/`outcome`, reads secret `FJEX_E2E_SECRET` and variable `FJEX_E2E_VARIABLE`) and `waiting.yml` (a job no runner can take) |
+| `fjex-demo/dispatch-inputs`| `dispatch.yml` (`workflow_dispatch` inputs `greeting`/`outcome`, reads secret `FJEX_E2E_SECRET` and variable `FJEX_E2E_VARIABLE`) `waiting.yml` (a job no runner can take; runner queue, `prioritize`) and `priority.yml` (a job only the extra runner of the prioritize scenario takes) |
 | `fjex-demo/slow-job`       | `slow.yml`: one tick per second (`logs job --follow`, `jobs --watch --json-lines`, cancel) |
 | `e2e/pulls-demo`           | no workflows, branch `feature/greeting` (all `pulls` subcommands, empty runner queue) |
 
@@ -123,7 +133,7 @@ every command; scenarios set token variables explicitly where they test them.
 ### Isolation and cleanup
 
 Every run creates a stack id `fjex-e2e-<target>-<random>`; all its containers
-(server, runner and, through the runner config, job containers) are named
+(server, runners and, through the runner config, job containers) are named
 with that prefix and labelled `fjex-e2e.stack=<id>`. The server listens on a
 random free port bound to `127.0.0.1`. A drop guard removes the stack's
 containers even when a scenario fails or panics; on failure it first prints
@@ -171,7 +181,7 @@ tests/e2e/harness/            shared with examples/e2e_stack.rs
   docker.rs, totp.rs, util.rs
 tests/e2e/scenarios/          auth, tokens, token_auth (token-only REST, stored tokens,
                               session import), runners, secrets/variables, runs/jobs/wait,
-                              logs, artifacts, trigger, follow/watch, cancel/rerun,
+                              logs, artifacts, trigger, follow/watch, cancel/rerun, priority,
                               pulls, smoke-test, remote inference
 tests/e2e/fixtures/repos/     demo repositories
 tests/e2e/up.sh, down.sh      manual stacks

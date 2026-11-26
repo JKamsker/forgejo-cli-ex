@@ -11,6 +11,7 @@ mod control;
 mod dispatch;
 mod logs;
 mod misc;
+mod priority;
 mod pulls;
 mod runners;
 mod settings;
@@ -190,6 +191,7 @@ pub async fn run_all(stack: &Stack) -> Result<()> {
         outcomes.push(scenario(&ctx, "follow-watch", watch::follow_and_watch(&ctx)).await);
         outcomes.push(scenario(&ctx, "cancel", control::cancel(&ctx)).await);
         outcomes.push(scenario(&ctx, "rerun", control::rerun(&ctx)).await);
+        outcomes.push(scenario(&ctx, "prioritize", priority::run(&ctx)).await);
         outcomes.push(scenario(&ctx, "runner-queue", runners::waiting_queue(&ctx)).await);
         outcomes.push(scenario(&ctx, "pulls", pulls::run(&ctx)).await);
         outcomes.push(scenario(&ctx, "auth-logout", auth::logout(&ctx)).await);

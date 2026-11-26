@@ -60,6 +60,8 @@ pub struct Caps {
     pub api_rerun_failed: Api,
     /// REST: list workflows.
     pub api_workflows: Api,
+    /// Web UI: prioritize / deprioritize a run (`actions prioritize`).
+    pub ui_run_priority: bool,
     /// Name of the web session cookie (for `auth login --session-cookie-stdin`).
     pub session_cookie: &'static str,
 }
@@ -76,6 +78,7 @@ impl Caps {
             "api_cancel" => "the REST API cannot cancel runs",
             "api_rerun_failed" => "the REST API cannot rerun failed jobs",
             "api_workflows" => "the REST API cannot list workflows",
+            "ui_run_priority" => "the web UI has no run prioritization",
             _ => "capability disabled for this target",
         }
     }
@@ -88,12 +91,14 @@ const FORGEJO_15_CAPS: Caps = Caps {
     api_cancel: Api::Since("Forgejo 16"),
     api_rerun_failed: Api::Since("Forgejo 17"),
     api_workflows: Api::No,
+    ui_run_priority: false,
     session_cookie: "session",
 };
 const FORGEJO_16_CAPS: Caps = Caps {
     api_jobs: Api::Yes,
     api_logs: Api::Yes,
     api_cancel: Api::Yes,
+    ui_run_priority: true,
     ..FORGEJO_15_CAPS
 };
 const FORGEJO_17_CAPS: Caps = Caps {
@@ -107,6 +112,7 @@ const GITEA_1_25_CAPS: Caps = Caps {
     api_cancel: Api::No,
     api_rerun_failed: Api::Since("Gitea 1.26"),
     api_workflows: Api::Yes,
+    ui_run_priority: false,
     session_cookie: "i_like_gitea",
 };
 const GITEA_1_26_CAPS: Caps = Caps {

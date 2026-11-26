@@ -13,6 +13,7 @@
 //! | cancel run             | no         | yes        | yes        | no         | no         | no         |
 //! | rerun run / job        | no         | no         | yes        | no         | yes        | yes        |
 //! | rerun failed jobs      | no         | no         | yes (*)    | no         | yes        | yes        |
+//! | (de)prioritize run     | no         | no         | no         | no         | no         | no         |
 //! | list/download artifacts| no         | yes        | yes        | yes (v4)   | yes (v4)   | yes (v4)   |
 //! | list workflows         | no         | no         | no         | yes        | yes        | yes        |
 //! | workflow dispatch      | yes        | yes        | yes        | yes        | yes        | yes        |
@@ -177,6 +178,7 @@ pub enum ApiOp {
     RerunRun,
     RerunJob,
     RerunFailed,
+    Prioritize,
     ListArtifacts,
     DownloadArtifact,
     ListWorkflows,
@@ -193,6 +195,7 @@ impl ApiOp {
             Self::RerunRun => "rerunning a run",
             Self::RerunJob => "rerunning a job",
             Self::RerunFailed => "rerunning failed jobs",
+            Self::Prioritize => "prioritizing or deprioritizing a run",
             Self::ListArtifacts => "listing artifacts",
             Self::DownloadArtifact => "downloading artifacts",
             Self::ListWorkflows => "listing workflows",
@@ -227,7 +230,7 @@ fn min_version(family: ServerFamily, op: ApiOp) -> Option<(Version, &'static str
                 Some(((16, 0, 0), "Forgejo 16"))
             }
             RerunRun | RerunJob | RerunFailed => Some(((17, 0, 0), "Forgejo 17")),
-            ListWorkflows => None,
+            ListWorkflows | Prioritize => None,
         },
         ServerFamily::Gitea => match op {
             ListRuns | ListJobs | JobLogs | ListArtifacts | DownloadArtifact | ListWorkflows => {
@@ -235,7 +238,7 @@ fn min_version(family: ServerFamily, op: ApiOp) -> Option<(Version, &'static str
             }
             RerunRun | RerunJob | RerunFailed => Some(((1, 26, 0), "Gitea 1.26")),
             JobLogsAttempt => Some(((1, 27, 0), "Gitea 1.27")),
-            Cancel => None,
+            Cancel | Prioritize => None,
         },
     }
 }
@@ -545,7 +548,7 @@ impl ApiActions {
         ))
     }
 
-    fn unsupported(&self, op: ApiOp, since: Option<&str>) -> eyre::Report {
+    pub(crate) fn unsupported(&self, op: ApiOp, since: Option<&str>) -> eyre::Report {
         let added = since
             .map(|s| format!(" (it was added in {s})"))
             .unwrap_or_default();

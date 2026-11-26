@@ -714,6 +714,48 @@ pub enum ActionsSubcommand {
         #[arg(long, help = "Print JSON output.")]
         json: bool,
     },
+    /// Prioritize a run that has not finished, so its jobs are handed to runners first (web UI only; Forgejo 16+).
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
+    Prioritize {
+        #[arg(long, help = "Run index to prioritize.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(
+            long,
+            help = "Print the request that would be made, but do not perform it."
+        )]
+        dry_run: bool,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
+    },
+    /// Remove the prioritized mark from a run (web UI only; Forgejo 16+).
+    #[command(group(
+        clap::ArgGroup::new("run_selector")
+            .required(true)
+            .args(["run_index", "latest"])
+    ))]
+    Deprioritize {
+        #[arg(long, help = "Run index to deprioritize.")]
+        run_index: Option<NonZeroU64>,
+        #[arg(long, help = "Use the latest run.")]
+        latest: bool,
+        #[arg(long, help = "When using --latest, filter runs by workflow name.")]
+        workflow: Option<String>,
+        #[arg(
+            long,
+            help = "Print the request that would be made, but do not perform it."
+        )]
+        dry_run: bool,
+        #[arg(long, help = "Print JSON output.")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]

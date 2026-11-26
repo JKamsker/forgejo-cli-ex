@@ -969,6 +969,48 @@ pub async fn run(args: ActionsCommand) -> eyre::Result<()> {
                         println!("{}", crate::output::sanitize_line(&redirect));
                     }
                 }
+                ActionsSubcommand::Prioritize {
+                    run_index,
+                    latest,
+                    workflow,
+                    dry_run,
+                    json,
+                } => {
+                    let run_index =
+                        resolve_run_index(session, &repo, run_index, latest, workflow.as_deref())
+                            .await?;
+                    set_run_priority(
+                        session,
+                        &target.base_url,
+                        &repo,
+                        run_index,
+                        true,
+                        dry_run,
+                        json,
+                    )
+                    .await?;
+                }
+                ActionsSubcommand::Deprioritize {
+                    run_index,
+                    latest,
+                    workflow,
+                    dry_run,
+                    json,
+                } => {
+                    let run_index =
+                        resolve_run_index(session, &repo, run_index, latest, workflow.as_deref())
+                            .await?;
+                    set_run_priority(
+                        session,
+                        &target.base_url,
+                        &repo,
+                        run_index,
+                        false,
+                        dry_run,
+                        json,
+                    )
+                    .await?;
+                }
                 ActionsSubcommand::Trigger { .. } | ActionsSubcommand::SmokeTest(_) => {
                     unreachable!("handled before backend initialization")
                 }
@@ -1777,6 +1819,52 @@ async fn run_runners(
         }
     }
 
+    Ok(())
+}
+
+async fn set_run_priority(
+    session: &crate::actions_backend::ActionsClient,
+    base_url: &str,
+    repo: &str,
+    run_index: i64,
+    prioritize: bool,
+    dry_run: bool,
+    json: bool,
+) -> eyre::Result<()> {
+    if dry_run {
+        let url = session.priority_url(repo, run_index, prioritize)?;
+        if json {
+            let payload = serde_json::json!({
+                "baseUrl": base_url,
+                "repo": repo,
+                "runIndex": run_index,
+                "dryRun": true,
+                "url": url,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("DRY RUN: POST {url}");
+        }
+        return Ok(());
+    }
+
+    let url = session.set_priority(repo, run_index, prioritize).await?;
+
+    if json {
+        let payload = serde_json::json!({
+            "baseUrl": base_url,
+            "repo": repo,
+            "runIndex": run_index,
+            "dryRun": false,
+            "url": url,
+            "prioritized": prioritize,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else if prioritize {
+        println!("Prioritized run #{run_index}");
+    } else {
+        println!("Deprioritized run #{run_index}");
+    }
     Ok(())
 }
 

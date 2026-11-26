@@ -94,6 +94,7 @@ fj-ex pulls review --repo owner/name --index 42 --body-file review.md
 | `actions artifacts` | List / download artifacts |
 | `actions cancel` | Cancel a running workflow |
 | `actions rerun` | Rerun a workflow (optionally `--failed-only`) |
+| `actions prioritize` / `deprioritize` | Mark a queued run as prioritized, or remove the mark (web UI only; Forgejo 16+) |
 | `actions trigger` | Dispatch a `workflow_dispatch` event; `--wait` waits for the dispatched run like `actions wait` |
 | `actions secrets set` | Create or replace a repository Actions secret from stdin; never accepts or echoes a literal value |
 | `actions variables set` | Create or replace a repository Actions variable from stdin; never accepts or echoes a literal value |
@@ -186,6 +187,7 @@ Forgejo/Gitea web routes do not accept API tokens, and REST coverage of Actions 
 | `artifacts list/get` | – | yes | yes | v4 only | v4 only | v4 only |
 | `cancel` | – | yes | yes | – | – | – |
 | `rerun` (run, `--job-index`, `--failed-only`) | – | – | yes | – | yes | yes |
+| `prioritize`, `deprioritize` | – | – | – | – | – | – |
 | `workflows` | – | – | – | yes | yes | yes |
 
 Unsupported combinations fail with a message naming the missing endpoint and pointing to a UI

@@ -1,0 +1,13 @@
+name: priority [__FJEX_STACK__]
+on:
+  workflow_dispatch:
+
+jobs:
+  queued:
+    # Only the capacity-1 runner that the prioritize scenario starts carries
+    # this label, so runs queue up until then and are picked one at a time.
+    runs-on: fjex-priority
+    steps:
+      - name: Echo
+        run: |
+          echo "fj-ex-e2e: picked"
