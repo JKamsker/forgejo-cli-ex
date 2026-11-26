@@ -302,21 +302,40 @@ impl Stack {
         Ok(())
     }
 
-    fn runner_config(&self) -> String {
+    fn runner_config(&self, label: &str, capacity: u32) -> String {
         format!(
-            "log:\n  level: info\nrunner:\n  file: /data/.runner\n  capacity: 2\n  timeout: 20m\n  fetch_interval: 1s\n  report_interval: 1s\n  labels:\n    - \"{label}\"\ncache:\n  enabled: false\ncontainer:\n  network: host\n  force_pull: false\n  options: \"--label {l}=1 --label {sl}={id}\"\n",
-            label = self.runner_label(),
+            "log:\n  level: info\nrunner:\n  file: /data/.runner\n  capacity: {capacity}\n  timeout: 20m\n  fetch_interval: 1s\n  report_interval: 1s\n  labels:\n    - \"{label}\"\ncache:\n  enabled: false\ncontainer:\n  network: host\n  force_pull: false\n  options: \"--label {l}=1 --label {sl}={id}\"\n",
+            label = runner_label(label),
             l = docker::LABEL,
             sl = docker::STACK_LABEL,
             id = self.id,
         )
     }
 
-    fn runner_label(&self) -> String {
-        format!("{RUNNER_LABEL}:docker://{JOB_IMAGE}")
+    async fn start_runner(&mut self) -> Result<()> {
+        self.launch_runner(&self.runner_container, RUNNER_LABEL, 2)
+            .await?;
+        self.log("runner registered");
+        Ok(())
     }
 
-    async fn start_runner(&mut self) -> Result<()> {
+    /// Register and start one more runner, `<stack id>-runner-<name>`, that takes
+    /// only jobs with `runs-on: <label>`, `capacity` at a time. Returns the
+    /// container name; the drop guard removes it with the stack.
+    pub async fn start_extra_runner(
+        &self,
+        name: &str,
+        label: &str,
+        capacity: u32,
+    ) -> Result<String> {
+        let container = format!("{}-runner-{name}", self.id);
+        self.launch_runner(&container, label, capacity).await?;
+        Ok(container)
+    }
+
+    /// Create, register and start a runner container, and wait until it has
+    /// declared itself to the server.
+    async fn launch_runner(&self, container: &str, label: &str, capacity: u32) -> Result<()> {
         let output = self
             .server_exec(&["actions", "generate-runner-token"])
             .wrap_err("failed to generate a runner registration token")?;
@@ -328,18 +347,16 @@ impl Stack {
             .ok_or_else(|| eyre!("generate-runner-token printed no token"))?
             .to_string();
 
-        let runner_dir = self.work_dir.join("runner");
+        // One directory per runner: `runner` for the stack's own, `runner-<name>`.
+        let role = container.strip_prefix(&format!("{}-", self.id));
+        let runner_dir = self.work_dir.join(role.unwrap_or(container));
         fs::create_dir_all(&runner_dir)?;
         let config_path = runner_dir.join("config.yml");
-        fs::write(&config_path, self.runner_config())?;
+        fs::write(&config_path, self.runner_config(label, capacity))?;
         let token_path = runner_dir.join("registration-token");
         write_private(&token_path, &token)?;
 
-        let mut args: Vec<String> = vec![
-            "create".into(),
-            "--name".into(),
-            self.runner_container.clone(),
-        ];
+        let mut args: Vec<String> = vec!["create".into(), "--name".into(), container.to_string()];
         args.extend(self.labels("runner"));
         args.extend([
             "--network".into(),
@@ -352,8 +369,8 @@ impl Stack {
                 args.extend(["--user".into(), "0:0".into()]);
                 for env in [
                     format!("FJEX_INSTANCE={}", self.base_url),
-                    format!("FJEX_RUNNER_NAME={}", self.runner_container),
-                    format!("FJEX_RUNNER_LABELS={}", self.runner_label()),
+                    format!("FJEX_RUNNER_NAME={container}"),
+                    format!("FJEX_RUNNER_LABELS={}", runner_label(label)),
                 ] {
                     args.extend(["-e".into(), env]);
                 }
@@ -378,8 +395,8 @@ impl Stack {
                 for env in [
                     format!("GITEA_INSTANCE_URL={}", self.base_url),
                     "GITEA_RUNNER_REGISTRATION_TOKEN_FILE=/data/registration-token".to_string(),
-                    format!("GITEA_RUNNER_NAME={}", self.runner_container),
-                    format!("GITEA_RUNNER_LABELS={}", self.runner_label()),
+                    format!("GITEA_RUNNER_NAME={container}"),
+                    format!("GITEA_RUNNER_LABELS={}", runner_label(label)),
                     "GITEA_MAX_REG_ATTEMPTS=10".to_string(),
                     "CONFIG_FILE=/data/config.yml".to_string(),
                 ] {
@@ -393,14 +410,14 @@ impl Stack {
 
         // Files go in with `docker cp` rather than a bind mount, so nothing the
         // container writes as root ends up in the host work dir.
-        let config_dest = format!("{}:/data/config.yml", self.runner_container);
+        let config_dest = format!("{container}:/data/config.yml");
         docker::run(&["cp", &config_path.to_string_lossy(), &config_dest])?;
-        let token_dest = format!("{}:/data/registration-token", self.runner_container);
+        let token_dest = format!("{container}:/data/registration-token");
         docker::run_quiet(&["cp", &token_path.to_string_lossy(), &token_dest])?;
         let _ = fs::remove_file(&token_path);
-        docker::run(&["start", &self.runner_container])?;
+        docker::run(&["start", container])?;
 
-        let runner = self.runner_container.clone();
+        let runner = container.to_string();
         util::poll(
             "the runner to register",
             RUNNER_READY_TIMEOUT,
@@ -429,10 +446,9 @@ impl Stack {
         .map_err(|e| {
             e.wrap_err(format!(
                 "runner logs:\n{}",
-                util::tail(&docker::logs(&self.runner_container, None), 40)
+                util::tail(&docker::logs(container, None), 40)
             ))
         })?;
-        self.log("runner registered");
         Ok(())
     }
 
@@ -570,6 +586,11 @@ impl Drop for Stack {
             );
         }
     }
+}
+
+/// Runner label that runs `runs-on: <label>` jobs in the job image.
+fn runner_label(label: &str) -> String {
+    format!("{label}:docker://{JOB_IMAGE}")
 }
 
 /// Whether `path` is a work directory the harness created for stack `id`:

@@ -187,6 +187,7 @@ REST API coverage verified against the servers' `/swagger.v1.json` and live inst
 | `rerun`, `rerun --job-index` | – | – | yes | – | yes | yes |
 | `rerun --failed-only` | – | – | yes (per job) | – | yes | yes |
 | `workflows` | – | – | – | yes | yes | yes |
+| `prioritize`, `deprioritize` | – | UI only | UI only | – | – | – |
 | `smoke-test` | UI only | UI only | UI only | UI only | UI only | UI only |
 
 When an operation has no endpoint on the server, the command fails with an explanation and asks
@@ -401,6 +402,27 @@ fj-ex actions cancel --repo owner/name --run-index 50
 fj-ex actions rerun  --repo owner/name --run-index 50 --dry-run
 fj-ex actions rerun  --repo owner/name --latest --failed-only
 ```
+
+---
+
+## actions prioritize / deprioritize
+
+Mark a run as prioritized, so that its queued jobs are handed to runners before those of other
+runs in the repository, or remove the mark again. This is the "Options → Prioritize run / Do not
+prioritize run" menu of the run list, which Forgejo has since version 16. It is a web UI route
+with no REST endpoint, so it needs a UI login; with only an API token (or `--backend api`) the
+commands fail and say so. Gitea and Forgejo 15 have no run prioritization.
+
+```sh
+fj-ex actions prioritize   --repo owner/name --run-index 50 --dry-run
+fj-ex actions prioritize   --repo owner/name --run-index 50
+fj-ex actions deprioritize --repo owner/name --run-index 50
+```
+
+Both take the same options as `cancel` (`--run-index` or `--latest [--workflow]`, `--dry-run`,
+`--json`). A run that is already done (success, failure, canceled, skipped) is refused, as in the
+web UI; repeating a command on a run that already has the wanted state succeeds and changes
+nothing.
 
 ---
 

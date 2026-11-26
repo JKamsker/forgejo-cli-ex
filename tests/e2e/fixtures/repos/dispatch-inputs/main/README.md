@@ -8,3 +8,6 @@ fj-ex E2E demo repository.
   and fails when `outcome=failure`.
 - `waiting.yml`: a job with `runs-on: fjex-no-such-runner`, so it stays queued
   and shows up in `fj-ex actions runners jobs --waiting`.
+- `priority.yml`: a job with `runs-on: fjex-priority`. The prioritize scenario
+  queues several runs of it and then starts the only runner with that label,
+  to see in which order they are picked.

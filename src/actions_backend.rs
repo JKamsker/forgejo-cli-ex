@@ -296,6 +296,75 @@ impl ActionsClient {
         }
     }
 
+    /// Web route that marks a run as prioritized, or removes the mark. Forgejo
+    /// 16+ only, and there is no REST endpoint for it on any server.
+    pub fn priority_url(
+        &self,
+        repo: &str,
+        run_index: i64,
+        prioritize: bool,
+    ) -> eyre::Result<String> {
+        match self {
+            Self::Ui(_) => Ok(format!(
+                "{}/{}",
+                self.run_url(repo, run_index),
+                if prioritize {
+                    "prioritize"
+                } else {
+                    "deprioritize"
+                }
+            )),
+            Self::Api(api) => Err(api.unsupported(crate::api_actions::ApiOp::Prioritize, None)),
+        }
+    }
+
+    /// Prioritize or deprioritize a run. Returns the request URL.
+    pub async fn set_priority(
+        &self,
+        repo: &str,
+        run_index: i64,
+        prioritize: bool,
+    ) -> eyre::Result<String> {
+        let url = self.priority_url(repo, run_index, prioritize)?;
+        let Self::Ui(s) = self else {
+            unreachable!("priority_url fails for the API backend")
+        };
+        let verb = if prioritize {
+            "prioritize"
+        } else {
+            "deprioritize"
+        };
+        // The server accepts the request for any existing run, but the mark
+        // only affects runs that are still queued; the web UI disables both
+        // buttons once a run is done.
+        let run = crate::ui_actions::find_run(s, repo, run_index)
+            .await?
+            .ok_or_else(|| eyre!("Run #{run_index} was not found in {repo}."))?;
+        if run.status.as_deref().is_some_and(run_is_done) {
+            return Err(eyre!(
+                "Cannot {verb} run #{run_index}: it is already done (status: {}).",
+                crate::output::sanitize_line(run.status.as_deref().unwrap_or("unknown"))
+            ));
+        }
+        let resp = s
+            .post_json_response(&url, &serde_json::json!({}), true)
+            .await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(eyre!(
+                "Failed to {verb} run '{run_index}' via '{url}': HTTP 404. \
+                 This server has no run prioritization (it was added in Forgejo 16)."
+            ));
+        }
+        // The server answers with a redirect to the run list.
+        let list_url = format!("{}/{}/actions", s.base_url(), repo.trim_matches('/'));
+        if let Some(problem) = ui_post_problem(resp.status(), resp.url(), &list_url) {
+            return Err(eyre!(
+                "Failed to {verb} run '{run_index}' via '{url}': {problem}."
+            ));
+        }
+        Ok(url)
+    }
+
     /// UI rerun URLs for the given job indexes (`None` = the whole run). Jobs
     /// are addressed by id on servers with id-based Actions URLs (Gitea 1.26+).
     async fn ui_rerun_urls(
@@ -508,10 +577,20 @@ fn unrerun_jobs(jobs: &[JobInfo], accepted: &[i64]) -> Vec<String> {
         .collect()
 }
 
+/// Whether a run-list status is one the server calls done. Blocked runs are
+/// still queued, so they can be prioritized.
+fn run_is_done(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "success" | "failure" | "canceled" | "cancelled" | "skipped"
+    )
+}
+
 /// Why a state-changing UI POST did not succeed, if it did not. Success is a
-/// 200 answered by the requested URL itself: a server that rejects the request
-/// (e.g. a failed CSRF check) redirects to another page, which the client
-/// follows to a 200 HTML page.
+/// 200 answered by the requested URL itself (or, for routes that answer with a
+/// redirect, by the page they redirect to; pass that as `request_url`): a
+/// server that rejects the request (e.g. a failed CSRF check) redirects to
+/// another page, which the client follows to a 200 HTML page.
 fn ui_post_problem(
     status: reqwest::StatusCode,
     final_url: &reqwest::Url,
@@ -599,6 +678,42 @@ mod tests {
             ui_post_problem(reqwest::StatusCode::FORBIDDEN, &at(url), url).as_deref(),
             Some("HTTP 403 Forbidden")
         );
+    }
+
+    #[test]
+    fn priority_posts_succeed_only_on_the_run_list_they_redirect_to() {
+        let list = "http://h/sub/o/r/actions";
+        let at = |u: &str| reqwest::Url::parse(u).unwrap();
+        // Forgejo redirects to the list with the filter values of the form.
+        assert_eq!(
+            ui_post_problem(
+                reqwest::StatusCode::OK,
+                &at("http://h/sub/o/r/actions?actor=0&page=0&status=0&workflow="),
+                list
+            ),
+            None
+        );
+        let problem = ui_post_problem(reqwest::StatusCode::OK, &at("http://h/sub/"), list).unwrap();
+        assert!(problem.contains("redirected to '/sub/'"), "{problem}");
+        assert_eq!(
+            ui_post_problem(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                &at("http://h/sub/o/r/actions/runs/7/prioritize"),
+                list
+            )
+            .as_deref(),
+            Some("HTTP 500 Internal Server Error")
+        );
+    }
+
+    #[test]
+    fn only_done_runs_are_refused_prioritization() {
+        for status in ["Success", "Failure", "Canceled", "cancelled", "Skipped"] {
+            assert!(run_is_done(status), "{status}");
+        }
+        for status in ["Waiting", "Blocked", "Running", "Cancelling"] {
+            assert!(!run_is_done(status), "{status}");
+        }
     }
 
     #[test]
